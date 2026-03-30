@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+data/*.duckdb
+data/*.duckdb-wal
+data/*.duckdb-shm
+logs/
+*.log
+data/*.duckdb.wal
+data/*.duckdb.shm

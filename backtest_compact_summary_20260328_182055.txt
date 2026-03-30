@@ -1,0 +1,64 @@
+Backtest Compact Summary
+Mode: Batch
+Status: completed
+Started (UTC): 2026-03-28 18:17:34
+Finished (UTC): 2026-03-28 18:20:55
+Duration (s): 201
+Runs: 4
+Profitable Runs: 1
+Negative Runs: 3
+Verdict Exclusions: 0 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 0
+Infinite PF Runs: 0
+Total PnL USD: -394.82
+Average Profit Factor (finite runs): 0.78
+Median Profit Factor (finite runs): 0.81
+Average Profit Factor ex Low-Sample (finite runs): 0.78
+
+Run Environment
+Requested History Start UTC: 2024-01-01 00:00:00
+History Loader Mode: latest_tail_window
+Required Warmup Candles: 500
+Required Candles: 500
+Min Confidence %: 48.00
+Fee Stress Side %: 0.0625
+Leverage Mode: configured=effective
+Optimization Mode: yes
+
+Run Details
+symbol | strategy | interval | leverage | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization
+BTCUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-21 20:30:00 -> 2026-03-28 18:00:00 | 100000 | 511 | 323 | 188 | 63.21 | 1.50 | 2.50 | 6.00 | 0.30 | 0.0625 | 500 | 48.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -161.88 | 0.85 | 35.24 | 315 | 7.98 | 6.01 | 8.16 | 1.56 | false | strong | yes
+  best_profile={"breakeven_activation_pct": 3.5, "chandelier_multiplier": 3.0, "chandelier_period": 14.0, "ema_fast_period": 8.0, "ema_slow_period": 21.0, "stop_loss_pct": 1.5, "take_profit_pct": 2.5, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.3, "volume_multiplier": 2.75}
+BTCUSDT | EMA Cross + Volume | 1h | 25x | 2022-04-17 16:00:00 -> 2026-03-28 17:00:00 | 34574 | 247 | 151 | 96 | 61.13 | 1.00 | 5.00 | 10.00 | 2.50 | 0.0625 | 500 | 48.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -123.20 | 0.77 | 33.77 | 151 | 5.61 | 6.02 | 8.30 | 1.52 | false | strong | yes
+  best_profile={"breakeven_activation_pct": 3.5, "chandelier_multiplier": 2.0, "chandelier_period": 22.0, "ema_fast_period": 8.0, "ema_slow_period": 34.0, "stop_loss_pct": 1.0, "take_profit_pct": 5.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 2.5, "volume_multiplier": 2.75}
+BTCUSDT | Bollinger Squezze | 15m | 25x | 2023-05-21 20:30:00 -> 2026-03-28 18:00:00 | 100000 | 140 | 87 | 53 | 62.14 | 1.50 | 2.50 | 14.50 | 2.10 | 0.0625 | 500 | 48.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -146.23 | 0.42 | 17.24 | 87 | 5.98 | 5.25 | 7.11 | 2.02 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 3.4, "bollinger_keltner_kc_mult": 3.1, "bollinger_keltner_length": 58.0, "bollinger_keltner_squeeze_lookback": 7.0, "bollinger_keltner_squeeze_threshold": 0.96, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "chandelier_multiplier": 2.5, "chandelier_period": 22.0, "stop_loss_pct": 1.5, "take_profit_pct": 2.5, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 14.5, "trailing_distance_pct": 2.1}
+BTCUSDT | Bollinger Squezze | 1h | 25x | 2022-04-17 16:00:00 -> 2026-03-28 17:00:00 | 34574 | 178 | 146 | 32 | 82.02 | 1.50 | 2.50 | 12.00 | 0.90 | 0.0625 | 500 | 48.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 36.49 | 1.06 | 32.17 | 143 | 3.51 | 9.46 | 13.45 | 2.24 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.0, "bollinger_keltner_kc_mult": 1.9, "bollinger_keltner_length": 102.0, "bollinger_keltner_squeeze_lookback": 1.0, "bollinger_keltner_squeeze_threshold": 1.0, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "chandelier_multiplier": 2.5, "chandelier_period": 14.0, "stop_loss_pct": 1.5, "take_profit_pct": 2.5, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 12.0, "trailing_distance_pct": 0.9}
+
+Strategy Aggregates (All Coins)
+strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals
+Bollinger Squezze | 2 | 1 | -109.74 | 230 | 0 | 0.74 | 0.74 | 24.70 | 72.08 | 72.08 | 4.74 | 159.00 | 116.50 | 42.50
+EMA Cross + Volume | 2 | 0 | -285.08 | 466 | 0 | 0.81 | 0.81 | 34.51 | 62.17 | 62.17 | 6.80 | 379.00 | 237.00 | 142.00
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     -394.82 USD
+Profit-Faktor:       0.78 (Ziel: >= 1.2)
+Trefferquote:        32.04% (HAUPTFOKUS)
+Win-Rate Minimum:    > 55.00%
+Anzahl Trades:       696 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   7.98% (Warnung ab 15%)
+Ø Gewinn pro Trade:  -0.0227% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 16 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    0.14% (Stichproben-Größe)
+Zufalls-Seed:        20260321
+--------------------------------------------------------------------------------
+URTEIL: WARNUNG
+GRUND: Durchschnittliche Trefferquote oder Profit-Faktor unterhalb der Robustheits-Grenze.
+================================================================================

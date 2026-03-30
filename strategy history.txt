@@ -1,0 +1,10 @@
+Strategy History (aktiver Stand)
+Erstellt: 2026-03-30 17:47:37 UTC
+
+Aktive Strategien im aktuellen System:
+- dual_thrust
+- ema_cross_volume
+- frama_cross
+
+Hinweis:
+Diese Datei zeigt nur den aktiven Laufzeit-Stand und keine historischen/archivierten Alt-Setups.

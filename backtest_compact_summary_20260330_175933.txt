@@ -1,0 +1,101 @@
+Backtest Compact Summary
+Mode: Batch
+Status: completed
+Started (UTC): 2026-03-30 17:57:09
+Finished (UTC): 2026-03-30 17:59:33
+Duration (s): 143
+Runs: 18
+Profitable Runs: 8
+Negative Runs: 10
+Verdict Exclusions: 2 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 8
+Infinite PF Runs: 0
+Total PnL USD: -49.82
+Average Profit Factor (finite runs): 0.98
+Median Profit Factor (finite runs): 0.88
+Average Profit Factor ex Low-Sample (finite runs): 0.89
+
+Run Environment
+Requested History Start UTC: 2026-01-01 00:00:00
+History Loader Mode: date_range_window
+Required Warmup Candles: 500
+Required Candles: 500
+Min Confidence %: 52.00
+Fee Stress Side %: 0.0625
+Leverage Mode: configured=effective
+Optimization Mode: no
+Optimizer Workers: n/a
+Sampling Mode: n/a
+Search Window Candles: n/a
+Full-History Optimization: n/a
+
+Run Details
+symbol | strategy | interval | leverage | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top
+BTCUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 49 | 33 | 16 | 67.35 | 1.50 | 3.50 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -15.02 | 0.87 | 33.33 | 33 | 2.52 | 6.36 | 9.01 | 1.74 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 10.0, "frama_slow_period": 40.0, "volume_multiplier": 2.25}
+ETHUSDT | Dual Thrust | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 25 | 22 | 3 | 88.00 | 8.00 | 5.00 | 6.00 | 2.00 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 47.92 | 1.82 | 50.00 | 20 | 1.10 | 7.59 | 10.66 | 1.82 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"dual_thrust_k1": 0.9, "dual_thrust_k2": 0.5, "dual_thrust_period": 55.0}
+SOLUSDT | Dual Thrust | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 104 | 84 | 20 | 80.77 | 8.00 | 5.00 | 6.00 | 0.15 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 270.95 | 2.03 | 45.90 | 61 | 2.56 | 12.79 | 19.10 | 2.39 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"dual_thrust_k1": 0.8, "dual_thrust_k2": 0.3, "dual_thrust_period": 55.0}
+XRPUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 53 | 30 | 23 | 56.60 | 1.50 | 2.00 | 3.00 | 1.00 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -41.54 | 0.69 | 30.00 | 30 | 2.25 | 7.24 | 10.05 | 1.60 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 16.0, "frama_slow_period": 180.0, "volume_multiplier": 1.75}
+ADAUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 31 | 18 | 13 | 58.06 | 2.00 | 2.00 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1.66 | 1.02 | 33.33 | 18 | 1.41 | 11.11 | 15.67 | 2.04 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 38.0, "frama_slow_period": 60.0, "volume_multiplier": 2.25}
+DOGEUSDT | EMA Cross + Volume | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 71 | 50 | 21 | 70.42 | 1.50 | 5.00 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -84.08 | 0.66 | 28.57 | 49 | 3.84 | 8.29 | 11.42 | 1.64 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"ema_fast_period": 8.0, "ema_slow_period": 55.0, "volume_multiplier": 2.25}
+1000PEPEUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 38 | 24 | 14 | 63.16 | 3.00 | 3.50 | 3.00 | 0.20 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -68.19 | 0.60 | 20.83 | 24 | 3.87 | 14.59 | 20.20 | 2.27 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 12.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}
+1000SHIBUSDT | EMA Cross + Volume | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8509 | 14 | 13 | 1 | 92.86 | 2.00 | 5.00 | 10.00 | 1.00 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 14.06 | 1.30 | 53.85 | 13 | 1.64 | 6.24 | 8.75 | 1.11 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"ema_fast_period": 11.0, "ema_slow_period": 390.0, "volume_multiplier": 2.75}
+BNBUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 30 | 15 | 15 | 50.00 | 2.00 | 3.50 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 0.94 | 1.01 | 33.33 | 15 | 1.83 | 11.80 | 16.57 | 2.02 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 38.0, "frama_slow_period": 60.0, "volume_multiplier": 1.75}
+AVAXUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 15 | 10 | 5 | 66.67 | 3.00 | 3.50 | 4.50 | 0.20 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 23.09 | 1.39 | 30.00 | 10 | 1.40 | 19.63 | 27.48 | 3.24 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 12.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}
+NEARUSDT | EMA Cross + Volume | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 81 | 58 | 23 | 71.60 | 1.50 | 2.50 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -151.01 | 0.59 | 28.07 | 57 | 6.60 | 9.91 | 13.40 | 1.50 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"ema_fast_period": 13.0, "ema_slow_period": 34.0, "volume_multiplier": 1.75}
+DOTUSDT | EMA Cross + Volume | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 31 | 27 | 4 | 87.10 | 1.50 | 3.50 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -108.82 | 0.44 | 11.11 | 27 | 6.39 | 20.53 | 28.41 | 3.51 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"ema_fast_period": 9.0, "ema_slow_period": 180.0, "volume_multiplier": 2.25}
+ARBUSDT | Dual Thrust | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8514 | 28 | 20 | 8 | 71.43 | 4.00 | 10.00 | 6.00 | 0.15 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -14.12 | 0.89 | 42.11 | 19 | 2.37 | 9.73 | 13.63 | 1.22 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.3, "dual_thrust_period": 233.0}
+SUIUSDT | Dual Thrust | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 84 | 72 | 12 | 85.71 | 8.00 | 5.00 | 6.00 | 1.00 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -69.05 | 0.79 | 24.56 | 57 | 5.90 | 13.09 | 18.16 | 2.42 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"dual_thrust_k1": 1.5, "dual_thrust_k2": 0.3, "dual_thrust_period": 55.0}
+LTCUSDT | EMA Cross + Volume | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 59 | 53 | 6 | 89.83 | 1.00 | 3.50 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -56.10 | 0.73 | 19.23 | 52 | 4.35 | 10.76 | 15.11 | 3.06 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"ema_fast_period": 5.0, "ema_slow_period": 180.0, "volume_multiplier": 2.25}
+BCHUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 49 | 28 | 21 | 57.14 | 1.50 | 5.00 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 3.04 | 1.03 | 25.00 | 28 | 1.85 | 10.18 | 14.35 | 3.09 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 28.0, "frama_slow_period": 90.0, "volume_multiplier": 1.75}
+LINKUSDT | FRAMA Cross | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8519 | 74 | 35 | 39 | 47.30 | 2.00 | 3.50 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 9.42 | 1.06 | 34.29 | 35 | 2.62 | 9.48 | 13.36 | 2.04 | false | medium | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"frama_fast_period": 20.0, "frama_slow_period": 40.0, "volume_multiplier": 1.75}
+TRXUSDT | Dual Thrust | 15m | 25x | 2026-01-01 00:00:00 -> 2026-03-30 17:30:00 | 8507 | 25 | 17 | 8 | 68.00 | 6.00 | 15.00 | 8.00 | 0.50 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -5.84 | 0.76 | 40.00 | 15 | 0.43 | 2.25 | 3.16 | 1.15 | true | weak | no | 0 | 0 | 0 | 0 | n/a | 0.00 | 0 | 0 | no | no | -
+  best_profile={"dual_thrust_k1": 0.1, "dual_thrust_k2": 1.2, "dual_thrust_period": 610.0}
+
+Strategy Aggregates (All Coins)
+strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals
+Dual Thrust | 5 | 2 | 229.85 | 172 | 3 | 0.89 | 1.41 | 40.51 | 78.78 | 80.77 | 2.47 | 53.20 | 43.00 | 10.20
+FRAMA Cross | 8 | 5 | -86.61 | 193 | 4 | 1.01 | 0.91 | 30.01 | 58.28 | 57.60 | 2.22 | 42.38 | 24.12 | 18.25
+EMA Cross + Volume | 5 | 1 | -385.95 | 198 | 1 | 0.66 | 0.60 | 28.17 | 82.36 | 87.10 | 4.56 | 51.20 | 40.20 | 11.00
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     -49.82 USD
+Profit-Faktor:       0.89 (Ziel: >= 1.2)
+Trefferquote:        32.24% (HAUPTFOKUS)
+Win-Rate Minimum:    > 55.00%
+Anzahl Trades:       487 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   6.60% (Warnung ab 15%)
+Ø Gewinn pro Trade:  -0.0041% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 9 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    0.00% (Stichproben-Größe)
+Evaluated Profiles:  0
+Validated Profiles:  0
+Force Full Scan:     0/0 run(s)
+Top Session Votes:   n/a
+Zufalls-Seed:        n/a
+--------------------------------------------------------------------------------
+URTEIL: WARNUNG
+GRUND: Durchschnittliche Trefferquote oder Profit-Faktor unterhalb der Robustheits-Grenze.
+================================================================================

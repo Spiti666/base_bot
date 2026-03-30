@@ -1,0 +1,79 @@
+Backtest Compact Summary
+Mode: Batch
+Status: completed
+Started (UTC): 2026-03-24 21:09:27
+Finished (UTC): 2026-03-25 03:18:55
+Duration (s): 22167
+Runs: 12
+Profitable Runs: 12
+Negative Runs: 0
+Verdict Exclusions: 2 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 0
+Infinite PF Runs: 0
+Total PnL USD: 8676.12
+Average Profit Factor (finite runs): 3.22
+Median Profit Factor (finite runs): 2.53
+Average Profit Factor ex Low-Sample (finite runs): 3.22
+
+Run Environment
+Requested History Start UTC: 2024-01-01 00:00:00
+History Loader Mode: latest_tail_window
+Required Warmup Candles: 500
+Required Candles: 500
+Min Confidence %: 60.00
+Fee Stress Side %: 0.0625
+Leverage Mode: configured=effective
+Optimization Mode: yes
+
+Run Details
+symbol | strategy | interval | leverage | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | profit_factor | win_rate_pct | trades | max_dd_pct | real_rrr | low_sample | sample_quality | optimization
+BTCUSDT | Bollinger Squezze | 15m | 25x | 2023-05-17 23:15:00 -> 2026-03-24 20:45:00 | 100000 | 90 | 67 | 23 | 74.44 | 5.00 | 15.00 | 10.00 | 1.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 256.03 | 1.31 | 12.96 | 54 | 7.80 | 8.82 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.8, "bollinger_keltner_kc_mult": 1.8, "bollinger_keltner_length": 80.0, "bollinger_keltner_squeeze_lookback": 8.0, "longest_consecutive_losses": 12.0, "max_drawdown_pct": 7.6634248897377715, "stop_loss_pct": 5.0, "take_profit_pct": 15.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 1.5}
+ETHUSDT | Bollinger Squezze | 15m | 25x | 2023-05-18 00:00:00 -> 2026-03-24 21:30:00 | 100000 | 116 | 80 | 36 | 68.97 | 3.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1127.49 | 3.46 | 15.49 | 71 | 5.04 | 18.89 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.8, "bollinger_keltner_kc_mult": 1.8, "bollinger_keltner_length": 80.0, "bollinger_keltner_squeeze_lookback": 5.0, "longest_consecutive_losses": 15.0, "max_drawdown_pct": 4.864941546001045, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+SOLUSDT | Bollinger Squezze | 15m | 25x | 2023-05-18 00:30:00 -> 2026-03-24 22:00:00 | 100000 | 102 | 80 | 22 | 78.43 | 4.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1451.33 | 3.56 | 18.06 | 72 | 6.24 | 16.16 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.8, "bollinger_keltner_kc_mult": 2.2, "bollinger_keltner_length": 100.0, "bollinger_keltner_squeeze_lookback": 5.0, "longest_consecutive_losses": 19.0, "max_drawdown_pct": 6.143190246004793, "stop_loss_pct": 4.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+XRPUSDT | Bollinger Squezze | 15m | 25x | 2023-05-18 01:00:00 -> 2026-03-24 22:30:00 | 100000 | 98 | 75 | 23 | 76.53 | 7.00 | 10.00 | 8.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1708.00 | 10.35 | 21.54 | 65 | 3.64 | 37.72 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.8, "bollinger_keltner_kc_mult": 1.8, "bollinger_keltner_length": 80.0, "bollinger_keltner_squeeze_lookback": 5.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 3.599943990948383, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 0.5}
+ADAUSDT | Bollinger Squezze | 15m | 25x | 2023-05-14 00:00:00 -> 2026-03-24 23:15:00 | 100000 | 158 | 96 | 62 | 60.76 | 7.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 490.90 | 1.76 | 11.25 | 80 | 7.55 | 13.91 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.8, "bollinger_keltner_kc_mult": 1.5, "bollinger_keltner_length": 40.0, "bollinger_keltner_squeeze_lookback": 12.0, "longest_consecutive_losses": 18.0, "max_drawdown_pct": 7.341996745059079, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+DOGEUSDT | Bollinger Squezze | 15m | 25x | 2023-05-17 20:30:00 -> 2026-03-24 23:30:00 | 100000 | 118 | 89 | 29 | 75.42 | 6.00 | 10.00 | 5.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 638.09 | 1.93 | 22.78 | 79 | 6.14 | 6.55 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.2, "bollinger_keltner_kc_mult": 1.5, "bollinger_keltner_length": 30.0, "bollinger_keltner_squeeze_lookback": 12.0, "longest_consecutive_losses": 9.0, "max_drawdown_pct": 6.08037018610601, "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 0.5}
+1000PEPEUSDT | Bollinger Squezze | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-25 00:00:00 | 78123 | 65 | 53 | 12 | 81.54 | 7.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 362.88 | 2.54 | 9.43 | 53 | 7.90 | 24.36 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.0, "bollinger_keltner_kc_mult": 2.2, "bollinger_keltner_length": 100.0, "bollinger_keltner_squeeze_lookback": 3.0, "longest_consecutive_losses": 28.0, "max_drawdown_pct": 7.576735263977051, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+1000SHIBUSDT | Bollinger Squezze | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-25 00:30:00 | 78127 | 68 | 58 | 10 | 85.29 | 4.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 620.14 | 1.97 | 14.04 | 57 | 6.31 | 12.09 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.8, "bollinger_keltner_kc_mult": 2.2, "bollinger_keltner_length": 100.0, "bollinger_keltner_squeeze_lookback": 12.0, "longest_consecutive_losses": 12.0, "max_drawdown_pct": 6.190065868148151, "stop_loss_pct": 4.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+BNBUSDT | Bollinger Squezze | 15m | 25x | 2023-05-18 03:15:00 -> 2026-03-25 00:45:00 | 100000 | 91 | 57 | 34 | 62.64 | 3.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 802.06 | 2.53 | 19.61 | 51 | 4.83 | 10.37 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.5, "bollinger_keltner_kc_mult": 1.8, "bollinger_keltner_length": 30.0, "bollinger_keltner_squeeze_lookback": 12.0, "longest_consecutive_losses": 9.0, "max_drawdown_pct": 4.723518018222707, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+AVAXUSDT | Bollinger Squezze | 15m | 25x | 2023-05-16 02:00:00 -> 2026-03-25 01:30:00 | 100000 | 83 | 56 | 27 | 67.47 | 4.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 605.48 | 2.60 | 14.55 | 55 | 8.62 | 15.26 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.5, "bollinger_keltner_kc_mult": 1.5, "bollinger_keltner_length": 20.0, "bollinger_keltner_squeeze_lookback": 12.0, "longest_consecutive_losses": 22.0, "max_drawdown_pct": 8.368360664469884, "stop_loss_pct": 4.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+NEARUSDT | Bollinger Squezze | 15m | 25x | 2023-07-25 08:45:00 -> 2026-03-25 02:00:00 | 93453 | 71 | 61 | 10 | 85.92 | 7.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1251.82 | 4.37 | 20.75 | 53 | 3.64 | 16.67 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.8, "bollinger_keltner_kc_mult": 2.0, "bollinger_keltner_length": 100.0, "bollinger_keltner_squeeze_lookback": 3.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 3.5999439909483955, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+DOTUSDT | Bollinger Squezze | 15m | 25x | 2023-05-18 04:15:00 -> 2026-03-25 02:30:00 | 100000 | 98 | 65 | 33 | 66.33 | 7.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 562.63 | 2.25 | 14.29 | 56 | 4.11 | 13.49 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.5, "bollinger_keltner_kc_mult": 1.5, "bollinger_keltner_length": 20.0, "bollinger_keltner_squeeze_lookback": 12.0, "longest_consecutive_losses": 16.0, "max_drawdown_pct": 3.912810694946349, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5}
+
+Strategy Aggregates (All Coins)
+strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals
+Bollinger Squezze | 12 | 12 | 9876.83 | 746 | 0 | 2.53 | 3.22 | 16.23 | 73.64 | 74.93 | 5.98 | 96.50 | 69.75 | 26.75
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     8676.12 USD
+Profit-Faktor:       3.22 (Ziel: > 1.2)
+Trefferquote:        15.71% (HAUPTFOKUS)
+Win-Rate Zielband:   28.00% - 30.00% | Status: AUSSERHALB ZIELBAND
+Anzahl Trades:       611 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   8.62% (Warnung ab 15%)
+Ø Gewinn pro Trade:  0.5680% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 28 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    100.00% (Stichproben-Größe)
+Zufalls-Seed:        20260321
+--------------------------------------------------------------------------------
+URTEIL: WARNUNG
+GRUND: Trefferquote außerhalb Zielkorridor 28-30%
+================================================================================

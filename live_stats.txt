@@ -1,0 +1,183 @@
+Live Stats Snapshot (aktiver Stand)
+Generated: 2026-03-30 17:47:37 UTC
+Total coins: 18
+
+[1000PEPEUSDT]
+strategy_name: frama_cross
+interval: 15m
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 30.0, "frama_fast_period": 12.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}
+risk:
+{}
+
+[1000SHIBUSDT]
+strategy_name: ema_cross_volume
+interval: 15m
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 14.0, "ema_fast_period": 11.0, "ema_slow_period": 390.0, "volume_multiplier": 2.75}
+risk:
+{}
+
+[ADAUSDT]
+strategy_name: frama_cross
+interval: 15m
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 40.0, "frama_fast_period": 38.0, "frama_slow_period": 60.0, "volume_multiplier": 2.25}
+risk:
+{}
+
+[ARBUSDT]
+strategy_name: dual_thrust
+interval: 15m
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 1.5, "chandelier_period": 30.0, "dual_thrust_k1": 0.2, "dual_thrust_k2": 0.3, "dual_thrust_period": 233.0}
+risk:
+{}
+
+[AVAXUSDT]
+strategy_name: frama_cross
+interval: 15m
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 40.0, "frama_fast_period": 12.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}
+risk:
+{}
+
+[BCHUSDT]
+strategy_name: frama_cross
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 3.5, "chandelier_period": 40.0, "frama_fast_period": 28.0, "frama_slow_period": 90.0, "volume_multiplier": 1.75}
+risk:
+{}
+
+[BNBUSDT]
+strategy_name: frama_cross
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 14.0, "frama_fast_period": 38.0, "frama_slow_period": 60.0, "volume_multiplier": 1.75}
+risk:
+{}
+
+[BTCUSDT]
+strategy_name: frama_cross
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.0, "chandelier_period": 14.0, "frama_fast_period": 10.0, "frama_slow_period": 40.0, "volume_multiplier": 2.25}
+risk:
+{}
+
+[DOGEUSDT]
+strategy_name: ema_cross_volume
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 22.0, "ema_fast_period": 8.0, "ema_slow_period": 55.0, "volume_multiplier": 2.25}
+risk:
+{}
+
+[DOTUSDT]
+strategy_name: ema_cross_volume
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 22.0, "ema_fast_period": 9.0, "ema_slow_period": 180.0, "volume_multiplier": 2.25}
+risk:
+{}
+
+[ETHUSDT]
+strategy_name: dual_thrust
+interval: 5m
+leverage: 
+min_confidence: 
+strategy_params:
+{"dual_thrust_k1": 0.9, "dual_thrust_k2": 0.5, "dual_thrust_period": 55.0}
+risk:
+{}
+
+[LINKUSDT]
+strategy_name: frama_cross
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.5, "chandelier_period": 40.0, "frama_fast_period": 20.0, "frama_slow_period": 40.0, "volume_multiplier": 1.75}
+risk:
+{}
+
+[LTCUSDT]
+strategy_name: ema_cross_volume
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 3.5, "chandelier_period": 14.0, "ema_fast_period": 5.0, "ema_slow_period": 180.0, "volume_multiplier": 2.25}
+risk:
+{}
+
+[NEARUSDT]
+strategy_name: ema_cross_volume
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 3.0, "chandelier_period": 14.0, "ema_fast_period": 13.0, "ema_slow_period": 34.0, "volume_multiplier": 1.75}
+risk:
+{}
+
+[SOLUSDT]
+strategy_name: dual_thrust
+interval: 15m
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 3.5, "chandelier_period": 30.0, "dual_thrust_k1": 0.8, "dual_thrust_k2": 0.3, "dual_thrust_period": 55.0}
+risk:
+{}
+
+[SUIUSDT]
+strategy_name: dual_thrust
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 3.0, "chandelier_period": 22.0, "dual_thrust_k1": 1.5, "dual_thrust_k2": 0.3, "dual_thrust_period": 55.0}
+risk:
+{}
+
+[TRXUSDT]
+strategy_name: dual_thrust
+interval: 15m
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 3.0, "chandelier_period": 14.0, "dual_thrust_k1": 0.1, "dual_thrust_k2": 1.2, "dual_thrust_period": 610.0}
+risk:
+{}
+
+[XRPUSDT]
+strategy_name: frama_cross
+interval: 1h
+leverage: 
+min_confidence: 
+strategy_params:
+{"chandelier_multiplier": 2.0, "chandelier_period": 40.0, "frama_fast_period": 16.0, "frama_slow_period": 180.0, "volume_multiplier": 1.75}
+risk:
+{}

@@ -1,0 +1,85 @@
+LIVE BOT CONFIG EXPORT
+Generated: 2026-03-22 19:11:24 UTC
+Active Symbols: 12
+
+[BTCUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 3.0000% | TP: 6.0000% | TrailOn: 5.0000% | TrailDist: 0.1500%
+  Strategy Params: dual_thrust_period=21.0, dual_thrust_k1=0.6, dual_thrust_k2=0.6
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[ETHUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 5.0000% | TP: 4.0000% | TrailOn: 4.0000% | TrailDist: 0.1500%
+  Strategy Params: dual_thrust_period=34.0, dual_thrust_k1=0.6, dual_thrust_k2=0.6
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[SOLUSDT] Strategy: frama_cross
+  Interval: 15m | Leverage: 25x | SL: 3.0000% | TP: 1.5000% | TrailOn: 1.0000% | TrailDist: 0.1500%
+  Strategy Params: frama_fast_period=6.0, frama_slow_period=40.0
+  Default Mapping: strategy=frama_cross
+  Integrity: OK
+
+[XRPUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 6.0000% | TP: 10.0000% | TrailOn: 8.0000% | TrailDist: 1.0000%
+  Strategy Params: dual_thrust_period=144.0, dual_thrust_k1=0.6, dual_thrust_k2=0.4
+  Profile Extras (DEFAULT_COIN_PROFILE_VALUES): dual_thrust_k1=0.6, dual_thrust_k2=0.4, dual_thrust_period=144.0
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[ADAUSDT] Strategy: frama_cross
+  Interval: 15m | Leverage: 25x | SL: 3.0000% | TP: 1.5000% | TrailOn: 1.0000% | TrailDist: 0.1500%
+  Strategy Params: frama_fast_period=9.0, frama_slow_period=40.0
+  Default Mapping: strategy=frama_cross
+  Integrity: OK
+
+[DOGEUSDT] Strategy: dual_thrust
+  Interval: 1h | Leverage: 25x | SL: 10.0000% | TP: 20.0000% | TrailOn: 6.0000% | TrailDist: 1.0000%
+  Strategy Params: dual_thrust_period=144.0, dual_thrust_k1=0.7, dual_thrust_k2=0.5
+  Profile Extras (DEFAULT_COIN_PROFILE_VALUES): dual_thrust_k1=0.7, dual_thrust_k2=0.5, dual_thrust_period=144.0
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[1000PEPEUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 6.0000% | TP: 15.0000% | TrailOn: 6.0000% | TrailDist: 2.0000%
+  Strategy Params: dual_thrust_period=89.0, dual_thrust_k1=0.6, dual_thrust_k2=0.6
+  Profile Extras (DEFAULT_COIN_PROFILE_VALUES): dual_thrust_k1=0.6, dual_thrust_k2=0.6, dual_thrust_period=89.0
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[1000SHIBUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 6.0000% | TP: 15.0000% | TrailOn: 6.0000% | TrailDist: 2.0000%
+  Strategy Params: dual_thrust_period=89.0, dual_thrust_k1=0.6, dual_thrust_k2=0.4
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[BNBUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 10.0000% | TP: 30.0000% | TrailOn: 8.0000% | TrailDist: 1.0000%
+  Strategy Params: dual_thrust_period=89.0, dual_thrust_k1=0.6, dual_thrust_k2=0.7
+  Profile Extras (DEFAULT_COIN_PROFILE_VALUES): dual_thrust_k1=0.6, dual_thrust_k2=0.7, dual_thrust_period=89.0
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[AVAXUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 4.0000% | TP: 15.0000% | TrailOn: 15.0000% | TrailDist: 1.0000%
+  Strategy Params: dual_thrust_period=144.0, dual_thrust_k1=0.4, dual_thrust_k2=0.6
+  Profile Extras (DEFAULT_COIN_PROFILE_VALUES): dual_thrust_k1=0.4, dual_thrust_k2=0.6, dual_thrust_period=144.0
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[NEARUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 10.0000% | TP: 15.0000% | TrailOn: 8.0000% | TrailDist: 4.0000%
+  Strategy Params: dual_thrust_period=89.0, dual_thrust_k1=0.6, dual_thrust_k2=0.6
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+[DOTUSDT] Strategy: dual_thrust
+  Interval: 15m | Leverage: 25x | SL: 3.0000% | TP: 5.0000% | TrailOn: 3.0000% | TrailDist: 0.5000%
+  Strategy Params: dual_thrust_period=55.0, dual_thrust_k1=0.6, dual_thrust_k2=0.6
+  Default Mapping: strategy=dual_thrust
+  Integrity: OK
+
+SUMMARY
+  Symbols checked: 12
+  Integrity OK: 12
+  Integrity issues: 0

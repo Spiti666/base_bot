@@ -1,0 +1,154 @@
+Backtest Compact Summary
+Mode: Batch
+Status: completed
+Started (UTC): 2026-03-23 21:20:14
+Finished (UTC): 2026-03-24 18:28:35
+Duration (s): 76100
+Runs: 48
+Profitable Runs: 43
+Negative Runs: 5
+Verdict Exclusions: 8 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 0
+Infinite PF Runs: 0
+Total PnL USD: 29507.65
+Average Profit Factor (finite runs): 2.41
+Median Profit Factor (finite runs): 2.06
+Average Profit Factor ex Low-Sample (finite runs): 2.41
+
+Run Environment
+Requested History Start UTC: 2024-01-01 00:00:00
+History Loader Mode: latest_tail_window
+Required Warmup Candles: 500
+Required Candles: mixed(1001, 500, 501, 601, 612, 801)
+Min Confidence %: 60.00
+Fee Stress Side %: 0.0625
+Leverage Mode: configured=effective
+Optimization Mode: yes
+
+Run Details
+symbol | strategy | interval | leverage | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | profit_factor | win_rate_pct | trades | max_dd_pct | real_rrr | low_sample | sample_quality | optimization
+BTCUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-16 23:30:00 -> 2026-03-23 21:00:00 | 100000 | 71 | 66 | 5 | 92.96 | 7.00 | 25.00 | 6.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 568.65 | 3.40 | 19.61 | 51 | 3.85 | 13.96 | false | medium | yes
+  best_profile={"ema_fast_period": 21.0, "ema_slow_period": 600.0, "longest_consecutive_losses": 9.0, "max_drawdown_pct": 3.744429660126299, "stop_loss_pct": 7.0, "take_profit_pct": 25.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.2, "volume_multiplier": 3.5}
+BTCUSDT | FRAMA Cross | 15m | 25x | 2023-05-16 23:45:00 -> 2026-03-23 21:15:00 | 100000 | 129 | 94 | 35 | 72.87 | 5.00 | 15.00 | 10.00 | 2.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1051.07 | 2.34 | 15.07 | 73 | 5.84 | 13.20 | false | medium | yes
+  best_profile={"frama_fast_period": 20.0, "frama_slow_period": 200.0, "longest_consecutive_losses": 24.0, "max_drawdown_pct": 5.635984681237342, "stop_loss_pct": 5.0, "take_profit_pct": 15.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 2.0, "volume_multiplier": 4.0}
+BTCUSDT | Dual Thrust | 15m | 25x | 2023-05-16 23:45:00 -> 2026-03-23 21:15:00 | 100000 | 68 | 65 | 3 | 95.59 | 8.00 | 15.00 | 10.00 | 1.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 603.10 | 4.42 | 15.09 | 53 | 4.33 | 24.89 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.6, "dual_thrust_period": 144.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 4.199181494808416, "stop_loss_pct": 8.0, "take_profit_pct": 15.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 1.0}
+BTCUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-17 00:45:00 -> 2026-03-23 22:15:00 | 100000 | 7209 | 623 | 6586 | 8.64 | 3.00 | 10.00 | 6.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180601 | 14780 | 17410 | 635.53 | 1.15 | 18.97 | 290 | 11.07 | 4.90 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 17.0, "max_drawdown_pct": 10.889200434794981, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.2}
+ETHUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-17 01:15:00 -> 2026-03-23 22:45:00 | 100000 | 64 | 61 | 3 | 95.31 | 3.00 | 5.00 | 10.00 | 1.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 597.43 | 2.24 | 26.32 | 57 | 5.60 | 6.27 | false | medium | yes
+  best_profile={"ema_fast_period": 55.0, "ema_slow_period": 500.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 5.437226188741826, "stop_loss_pct": 3.0, "take_profit_pct": 5.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 1.0, "volume_multiplier": 3.0}
+ETHUSDT | FRAMA Cross | 15m | 25x | 2023-05-17 01:45:00 -> 2026-03-23 23:15:00 | 100000 | 168 | 129 | 39 | 76.79 | 7.00 | 5.00 | 6.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1435.16 | 2.00 | 25.00 | 120 | 8.58 | 5.99 | false | strong | yes
+  best_profile={"frama_fast_period": 20.0, "frama_slow_period": 150.0, "longest_consecutive_losses": 17.0, "max_drawdown_pct": 8.37916905229122, "stop_loss_pct": 7.0, "take_profit_pct": 5.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+ETHUSDT | Dual Thrust | 15m | 25x | 2023-05-17 01:45:00 -> 2026-03-23 23:15:00 | 100000 | 141 | 128 | 13 | 90.78 | 8.00 | 25.00 | 8.00 | 5.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1356.57 | 5.54 | 10.23 | 88 | 4.56 | 48.59 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.2, "dual_thrust_k2": 1.6, "dual_thrust_period": 377.0, "longest_consecutive_losses": 15.0, "max_drawdown_pct": 4.383454189306831, "stop_loss_pct": 8.0, "take_profit_pct": 25.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 5.0}
+ETHUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-17 02:30:00 -> 2026-03-24 00:00:00 | 100000 | 7227 | 638 | 6589 | 8.83 | 3.00 | 10.00 | 6.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180558 | 14732 | 17595 | -745.62 | 0.79 | 13.03 | 353 | 38.19 | 5.26 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 37.0, "max_drawdown_pct": 36.021747410149665, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.2}
+SOLUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-17 03:15:00 -> 2026-03-24 00:45:00 | 100000 | 58 | 55 | 3 | 94.83 | 7.00 | 15.00 | 6.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 680.28 | 5.22 | 18.87 | 53 | 3.67 | 22.46 | false | medium | yes
+  best_profile={"ema_fast_period": 21.0, "ema_slow_period": 800.0, "longest_consecutive_losses": 12.0, "max_drawdown_pct": 3.624080154965639, "stop_loss_pct": 7.0, "take_profit_pct": 15.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.5, "volume_multiplier": 3.0}
+SOLUSDT | FRAMA Cross | 15m | 25x | 2023-05-17 03:30:00 -> 2026-03-24 01:00:00 | 100000 | 143 | 97 | 46 | 67.83 | 3.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1068.60 | 1.99 | 14.44 | 90 | 9.32 | 11.76 | false | medium | yes
+  best_profile={"frama_fast_period": 6.0, "frama_slow_period": 40.0, "longest_consecutive_losses": 27.0, "max_drawdown_pct": 9.150255701611572, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+SOLUSDT | Dual Thrust | 15m | 25x | 2023-05-17 03:30:00 -> 2026-03-24 01:00:00 | 100000 | 73 | 68 | 5 | 93.15 | 4.00 | 10.00 | 15.00 | 0.30 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1118.52 | 3.56 | 12.50 | 64 | 4.23 | 24.93 | false | medium | yes
+  best_profile={"dual_thrust_k1": 1.2, "dual_thrust_k2": 1.4, "dual_thrust_period": 21.0, "longest_consecutive_losses": 25.0, "max_drawdown_pct": 4.153928997760886, "stop_loss_pct": 4.0, "take_profit_pct": 10.0, "trailing_activation_pct": 15.0, "trailing_distance_pct": 0.3}
+SOLUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-17 04:30:00 -> 2026-03-24 02:00:00 | 100000 | 7286 | 611 | 6675 | 8.39 | 7.00 | 10.00 | 6.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180533 | 14751 | 17675 | 100.19 | 1.02 | 17.45 | 384 | 34.60 | 4.81 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 19.0, "max_drawdown_pct": 33.22693334835198, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.2}
+XRPUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-17 05:00:00 -> 2026-03-24 02:30:00 | 100000 | 70 | 66 | 4 | 94.29 | 3.00 | 25.00 | 3.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 884.59 | 3.59 | 34.48 | 58 | 1.90 | 6.81 | false | medium | yes
+  best_profile={"ema_fast_period": 55.0, "ema_slow_period": 800.0, "longest_consecutive_losses": 9.0, "max_drawdown_pct": 1.7601292150000023, "stop_loss_pct": 3.0, "take_profit_pct": 25.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.2, "volume_multiplier": 2.0}
+XRPUSDT | FRAMA Cross | 15m | 25x | 2023-05-17 05:15:00 -> 2026-03-24 02:45:00 | 100000 | 172 | 132 | 40 | 76.74 | 3.00 | 5.00 | 3.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1286.04 | 2.07 | 28.23 | 124 | 7.85 | 5.27 | false | strong | yes
+  best_profile={"frama_fast_period": 6.0, "frama_slow_period": 150.0, "longest_consecutive_losses": 13.0, "max_drawdown_pct": 7.699005778512771, "stop_loss_pct": 3.0, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+XRPUSDT | Dual Thrust | 15m | 25x | 2023-05-17 05:30:00 -> 2026-03-24 03:00:00 | 100000 | 57 | 54 | 3 | 94.74 | 8.00 | 10.00 | 8.00 | 1.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 594.65 | 2.06 | 15.09 | 53 | 8.31 | 11.57 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.3, "dual_thrust_period": 377.0, "longest_consecutive_losses": 12.0, "max_drawdown_pct": 8.16968171755099, "stop_loss_pct": 8.0, "take_profit_pct": 10.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 1.0}
+XRPUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-17 06:15:00 -> 2026-03-24 03:45:00 | 100000 | 7414 | 628 | 6786 | 8.47 | 3.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180490 | 14911 | 17524 | 756.65 | 1.18 | 9.68 | 372 | 34.94 | 11.02 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 59.0, "max_drawdown_pct": 33.50702101030226, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2}
+ADAUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-13 05:15:00 -> 2026-03-24 04:30:00 | 100000 | 63 | 53 | 10 | 84.13 | 7.00 | 5.00 | 3.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 823.77 | 3.31 | 38.00 | 50 | 3.67 | 5.40 | false | medium | yes
+  best_profile={"ema_fast_period": 15.0, "ema_slow_period": 50.0, "longest_consecutive_losses": 6.0, "max_drawdown_pct": 3.620606880623244, "stop_loss_pct": 7.0, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.5, "volume_multiplier": 5.0}
+ADAUSDT | FRAMA Cross | 15m | 25x | 2023-05-13 05:30:00 -> 2026-03-24 04:45:00 | 100000 | 134 | 101 | 33 | 75.37 | 3.00 | 5.00 | 3.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 766.40 | 1.82 | 24.24 | 99 | 6.32 | 5.69 | false | medium | yes
+  best_profile={"frama_fast_period": 12.0, "frama_slow_period": 80.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 6.198089377321941, "stop_loss_pct": 3.0, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+ADAUSDT | Dual Thrust | 15m | 25x | 2023-05-13 05:30:00 -> 2026-03-24 04:45:00 | 100000 | 162 | 150 | 12 | 92.59 | 2.00 | 15.00 | 6.00 | 0.15 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 941.79 | 1.74 | 12.03 | 133 | 10.64 | 12.69 | false | strong | yes
+  best_profile={"dual_thrust_k1": 1.2, "dual_thrust_k2": 0.5, "dual_thrust_period": 55.0, "longest_consecutive_losses": 19.0, "max_drawdown_pct": 10.2473496232057, "stop_loss_pct": 2.0, "take_profit_pct": 15.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.15}
+ADAUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-13 06:15:00 -> 2026-03-24 05:30:00 | 100000 | 7390 | 599 | 6791 | 8.11 | 3.00 | 10.00 | 6.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180485 | 14859 | 17628 | -300.75 | 0.94 | 14.87 | 417 | 20.72 | 5.36 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 25.0, "max_drawdown_pct": 20.375546476230248, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.2}
+DOGEUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-17 03:15:00 -> 2026-03-24 06:15:00 | 100000 | 67 | 66 | 1 | 98.51 | 7.00 | 10.00 | 10.00 | 2.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1093.69 | 4.07 | 15.87 | 63 | 7.31 | 21.56 | false | medium | yes
+  best_profile={"ema_fast_period": 55.0, "ema_slow_period": 300.0, "longest_consecutive_losses": 19.0, "max_drawdown_pct": 7.179717782478838, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 2.0, "volume_multiplier": 3.0}
+DOGEUSDT | FRAMA Cross | 15m | 25x | 2023-05-17 03:45:00 -> 2026-03-24 06:45:00 | 100000 | 148 | 95 | 53 | 64.19 | 7.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 578.09 | 1.64 | 11.49 | 87 | 10.82 | 12.63 | false | medium | yes
+  best_profile={"frama_fast_period": 20.0, "frama_slow_period": 40.0, "longest_consecutive_losses": 18.0, "max_drawdown_pct": 10.617128537846853, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+DOGEUSDT | Dual Thrust | 15m | 25x | 2023-05-17 03:45:00 -> 2026-03-24 06:45:00 | 100000 | 65 | 55 | 10 | 84.62 | 8.00 | 25.00 | 8.00 | 0.15 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 422.57 | 1.66 | 17.31 | 52 | 11.78 | 7.94 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.4, "dual_thrust_k2": 0.2, "dual_thrust_period": 610.0, "longest_consecutive_losses": 13.0, "max_drawdown_pct": 11.564726220443067, "stop_loss_pct": 8.0, "take_profit_pct": 25.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 0.15}
+DOGEUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-17 04:30:00 -> 2026-03-24 07:30:00 | 100000 | 7374 | 644 | 6730 | 8.73 | 5.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180223 | 15177 | 17468 | -202.75 | 0.96 | 11.02 | 372 | 37.17 | 7.74 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 39.0, "max_drawdown_pct": 35.96198537218539, "stop_loss_pct": 5.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2}
+1000PEPEUSDT | EMA Cross + Volume | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 08:15:00 | 78060 | 91 | 81 | 10 | 89.01 | 7.00 | 25.00 | 6.00 | 2.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 759.59 | 2.27 | 21.33 | 75 | 5.39 | 8.38 | false | medium | yes
+  best_profile={"ema_fast_period": 50.0, "ema_slow_period": 1000.0, "longest_consecutive_losses": 9.0, "max_drawdown_pct": 5.2896123193728, "stop_loss_pct": 7.0, "take_profit_pct": 25.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 2.0, "volume_multiplier": 1.25}
+1000PEPEUSDT | FRAMA Cross | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 08:30:00 | 78061 | 288 | 180 | 108 | 62.50 | 3.00 | 5.00 | 3.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1408.24 | 1.77 | 23.30 | 176 | 9.24 | 5.83 | false | strong | yes
+  best_profile={"frama_fast_period": 12.0, "frama_slow_period": 200.0, "longest_consecutive_losses": 15.0, "max_drawdown_pct": 8.875583941315353, "stop_loss_pct": 3.0, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.2, "volume_multiplier": 2.5}
+1000PEPEUSDT | Dual Thrust | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 08:30:00 | 78061 | 58 | 57 | 1 | 98.28 | 6.00 | 5.00 | 6.00 | 2.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 802.14 | 2.87 | 7.14 | 56 | 6.55 | 37.32 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.4, "dual_thrust_k2": 0.5, "dual_thrust_period": 144.0, "longest_consecutive_losses": 28.0, "max_drawdown_pct": 6.35601700666885, "stop_loss_pct": 6.0, "take_profit_pct": 5.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 2.0}
+1000PEPEUSDT | RSI Extreme Cluster | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 09:00:00 | 78063 | 5801 | 487 | 5314 | 8.40 | 5.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 140703 | 11777 | 13838 | -1054.86 | 0.73 | 8.85 | 339 | 44.85 | 7.52 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 40.0, "max_drawdown_pct": 42.859336849577886, "stop_loss_pct": 5.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2}
+1000SHIBUSDT | EMA Cross + Volume | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 09:30:00 | 78067 | 60 | 54 | 6 | 90.00 | 7.00 | 5.00 | 6.00 | 1.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 496.50 | 3.15 | 21.57 | 51 | 3.81 | 11.46 | false | medium | yes
+  best_profile={"ema_fast_period": 30.0, "ema_slow_period": 1000.0, "longest_consecutive_losses": 8.0, "max_drawdown_pct": 3.716950137496549, "stop_loss_pct": 7.0, "take_profit_pct": 5.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 1.0, "volume_multiplier": 2.0}
+1000SHIBUSDT | FRAMA Cross | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 09:30:00 | 78067 | 121 | 92 | 29 | 76.03 | 7.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 999.56 | 2.23 | 13.10 | 84 | 17.20 | 14.79 | false | medium | yes
+  best_profile={"frama_fast_period": 6.0, "frama_slow_period": 40.0, "longest_consecutive_losses": 19.0, "max_drawdown_pct": 16.704039271567837, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+1000SHIBUSDT | Dual Thrust | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 09:45:00 | 78068 | 67 | 64 | 3 | 95.52 | 6.00 | 15.00 | 6.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 948.99 | 2.40 | 25.42 | 59 | 6.11 | 7.03 | false | medium | yes
+  best_profile={"dual_thrust_k1": 1.0, "dual_thrust_k2": 0.6, "dual_thrust_period": 55.0, "longest_consecutive_losses": 6.0, "max_drawdown_pct": 6.0568491697227484, "stop_loss_pct": 6.0, "take_profit_pct": 15.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.5}
+1000SHIBUSDT | RSI Extreme Cluster | 15m | 25x | 2024-01-01 00:00:00 -> 2026-03-24 10:15:00 | 78070 | 5798 | 459 | 5339 | 7.92 | 7.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 140657 | 11869 | 13763 | 377.08 | 1.09 | 12.55 | 263 | 25.30 | 7.58 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 42.0, "max_drawdown_pct": 24.333689859707373, "stop_loss_pct": 7.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2}
+BNBUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-17 13:00:00 -> 2026-03-24 10:30:00 | 100000 | 60 | 57 | 3 | 95.00 | 5.00 | 5.00 | 10.00 | 2.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1103.89 | 3.73 | 39.62 | 53 | 5.17 | 5.68 | false | medium | yes
+  best_profile={"ema_fast_period": 21.0, "ema_slow_period": 250.0, "longest_consecutive_losses": 5.0, "max_drawdown_pct": 5.108579778775667, "stop_loss_pct": 5.0, "take_profit_pct": 5.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 2.0, "volume_multiplier": 4.0}
+BNBUSDT | FRAMA Cross | 15m | 25x | 2023-05-17 13:30:00 -> 2026-03-24 11:00:00 | 100000 | 128 | 97 | 31 | 75.78 | 7.00 | 5.00 | 3.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 477.86 | 1.56 | 31.76 | 85 | 11.92 | 3.35 | false | medium | yes
+  best_profile={"frama_fast_period": 12.0, "frama_slow_period": 200.0, "longest_consecutive_losses": 7.0, "max_drawdown_pct": 11.66550198205751, "stop_loss_pct": 7.0, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+BNBUSDT | Dual Thrust | 15m | 25x | 2023-05-17 13:30:00 -> 2026-03-24 11:00:00 | 100000 | 64 | 63 | 1 | 98.44 | 2.00 | 25.00 | 15.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1049.35 | 3.09 | 13.79 | 58 | 5.60 | 19.30 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.3, "dual_thrust_period": 610.0, "longest_consecutive_losses": 13.0, "max_drawdown_pct": 5.3861122930923555, "stop_loss_pct": 2.0, "take_profit_pct": 25.0, "trailing_activation_pct": 15.0, "trailing_distance_pct": 0.5}
+BNBUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-17 14:15:00 -> 2026-03-24 11:45:00 | 100000 | 7402 | 639 | 6763 | 8.63 | 5.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 181027 | 14312 | 17679 | 1078.46 | 1.33 | 12.55 | 255 | 20.71 | 9.25 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 17.0, "max_drawdown_pct": 19.76257298163686, "stop_loss_pct": 5.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2}
+AVAXUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-15 13:00:00 -> 2026-03-24 12:30:00 | 100000 | 68 | 65 | 3 | 95.59 | 7.00 | 15.00 | 10.00 | 2.00 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 2020.12 | 7.20 | 23.44 | 64 | 7.32 | 23.52 | false | medium | yes
+  best_profile={"ema_fast_period": 25.0, "ema_slow_period": 250.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 7.186477315129508, "stop_loss_pct": 7.0, "take_profit_pct": 15.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 2.0, "volume_multiplier": 3.0}
+AVAXUSDT | FRAMA Cross | 15m | 25x | 2023-05-15 13:15:00 -> 2026-03-24 12:45:00 | 100000 | 89 | 60 | 29 | 67.42 | 3.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1375.12 | 2.83 | 22.03 | 59 | 12.10 | 10.03 | false | medium | yes
+  best_profile={"frama_fast_period": 20.0, "frama_slow_period": 200.0, "longest_consecutive_losses": 16.0, "max_drawdown_pct": 11.925424682068627, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+AVAXUSDT | Dual Thrust | 15m | 25x | 2023-05-15 13:30:00 -> 2026-03-24 13:00:00 | 100000 | 57 | 53 | 4 | 92.98 | 2.00 | 25.00 | 15.00 | 0.30 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 496.99 | 1.90 | 10.00 | 50 | 6.42 | 17.08 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.4, "dual_thrust_k2": 0.8, "dual_thrust_period": 144.0, "longest_consecutive_losses": 18.0, "max_drawdown_pct": 6.278646223402756, "stop_loss_pct": 2.0, "take_profit_pct": 25.0, "trailing_activation_pct": 15.0, "trailing_distance_pct": 0.3}
+AVAXUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-15 14:15:00 -> 2026-03-24 13:45:00 | 100000 | 7362 | 617 | 6745 | 8.38 | 3.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180247 | 15012 | 17862 | 603.07 | 1.10 | 10.97 | 383 | 22.66 | 8.94 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 37.0, "max_drawdown_pct": 22.048789388882785, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2}
+NEARUSDT | EMA Cross + Volume | 15m | 25x | 2023-07-25 08:45:00 -> 2026-03-24 14:30:00 | 93407 | 66 | 65 | 1 | 98.48 | 7.00 | 25.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1217.13 | 4.38 | 18.03 | 61 | 3.92 | 19.91 | false | medium | yes
+  best_profile={"ema_fast_period": 50.0, "ema_slow_period": 144.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 3.7890601677413254, "stop_loss_pct": 7.0, "take_profit_pct": 25.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2, "volume_multiplier": 3.0}
+NEARUSDT | FRAMA Cross | 15m | 25x | 2023-07-25 08:45:00 -> 2026-03-24 14:45:00 | 93408 | 110 | 71 | 39 | 64.55 | 3.00 | 5.00 | 3.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 261.21 | 1.47 | 26.76 | 71 | 6.58 | 4.03 | false | medium | yes
+  best_profile={"frama_fast_period": 6.0, "frama_slow_period": 40.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 6.407531869857452, "stop_loss_pct": 3.0, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+NEARUSDT | Dual Thrust | 15m | 25x | 2023-07-25 08:45:00 -> 2026-03-24 14:45:00 | 93408 | 63 | 52 | 11 | 82.54 | 4.00 | 10.00 | 8.00 | 0.30 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 654.83 | 2.13 | 16.00 | 50 | 6.28 | 11.16 | false | medium | yes
+  best_profile={"dual_thrust_k1": 1.4, "dual_thrust_k2": 0.6, "dual_thrust_period": 55.0, "longest_consecutive_losses": 12.0, "max_drawdown_pct": 6.168464785827445, "stop_loss_pct": 4.0, "take_profit_pct": 10.0, "trailing_activation_pct": 8.0, "trailing_distance_pct": 0.3}
+NEARUSDT | RSI Extreme Cluster | 15m | 25x | 2023-07-25 08:45:00 -> 2026-03-24 15:30:00 | 93411 | 6938 | 582 | 6356 | 8.39 | 5.00 | 10.00 | 10.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 168293 | 14175 | 16515 | 209.75 | 1.05 | 10.38 | 395 | 22.37 | 9.03 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 36.0, "max_drawdown_pct": 21.72795727580263, "stop_loss_pct": 5.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.2}
+DOTUSDT | EMA Cross + Volume | 15m | 25x | 2023-05-17 18:00:00 -> 2026-03-24 16:15:00 | 100000 | 61 | 60 | 1 | 98.36 | 3.00 | 10.00 | 10.00 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 1327.27 | 3.83 | 18.97 | 58 | 4.76 | 16.38 | false | medium | yes
+  best_profile={"ema_fast_period": 34.0, "ema_slow_period": 300.0, "longest_consecutive_losses": 10.0, "max_drawdown_pct": 4.674385684642666, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "trailing_activation_pct": 10.0, "trailing_distance_pct": 0.5, "volume_multiplier": 3.0}
+DOTUSDT | FRAMA Cross | 15m | 25x | 2023-05-17 18:15:00 -> 2026-03-24 16:30:00 | 100000 | 152 | 105 | 47 | 69.08 | 3.00 | 5.00 | 6.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 863.60 | 2.07 | 20.79 | 101 | 4.90 | 7.87 | false | strong | yes
+  best_profile={"frama_fast_period": 6.0, "frama_slow_period": 40.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 4.7696993713446405, "stop_loss_pct": 3.0, "take_profit_pct": 5.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.2, "volume_multiplier": 4.0}
+DOTUSDT | Dual Thrust | 15m | 25x | 2023-05-17 18:15:00 -> 2026-03-24 16:30:00 | 100000 | 111 | 95 | 16 | 85.59 | 4.00 | 5.00 | 6.00 | 0.30 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 656.85 | 1.65 | 19.51 | 82 | 10.10 | 6.79 | false | medium | yes
+  best_profile={"dual_thrust_k1": 0.4, "dual_thrust_k2": 0.2, "dual_thrust_period": 377.0, "longest_consecutive_losses": 11.0, "max_drawdown_pct": 9.97796317732645, "stop_loss_pct": 4.0, "take_profit_pct": 5.0, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.3}
+DOTUSDT | RSI Extreme Cluster | 15m | 25x | 2023-05-17 19:00:00 -> 2026-03-24 17:15:00 | 100000 | 7478 | 621 | 6857 | 8.30 | 7.00 | 5.00 | 3.00 | 0.20 | 0.0625 | 500 | 60.00 | 4 | 4 | 4.00 | 6.00 | 14 | 14 | 180534 | 14814 | 17722 | -168.29 | 0.97 | 34.77 | 394 | 24.00 | 1.81 | false | strong | yes
+  best_profile={"longest_consecutive_losses": 10.0, "max_drawdown_pct": 23.60343617534169, "stop_loss_pct": 7.0, "take_profit_pct": 5.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.2}
+
+Strategy Aggregates (All Coins)
+strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals
+EMA Cross + Volume | 12 | 12 | 11572.90 | 694 | 0 | 3.66 | 3.87 | 24.68 | 93.87 | 94.91 | 4.70 | 66.58 | 62.42 | 4.17
+FRAMA Cross | 12 | 12 | 11570.95 | 1169 | 0 | 1.99 | 1.98 | 21.35 | 70.76 | 70.97 | 9.22 | 148.50 | 104.42 | 44.08
+Dual Thrust | 12 | 12 | 9646.35 | 798 | 0 | 2.26 | 2.75 | 14.51 | 92.07 | 93.07 | 7.08 | 82.17 | 75.33 | 6.83
+RSI Extreme Cluster | 12 | 7 | 1288.47 | 4217 | 0 | 1.03 | 1.02 | 14.59 | 8.43 | 8.39 | 28.05 | 7056.58 | 595.67 | 6460.92
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     29507.65 USD
+Profit-Faktor:       2.41 (Ziel: > 1.2)
+Trefferquote:        15.96% (HAUPTFOKUS)
+Win-Rate Zielband:   28.00% - 30.00% | Status: AUSSERHALB ZIELBAND
+Anzahl Trades:       5669 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   44.85% (Warnung ab 15%)
+Ø Gewinn pro Trade:  0.2082% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 59 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    4.16% (Stichproben-Größe)
+Zufalls-Seed:        20260321
+--------------------------------------------------------------------------------
+URTEIL: REINFALL
+GRUND: Drawdown zu hoch
+================================================================================

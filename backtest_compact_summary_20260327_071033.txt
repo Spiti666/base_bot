@@ -1,0 +1,91 @@
+Backtest Compact Summary
+Mode: Batch
+Status: completed
+Started (UTC): 2026-03-26 21:01:51
+Finished (UTC): 2026-03-27 07:10:33
+Duration (s): 36522
+Runs: 18
+Profitable Runs: 15
+Negative Runs: 3
+Verdict Exclusions: 0 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 7
+Infinite PF Runs: 0
+Total PnL USD: 2875.47
+Average Profit Factor (finite runs): 56.07
+Median Profit Factor (finite runs): 100.00
+Average Profit Factor ex Low-Sample (finite runs): 28.12
+
+Run Environment
+Requested History Start UTC: 2024-01-01 00:00:00
+History Loader Mode: latest_tail_window
+Required Warmup Candles: 500
+Required Candles: 500
+Min Confidence %: 60.00
+Fee Stress Side %: 0.0625
+Leverage Mode: configured=effective
+Optimization Mode: yes
+
+Run Details
+symbol | strategy | interval | leverage | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization
+BTCUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 15:40:00 -> 2026-03-26 20:55:00 | 100000 | 29 | 26 | 3 | 89.66 | 9.70 | 12.00 | 1.50 | 0.50 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 157.59 | 100.00 | 100.00 | 21 | 0.00 | 5.18 | 7.50 | inf | true | weak | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.5, "bollinger_keltner_kc_mult": 2.15, "bollinger_keltner_length": 198.0, "bollinger_keltner_squeeze_lookback": 14.0, "bollinger_keltner_squeeze_threshold": 1.12, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 9.7, "take_profit_pct": 12.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 1.5, "trailing_distance_pct": 0.5}
+ETHUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 16:15:00 -> 2026-03-26 21:30:00 | 100000 | 23 | 21 | 2 | 91.30 | 9.70 | 1.00 | 5.00 | 2.10 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 98.64 | 100.00 | 100.00 | 20 | 0.00 | 3.44 | 4.93 | inf | true | weak | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.65, "bollinger_keltner_kc_mult": 3.9, "bollinger_keltner_length": 10.0, "bollinger_keltner_squeeze_lookback": 15.0, "bollinger_keltner_squeeze_threshold": 1.4, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 9.7, "take_profit_pct": 1.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 5.0, "trailing_distance_pct": 2.1}
+SOLUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 10:15:00 -> 2026-03-26 22:00:00 | 100000 | 125 | 104 | 21 | 83.20 | 1.10 | 2.00 | 12.00 | 1.70 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 56.25 | 1.13 | 45.83 | 96 | 1.43 | 7.86 | 11.28 | 1.33 | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.75, "bollinger_keltner_kc_mult": 3.05, "bollinger_keltner_length": 102.0, "bollinger_keltner_squeeze_lookback": 19.0, "bollinger_keltner_squeeze_threshold": 1.24, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 1.1, "take_profit_pct": 2.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 12.0, "trailing_distance_pct": 1.7}
+XRPUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 17:15:00 -> 2026-03-26 22:30:00 | 100000 | 44 | 25 | 19 | 56.82 | 7.10 | 11.00 | 1.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 114.14 | 100.00 | 100.00 | 23 | 0.00 | 3.46 | 4.96 | inf | true | weak | yes
+  best_profile={"bollinger_keltner_bb_mult": 3.15, "bollinger_keltner_kc_mult": 2.65, "bollinger_keltner_length": 68.0, "bollinger_keltner_squeeze_lookback": 18.0, "bollinger_keltner_squeeze_threshold": 1.14, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 7.1, "take_profit_pct": 11.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 1.0, "trailing_distance_pct": 0.2}
+ADAUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 13:45:00 -> 2026-03-26 23:00:00 | 100000 | 31 | 21 | 10 | 67.74 | 5.10 | 1.00 | 3.50 | 0.60 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 98.71 | 100.00 | 100.00 | 20 | 0.00 | 3.45 | 4.94 | inf | true | weak | yes
+  best_profile={"bollinger_keltner_bb_mult": 3.05, "bollinger_keltner_kc_mult": 2.15, "bollinger_keltner_length": 38.0, "bollinger_keltner_squeeze_lookback": 16.0, "bollinger_keltner_squeeze_threshold": 1.02, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 5.1, "take_profit_pct": 1.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 3.5, "trailing_distance_pct": 0.6}
+DOGEUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 16:40:00 -> 2026-03-26 23:30:00 | 100000 | 35 | 33 | 2 | 94.29 | 9.90 | 13.50 | 2.00 | 0.60 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 425.92 | 100.00 | 100.00 | 33 | 0.00 | 8.49 | 12.91 | inf | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.3, "bollinger_keltner_kc_mult": 3.5, "bollinger_keltner_length": 38.0, "bollinger_keltner_squeeze_lookback": 2.0, "bollinger_keltner_squeeze_threshold": 1.34, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 9.9, "take_profit_pct": 13.5, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.6}
+1000PEPEUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 14:40:00 -> 2026-03-26 23:55:00 | 100000 | 24 | 22 | 2 | 91.67 | 6.90 | 1.00 | 7.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 103.68 | 100.00 | 100.00 | 21 | 0.00 | 3.44 | 4.94 | inf | true | weak | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.65, "bollinger_keltner_kc_mult": 2.6, "bollinger_keltner_length": 146.0, "bollinger_keltner_squeeze_lookback": 14.0, "bollinger_keltner_squeeze_threshold": 1.26, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 6.9, "take_profit_pct": 1.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 7.0, "trailing_distance_pct": 0.2}
+1000SHIBUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 15:05:00 -> 2026-03-27 00:20:00 | 100000 | 333 | 196 | 137 | 58.86 | 2.50 | 13.50 | 2.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 248.76 | 1.29 | 65.96 | 141 | 2.77 | 8.01 | 11.79 | 0.67 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.9, "bollinger_keltner_kc_mult": 1.65, "bollinger_keltner_length": 14.0, "bollinger_keltner_squeeze_lookback": 10.0, "bollinger_keltner_squeeze_threshold": 1.1, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 2.5, "take_profit_pct": 13.5, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.2}
+BNBUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 19:35:00 -> 2026-03-27 00:50:00 | 100000 | 158 | 129 | 29 | 81.65 | 1.30 | 1.00 | 10.00 | 2.40 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -24.08 | 0.93 | 64.81 | 108 | 2.52 | 3.44 | 4.85 | 0.51 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.4, "bollinger_keltner_kc_mult": 1.8, "bollinger_keltner_length": 162.0, "bollinger_keltner_squeeze_lookback": 4.0, "bollinger_keltner_squeeze_threshold": 1.42, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 1.3, "take_profit_pct": 1.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 10.0, "trailing_distance_pct": 2.4}
+AVAXUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 16:10:00 -> 2026-03-27 01:25:00 | 100000 | 34 | 25 | 9 | 73.53 | 5.70 | 2.00 | 14.00 | 0.10 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 514.91 | 100.00 | 100.00 | 25 | 0.00 | 13.30 | 20.60 | inf | true | weak | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.15, "bollinger_keltner_kc_mult": 3.6, "bollinger_keltner_length": 46.0, "bollinger_keltner_squeeze_lookback": 10.0, "bollinger_keltner_squeeze_threshold": 1.34, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 5.7, "take_profit_pct": 2.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 14.0, "trailing_distance_pct": 0.1}
+NEARUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 16:35:00 -> 2026-03-27 01:50:00 | 100000 | 185 | 146 | 39 | 78.92 | 0.70 | 2.50 | 1.50 | 0.30 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -57.89 | 0.88 | 41.10 | 146 | 3.18 | 5.15 | 7.15 | 1.26 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.0, "bollinger_keltner_kc_mult": 3.55, "bollinger_keltner_length": 190.0, "bollinger_keltner_squeeze_lookback": 17.0, "bollinger_keltner_squeeze_threshold": 1.28, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 0.7, "take_profit_pct": 2.5, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 1.5, "trailing_distance_pct": 0.3}
+DOTUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 17:05:00 -> 2026-03-27 02:20:00 | 100000 | 295 | 203 | 92 | 68.81 | 1.50 | 22.00 | 1.50 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 102.86 | 1.13 | 59.30 | 172 | 2.13 | 5.98 | 8.66 | 0.78 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 3.75, "bollinger_keltner_kc_mult": 3.15, "bollinger_keltner_length": 42.0, "bollinger_keltner_squeeze_lookback": 7.0, "bollinger_keltner_squeeze_threshold": 1.02, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 1.5, "take_profit_pct": 22.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 1.5, "trailing_distance_pct": 0.2}
+LTCUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 13:05:00 -> 2026-03-27 02:45:00 | 100000 | 43 | 37 | 6 | 86.05 | 6.90 | 1.00 | 7.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 164.83 | 100.00 | 100.00 | 33 | 0.00 | 3.44 | 4.99 | inf | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.65, "bollinger_keltner_kc_mult": 2.6, "bollinger_keltner_length": 122.0, "bollinger_keltner_squeeze_lookback": 14.0, "bollinger_keltner_squeeze_threshold": 1.26, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 6.9, "take_profit_pct": 1.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 7.0, "trailing_distance_pct": 0.2}
+BCHUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 17:55:00 -> 2026-03-27 03:15:00 | 100000 | 153 | 118 | 35 | 77.12 | 0.90 | 3.00 | 14.00 | 0.90 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 99.84 | 1.19 | 32.41 | 108 | 2.78 | 12.28 | 17.80 | 2.48 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.3, "bollinger_keltner_kc_mult": 2.45, "bollinger_keltner_length": 132.0, "bollinger_keltner_squeeze_lookback": 2.0, "bollinger_keltner_squeeze_threshold": 1.38, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 0.9, "take_profit_pct": 3.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 14.0, "trailing_distance_pct": 0.9}
+TRXUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 10:00:00 -> 2026-03-27 03:50:00 | 100000 | 206 | 170 | 36 | 82.52 | 0.70 | 2.50 | 1.50 | 0.30 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | -27.07 | 0.94 | 40.65 | 123 | 2.02 | 5.62 | 7.88 | 1.37 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.0, "bollinger_keltner_kc_mult": 3.55, "bollinger_keltner_length": 130.0, "bollinger_keltner_squeeze_lookback": 17.0, "bollinger_keltner_squeeze_threshold": 1.28, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 0.7, "take_profit_pct": 2.5, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 1.5, "trailing_distance_pct": 0.3}
+LINKUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 19:15:00 -> 2026-03-27 04:30:00 | 100000 | 27 | 23 | 4 | 85.19 | 6.90 | 1.00 | 7.00 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 113.79 | 100.00 | 100.00 | 23 | 0.00 | 3.44 | 4.95 | inf | true | weak | yes
+  best_profile={"bollinger_keltner_bb_mult": 3.25, "bollinger_keltner_kc_mult": 3.2, "bollinger_keltner_length": 160.0, "bollinger_keltner_squeeze_lookback": 18.0, "bollinger_keltner_squeeze_threshold": 1.4, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 6.9, "take_profit_pct": 1.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 7.0, "trailing_distance_pct": 0.2}
+ARBUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 20:15:00 -> 2026-03-27 05:30:00 | 100000 | 159 | 129 | 30 | 81.13 | 1.50 | 22.00 | 1.50 | 0.20 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 488.46 | 1.80 | 59.38 | 128 | 2.42 | 9.57 | 14.48 | 1.23 | false | strong | yes
+  best_profile={"bollinger_keltner_bb_mult": 1.3, "bollinger_keltner_kc_mult": 3.75, "bollinger_keltner_length": 70.0, "bollinger_keltner_squeeze_lookback": 11.0, "bollinger_keltner_squeeze_threshold": 1.16, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 1.5, "take_profit_pct": 22.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 1.5, "trailing_distance_pct": 0.2}
+SUIUSDT | Bollinger Squezze | 5m | 25x | 2025-04-13 21:05:00 -> 2026-03-27 06:20:00 | 100000 | 59 | 45 | 14 | 76.27 | 5.90 | 1.00 | 12.00 | 0.90 | 0.0625 | 500 | 60.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 196.13 | 100.00 | 100.00 | 39 | 0.00 | 3.45 | 5.03 | inf | false | medium | yes
+  best_profile={"bollinger_keltner_bb_mult": 2.25, "bollinger_keltner_kc_mult": 1.75, "bollinger_keltner_length": 90.0, "bollinger_keltner_squeeze_lookback": 11.0, "bollinger_keltner_squeeze_threshold": 1.36, "breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "stop_loss_pct": 5.9, "take_profit_pct": 1.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 12.0, "trailing_distance_pct": 0.9}
+
+Strategy Aggregates (All Coins)
+strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals
+Bollinger Squezze | 18 | 15 | 2875.47 | 1280 | 7 | 100.00 | 28.12 | 78.30 | 79.15 | 81.39 | 1.07 | 109.06 | 81.83 | 27.22
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     2875.47 USD
+Profit-Faktor:       28.12 (Ziel: > 1.2)
+Trefferquote:        61.56% (HAUPTFOKUS)
+Win-Rate Zielband:   28.00% - 30.00% | Status: AUSSERHALB ZIELBAND
+Anzahl Trades:       1280 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   3.18% (Warnung ab 15%)
+Ø Gewinn pro Trade:  0.0899% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 10 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    100.00% (Stichproben-Größe)
+Zufalls-Seed:        20260321
+--------------------------------------------------------------------------------
+URTEIL: WARNUNG
+GRUND: Trefferquote außerhalb Zielkorridor 28-30%
+================================================================================

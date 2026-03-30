@@ -1,0 +1,372 @@
+{
+  "meta": {
+    "status": "planned",
+    "planned_at_utc": "2026-03-23T06:23:58.776834+00:00",
+    "planned_runs": 72,
+    "effective_fee_pct_per_side": 0.0625,
+    "configured_leverage": 25,
+    "sample_profiles": 10000
+  },
+  "plan": [
+    {
+      "symbol": "BTCUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "ADAUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "ADAUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "ADAUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "ADAUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "ADAUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "ADAUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "NEARUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "NEARUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "NEARUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "NEARUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "NEARUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "NEARUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    },
+    {
+      "symbol": "DOTUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "15m"
+    },
+    {
+      "symbol": "DOTUSDT",
+      "strategy_name": "dual_thrust",
+      "interval": "1h"
+    },
+    {
+      "symbol": "DOTUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "15m"
+    },
+    {
+      "symbol": "DOTUSDT",
+      "strategy_name": "frama_cross",
+      "interval": "1h"
+    },
+    {
+      "symbol": "DOTUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "15m"
+    },
+    {
+      "symbol": "DOTUSDT",
+      "strategy_name": "ema_cross_volume",
+      "interval": "1h"
+    }
+  ]
+}

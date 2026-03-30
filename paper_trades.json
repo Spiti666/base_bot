@@ -1,0 +1,32 @@
+[
+  {
+    "entry_price": 2009.9,
+    "entry_time": "2026-03-28T21:55:02.456600",
+    "exit_price": null,
+    "exit_time": null,
+    "high_water_mark": 1965.88,
+    "id": 32,
+    "leverage": 25,
+    "pnl": null,
+    "qty": 0.3256147441959866,
+    "side": "SHORT",
+    "status": "OPEN",
+    "symbol": "ETHUSDT",
+    "total_fees": 0.3272265371797568
+  },
+  {
+    "entry_price": 0.09084,
+    "entry_time": "2026-03-29T01:00:37.449383",
+    "exit_price": null,
+    "exit_time": null,
+    "high_water_mark": 0.0896,
+    "id": 33,
+    "leverage": 25,
+    "pnl": null,
+    "qty": 7214.0343110428375,
+    "side": "SHORT",
+    "status": "OPEN",
+    "symbol": "DOGEUSDT",
+    "total_fees": 0.32766143840756573
+  }
+]
