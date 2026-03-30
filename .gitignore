@@ -7,3 +7,4 @@ logs/
 *.log
 data/*.duckdb.wal
 data/*.duckdb.shm
+backup/
