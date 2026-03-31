@@ -80,7 +80,8 @@ python gui.py
 
 ## Daten & Artefakte
 
-- `data/paper_trading.duckdb` - Candle-Historie, Paper-Trades, Backtest-Runs
+- `data/paper_trading.duckdb` - Candle-Historie, Paper-Trades, Backtest-Runs  
+  Hinweis: Diese Datei ist **nicht im Repository enthalten** (zu groß) und wird lokal erzeugt/gefüllt.
 - `paper_trades.json` - Persistenz offener Paper-Positionen
 - `backtest_compact_summary_*.txt` - kompakter Laufreport inkl. Aggregates
 - `logs/` - GUI- und Runtime-Logs
