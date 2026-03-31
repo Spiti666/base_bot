@@ -1521,6 +1521,9 @@ class TradingTerminalWindow(QMainWindow):
         self.backtest_select_all_button = QPushButton("Select All")
         self.backtest_select_all_button.clicked.connect(self._select_all_backtest_symbols)
         header_layout.addWidget(self.backtest_select_all_button)
+        self.backtest_clear_cards_button = QPushButton("Clear Cards")
+        self.backtest_clear_cards_button.clicked.connect(self._clear_backtest_coin_cards)
+        header_layout.addWidget(self.backtest_clear_cards_button)
         layout.addLayout(header_layout)
 
         self.backtest_symbols_scroll = QScrollArea()
@@ -3371,6 +3374,11 @@ class TradingTerminalWindow(QMainWindow):
             "Leverage Mode\t"
             f"configured={int(result.get('configured_leverage', settings.trading.default_leverage) or settings.trading.default_leverage)}x "
             f"effective={effective_leverage}x",
+            "HF Metrics\t"
+            f"reentry={int(result.get('reentry_trades_count', 0) or 0)} "
+            f"soft_lev={int(result.get('soft_leverage_trades_count', 0) or 0)} "
+            f"partial_tp={int(result.get('partial_tp_hits', 0) or 0)} "
+            f"real_lev_avg={float(result.get('real_leverage_avg', 0.0) or 0.0):.2f}x",
             f"Stop / Take %\t{float(result.get('stop_loss_pct', 0.0) or 0.0):.2f} / {float(result.get('take_profit_pct', 0.0) or 0.0):.2f}",
             "Trailing Act / Dist %\t"
             f"{float(result.get('trailing_activation_pct', 0.0) or 0.0):.2f} / {float(result.get('trailing_distance_pct', 0.0) or 0.0):.2f}",
@@ -3534,6 +3542,10 @@ class TradingTerminalWindow(QMainWindow):
             "avg_win_fee_ratio": float(compact_summary.get("avg_win_fee_ratio", 0.0) or 0.0),
             "avg_win_fee_ratio_display": str(compact_summary.get("avg_win_fee_ratio_display", "0.00") or "0.00"),
             "avg_win_usd": float(compact_summary.get("avg_win_usd", result.get("average_win_usd", 0.0)) or 0.0),
+            "reentry_trades_count": int(compact_summary.get("reentry_trades_count", result.get("reentry_trades_count", 0)) or 0),
+            "soft_leverage_trades_count": int(compact_summary.get("soft_leverage_trades_count", result.get("soft_leverage_trades_count", 0)) or 0),
+            "partial_tp_hits": int(compact_summary.get("partial_tp_hits", result.get("partial_tp_hits", 0)) or 0),
+            "real_leverage_avg": float(compact_summary.get("real_leverage_avg", result.get("real_leverage_avg", 0.0)) or 0.0),
             "longest_consecutive_losses": int(result.get("longest_consecutive_losses", 0) or 0),
             "real_rrr": float(result.get("real_rrr", 0.0) or 0.0),
             "effective_leverage": self._resolve_report_leverage(
@@ -3958,7 +3970,7 @@ class TradingTerminalWindow(QMainWindow):
             f"Full-History Optimization: {full_history_optimization_display}",
             "",
             "Run Details",
-            "symbol | strategy | interval | leverage | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top",
+            "symbol | strategy | interval | leverage | real_leverage_avg | reentry_trades | soft_leverage_trades | partial_tp_hits | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top",
         ]
         for entry in entries:
             strategy_name = str(entry.get("strategy_name", ""))
@@ -3977,6 +3989,10 @@ class TradingTerminalWindow(QMainWindow):
                         strategy_label,
                         str(entry.get("interval", "-")),
                         f"{int(entry.get('effective_leverage', 0) or 0)}x",
+                        f"{float(entry.get('real_leverage_avg', 0.0) or 0.0):.2f}x",
+                        str(int(entry.get("reentry_trades_count", 0) or 0)),
+                        str(int(entry.get("soft_leverage_trades_count", 0) or 0)),
+                        str(int(entry.get("partial_tp_hits", 0) or 0)),
                         period_utc,
                         str(int(entry.get("history_candles", 0) or 0)),
                         str(int(entry.get("total_signals", 0) or 0)),
@@ -4055,7 +4071,7 @@ class TradingTerminalWindow(QMainWindow):
                 [
                     "",
                     "Strategy Aggregates (All Coins)",
-                    "strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals",
+                    "strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals | avg_reentry_trades | avg_soft_leverage_trades | avg_partial_tp_hits | avg_real_leverage",
                 ]
             )
             sorted_groups = sorted(
@@ -4144,6 +4160,42 @@ class TradingTerminalWindow(QMainWindow):
                     if group_runs > 0
                     else 0.0
                 )
+                group_avg_reentry_trades = (
+                    sum(
+                        int(group_entry.get("reentry_trades_count", 0) or 0)
+                        for group_entry in group_entries
+                    )
+                    / group_runs
+                    if group_runs > 0
+                    else 0.0
+                )
+                group_avg_soft_leverage_trades = (
+                    sum(
+                        int(group_entry.get("soft_leverage_trades_count", 0) or 0)
+                        for group_entry in group_entries
+                    )
+                    / group_runs
+                    if group_runs > 0
+                    else 0.0
+                )
+                group_avg_partial_tp_hits = (
+                    sum(
+                        int(group_entry.get("partial_tp_hits", 0) or 0)
+                        for group_entry in group_entries
+                    )
+                    / group_runs
+                    if group_runs > 0
+                    else 0.0
+                )
+                group_avg_real_leverage = (
+                    sum(
+                        float(group_entry.get("real_leverage_avg", 0.0) or 0.0)
+                        for group_entry in group_entries
+                    )
+                    / group_runs
+                    if group_runs > 0
+                    else 0.0
+                )
                 group_pf_finite = [
                     float(group_entry.get("profit_factor", 0.0) or 0.0)
                     for group_entry in group_entries
@@ -4193,6 +4245,10 @@ class TradingTerminalWindow(QMainWindow):
                             f"{group_avg_total_signals:.2f}",
                             f"{group_avg_approved_signals:.2f}",
                             f"{group_avg_blocked_signals:.2f}",
+                            f"{group_avg_reentry_trades:.2f}",
+                            f"{group_avg_soft_leverage_trades:.2f}",
+                            f"{group_avg_partial_tp_hits:.2f}",
+                            f"{group_avg_real_leverage:.2f}",
                         ]
                     )
                 )
@@ -4919,6 +4975,31 @@ class TradingTerminalWindow(QMainWindow):
         self._update_status_label()
         self.statusBar().showMessage(status_message, 3000)
 
+    def _clear_backtest_coin_cards(self) -> None:
+        backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
+        if backtest_running or self._batch_active:
+            self.statusBar().showMessage(
+                "Cannot clear card results while a backtest is running.",
+                3000,
+            )
+            return
+
+        self._backtest_profit_factors.clear()
+        self._backtest_win_rates.clear()
+        self._backtest_trade_counts.clear()
+        self._backtest_compact_summaries.clear()
+        self._backtest_best_profiles.clear()
+        self._last_backtest_result = None
+
+        self.backtest_total_pnl_label.setText("Total PnL: -")
+        self.backtest_win_rate_label.setText("Win Rate: -")
+        self.backtest_total_trades_label.setText("Total Trades: -")
+
+        self._refresh_backtest_symbol_cards()
+        self._update_status_label()
+        self._append_backtest_log("Backtest card results cleared.")
+        self.statusBar().showMessage("Backtest card results cleared.", 3000)
+
     def _ensure_live_symbol_is_visible(self, symbol: str) -> None:
         normalized_symbol = str(symbol).strip().upper()
         if not normalized_symbol:
@@ -5017,6 +5098,8 @@ class TradingTerminalWindow(QMainWindow):
     def _set_backtest_symbol_controls_enabled(self, enabled: bool) -> None:
         self.backtest_symbols_scroll.setEnabled(enabled)
         self.backtest_select_all_button.setEnabled(enabled)
+        if hasattr(self, "backtest_clear_cards_button"):
+            self.backtest_clear_cards_button.setEnabled(enabled)
         self._set_backtest_period_controls_enabled(enabled)
         if hasattr(self, "backtest_select_all_intervals_button"):
             self.backtest_select_all_intervals_button.setEnabled(enabled)

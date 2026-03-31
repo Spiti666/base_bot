@@ -1,32 +1,32 @@
 [
   {
-    "entry_price": 2009.9,
-    "entry_time": "2026-03-28T21:55:02.456600",
+    "entry_price": 0.005864,
+    "entry_time": "2026-03-31T09:30:04.484517",
     "exit_price": null,
     "exit_time": null,
-    "high_water_mark": 1965.88,
-    "id": 32,
+    "high_water_mark": 0.005836,
+    "id": 36,
     "leverage": 25,
     "pnl": null,
-    "qty": 0.3256147441959866,
+    "qty": 110065.75593640747,
     "side": "SHORT",
     "status": "OPEN",
-    "symbol": "ETHUSDT",
-    "total_fees": 0.3272265371797568
+    "symbol": "1000SHIBUSDT",
+    "total_fees": 0.4033909955069334
   },
   {
-    "entry_price": 0.09084,
-    "entry_time": "2026-03-29T01:00:37.449383",
+    "entry_price": 80.49,
+    "entry_time": "2026-03-31T10:00:12.409296",
     "exit_price": null,
     "exit_time": null,
-    "high_water_mark": 0.0896,
-    "id": 33,
+    "high_water_mark": 80.39,
+    "id": 38,
     "leverage": 25,
     "pnl": null,
-    "qty": 7214.0343110428375,
+    "qty": 8.025831281294186,
     "side": "SHORT",
     "status": "OPEN",
-    "symbol": "DOGEUSDT",
-    "total_fees": 0.32766143840756573
+    "symbol": "SOLUSDT",
+    "total_fees": 0.4037494748946056
   }
 ]

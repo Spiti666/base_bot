@@ -1,0 +1,59 @@
+Backtest Compact Summary
+Mode: Batch
+Status: stopped
+Started (UTC): 2026-03-31 14:35:18
+Finished (UTC): 2026-03-31 14:35:21
+Duration (s): 2
+Runs: 0
+Profitable Runs: 0
+Negative Runs: 0
+Verdict Exclusions: 0 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 0
+Infinite PF Runs: 0
+Total PnL USD: 0.00
+Average Profit Factor (finite runs): n/a
+Median Profit Factor (finite runs): n/a
+Average Profit Factor ex Low-Sample (finite runs): n/a
+
+Run Environment
+Requested History Start UTC: n/a
+History Loader Mode: n/a
+Required Warmup Candles: 0
+Required Candles: 0
+Min Confidence %: n/a
+Fee Stress Side %: 0.0000
+Leverage Mode: n/a
+Optimization Mode: n/a
+Optimizer Workers: n/a
+Sampling Mode: n/a
+Search Window Candles: n/a
+Full-History Optimization: n/a
+
+Run Details
+symbol | strategy | interval | leverage | real_leverage_avg | reentry_trades | soft_leverage_trades | partial_tp_hits | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     0.00 USD
+Profit-Faktor:       0.00 (Ziel: >= 1.2)
+Trefferquote:        0.00% (HAUPTFOKUS)
+Win-Rate Minimum:    > 55.00%
+Anzahl Trades:       0 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   0.00% (Warnung ab 15%)
+Ø Gewinn pro Trade:  0.0000% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 0 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    0.00% (Stichproben-Größe)
+Evaluated Profiles:  0
+Validated Profiles:  0
+Force Full Scan:     0/0 run(s)
+Top Session Votes:   n/a
+Zufalls-Seed:        n/a
+--------------------------------------------------------------------------------
+URTEIL: WARNUNG
+GRUND: Durchschnittliche Trefferquote oder Profit-Faktor unterhalb der Robustheits-Grenze.
+================================================================================

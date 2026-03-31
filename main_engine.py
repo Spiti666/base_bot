@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from threading import RLock
 from time import sleep
 import time
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -98,6 +98,7 @@ MAX_OPTIMIZATION_GRID_PROFILES = 600_000
 OPTIMIZER_MIN_TOTAL_TRADES = 20
 OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT = 3.5
 OPTIMIZER_MIN_AVERAGE_WIN_TO_COST_RATIO = 3.0
+OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT = 0.15
 OPTIMIZER_SORT_PROFIT_FACTOR_CAP = 100.0
 RANKING_MIN_PROFIT_FACTOR = 1.25
 OPTIMIZER_STRONG_SAMPLE_MIN_TRADES = 100
@@ -114,6 +115,9 @@ OPTIMIZER_SHORT_INTERVAL_WINDOW_OVERRIDES: dict[str, int] = {
 }
 TRACE_VALUE_UNAVAILABLE = "unavailable"
 MAX_STRATEGY_FAMILY_GRID_PROFILES = 64_000
+SOFT_APPROVAL_VOLUME_RATIO_MIN = 1.1
+SOFT_APPROVAL_VOLUME_RATIO_FULL = 1.5
+SOFT_APPROVAL_SIGNAL_MULTIPLIER = 2
 
 FRAMA_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
     "frama_fast_period": (6, 12, 20, 28),
@@ -248,6 +252,52 @@ def _profile_meets_breakeven_constraint(
     with suppress(Exception):
         return float(strategy_profile["breakeven_activation_pct"]) >= OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT
     return False
+
+
+def _resolve_avg_profit_per_trade_net_pct(summary: Mapping[str, object]) -> float:
+    total_trades = float(summary.get("total_trades", 0.0) or 0.0)
+    if total_trades <= 0.0:
+        return 0.0
+    start_capital = float(settings.trading.start_capital)
+    if not math.isfinite(start_capital) or start_capital <= 0.0:
+        return 0.0
+    total_pnl_usd = float(summary.get("total_pnl_usd", 0.0) or 0.0)
+    if not math.isfinite(total_pnl_usd):
+        return 0.0
+    avg_profit_per_trade_net_pct = (
+        (total_pnl_usd / start_capital) * 100.0
+    ) / total_trades
+    if not math.isfinite(avg_profit_per_trade_net_pct):
+        return 0.0
+    return float(avg_profit_per_trade_net_pct)
+
+
+def _profile_meets_avg_profit_per_trade_hurdle(summary: Mapping[str, object]) -> bool:
+    return _resolve_avg_profit_per_trade_net_pct(summary) >= float(
+        OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT
+    )
+
+
+def _apply_strategy_interval_profile_constraints(
+    profiles: Sequence[OptimizationProfile],
+    *,
+    strategy_name: str,
+    interval: str,
+) -> list[OptimizationProfile]:
+    normalized_strategy = _validate_strategy_name(strategy_name)
+    normalized_interval = _validate_interval_name(interval)
+    constrained_profiles = [dict(profile) for profile in profiles]
+    if normalized_strategy == "frama_cross" and normalized_interval == "15m":
+        constrained_profiles = [
+            profile
+            for profile in constrained_profiles
+            if (
+                float(profile.get("frama_slow_period", 0.0) or 0.0) >= 150.0
+                and float(profile.get("volume_multiplier", 0.0) or 0.0) >= 1.25
+                and float(profile.get("take_profit_pct", 0.0) or 0.0) >= 1.5
+            )
+        ]
+    return constrained_profiles
 
 
 def _enforce_optimizer_min_confidence_floor(min_confidence_pct: float | None) -> float | None:
@@ -1070,22 +1120,61 @@ def _finalize_signal_series(
     if setup_gate is None:
         return signal_array.tolist(), total_signals, total_signals, 0
 
+    volume_ratio_array: np.ndarray | None = None
+    with suppress(Exception):
+        volume_period = max(2, int(getattr(settings.strategy, "volume_sma_period", 20)))
+        volume_series = pd.to_numeric(candles_df["volume"], errors="coerce")
+        volume_sma_series = volume_series.rolling(
+            window=volume_period,
+            min_periods=volume_period,
+        ).mean()
+        volume_values = volume_series.to_numpy(dtype=np.float64, copy=False)
+        volume_sma_values = volume_sma_series.to_numpy(dtype=np.float64, copy=False)
+        volume_ratio_array = np.divide(
+            volume_values,
+            volume_sma_values,
+            out=np.full_like(volume_values, np.nan, dtype=np.float64),
+            where=np.isfinite(volume_sma_values) & (volume_sma_values > 0.0),
+        )
+
     approved_signals = 0
     blocked_signals = 0
     approved_array = np.zeros(signal_count, dtype=np.int8)
     for index in candidate_indices.tolist():
         signal_direction = int(signal_array[index])
+        normalized_direction = 1 if signal_direction > 0 else -1
         is_approved, _score, _reason = setup_gate.evaluate_signal_at_index(
             candles_df,
             int(index),
-            signal_direction,
+            normalized_direction,
             strategy_name,
         )
+        volume_ratio = float("nan")
+        if volume_ratio_array is not None and 0 <= index < int(volume_ratio_array.size):
+            volume_ratio = float(volume_ratio_array[index])
+        has_soft_volume_approval = (
+            math.isfinite(volume_ratio)
+            and volume_ratio >= float(SOFT_APPROVAL_VOLUME_RATIO_MIN)
+        )
+        if not has_soft_volume_approval:
+            blocked_signals += 1
+            continue
+        if not is_approved:
+            # Setup-Gate soft-approval path: allow when minimum volume ratio is met.
+            is_approved = True
         if not is_approved:
             blocked_signals += 1
             continue
+        is_soft_leverage_band = volume_ratio < float(SOFT_APPROVAL_VOLUME_RATIO_FULL)
         approved_signals += 1
-        approved_array[index] = np.int8(signal_direction)
+        approved_array[index] = np.int8(
+            normalized_direction
+            * (
+                int(SOFT_APPROVAL_SIGNAL_MULTIPLIER)
+                if is_soft_leverage_band
+                else 1
+            )
+        )
     return approved_array.tolist(), total_signals, approved_signals, blocked_signals
 
 
@@ -1164,6 +1253,29 @@ def _normalize_dynamic_pct_series(values: object) -> list[float] | None:
     return normalized_values
 
 
+def _resolve_soft_signal_profile(
+    strategy_name: str,
+    strategy_profile: OptimizationProfile | None,
+) -> OptimizationProfile | None:
+    if strategy_name not in {"ema_cross_volume", "frama_cross"}:
+        return strategy_profile
+    effective_profile: OptimizationProfile = (
+        {}
+        if strategy_profile is None
+        else dict(strategy_profile)
+    )
+    current_multiplier = effective_profile.get(
+        "volume_multiplier",
+        float(settings.strategy.volume_multiplier),
+    )
+    with suppress(Exception):
+        effective_profile["volume_multiplier"] = min(
+            float(current_multiplier),
+            float(SOFT_APPROVAL_VOLUME_RATIO_MIN),
+        )
+    return effective_profile
+
+
 def _pack_strategy_signal_payload(payload: dict[str, object]) -> dict[str, object]:
     packed_payload: dict[str, object] = {
         "total_signals": int(payload.get("total_signals", 0)),
@@ -1214,8 +1326,12 @@ def _build_vectorized_strategy_cache_payload(
     strategy_profile: OptimizationProfile | None = None,
     regime_mask: Sequence[int] | None = None,
 ) -> dict[str, object] | None:
+    effective_strategy_profile = _resolve_soft_signal_profile(
+        strategy_name,
+        strategy_profile,
+    )
     if strategy_name == "ema_cross_volume":
-        with _temporary_strategy_profile(strategy_profile, candles_df):
+        with _temporary_strategy_profile(effective_strategy_profile, candles_df):
             working_df = build_ema_cross_volume_signal_frame(candles_df)
             raw_signals = (
                 working_df["ema_long_entry"].astype("int8")
@@ -1239,7 +1355,7 @@ def _build_vectorized_strategy_cache_payload(
         return payload
 
     if strategy_name == "frama_cross":
-        with _temporary_strategy_profile(strategy_profile, candles_df):
+        with _temporary_strategy_profile(effective_strategy_profile, candles_df):
             working_df = build_frama_cross_signal_frame(candles_df)
             raw_signals = (
                 working_df["frama_long_entry"].astype("int8")
@@ -1683,6 +1799,7 @@ OPTIMIZATION_METRIC_FIELDS = {
     "average_trade_slippage_usd",
     "average_trade_cost_usd",
     "average_win_to_cost_ratio",
+    "avg_profit_per_trade_net_pct",
     "max_drawdown_pct",
     "longest_consecutive_losses",
     "total_slippage_penalty_usd",
@@ -1983,10 +2100,31 @@ def _generate_signals_for_worker(
             int(vectorized_payload["blocked_signals"]),
         )
 
+    effective_signal_profile = _resolve_soft_signal_profile(
+        strategy_name,
+        strategy_profile,
+    )
     signals: list[int] = []
     total_signals = 0
     approved_signals = 0
     blocked_signals = 0
+    volume_ratio_array: np.ndarray | None = None
+    if setup_gate is not None:
+        with suppress(Exception):
+            volume_period = max(2, int(getattr(settings.strategy, "volume_sma_period", 20)))
+            volume_series = pd.to_numeric(candles_df["volume"], errors="coerce")
+            volume_sma_series = volume_series.rolling(
+                window=volume_period,
+                min_periods=volume_period,
+            ).mean()
+            volume_values = volume_series.to_numpy(dtype=np.float64, copy=False)
+            volume_sma_values = volume_sma_series.to_numpy(dtype=np.float64, copy=False)
+            volume_ratio_array = np.divide(
+                volume_values,
+                volume_sma_values,
+                out=np.full_like(volume_values, np.nan, dtype=np.float64),
+                where=np.isfinite(volume_sma_values) & (volume_sma_values > 0.0),
+            )
     for index in range(len(candles_df)):
         if index + 1 < required_candles:
             signals.append(0)
@@ -1995,7 +2133,7 @@ def _generate_signals_for_worker(
         signal_direction = _evaluate_strategy_signal(
             strategy_name,
             candles_slice,
-            strategy_profile,
+            effective_signal_profile,
         )
         if (
             signal_direction != 0
@@ -2006,16 +2144,32 @@ def _generate_signals_for_worker(
             signal_direction = 0
         if signal_direction != 0 and setup_gate is not None:
             total_signals += 1
+            normalized_direction = 1 if signal_direction > 0 else -1
             is_approved, _score, _reason = setup_gate.evaluate_signal_at_index(
                 candles_df,
                 index,
-                signal_direction,
+                normalized_direction,
                 strategy_name,
             )
-            if not is_approved:
+            volume_ratio = float("nan")
+            if volume_ratio_array is not None and 0 <= index < int(volume_ratio_array.size):
+                volume_ratio = float(volume_ratio_array[index])
+            has_soft_volume_approval = (
+                math.isfinite(volume_ratio)
+                and volume_ratio >= float(SOFT_APPROVAL_VOLUME_RATIO_MIN)
+            )
+            if not has_soft_volume_approval:
                 blocked_signals += 1
                 signal_direction = 0
             else:
+                if not is_approved:
+                    is_approved = True
+                is_soft_leverage_band = volume_ratio < float(SOFT_APPROVAL_VOLUME_RATIO_FULL)
+                signal_direction = (
+                    normalized_direction * int(SOFT_APPROVAL_SIGNAL_MULTIPLIER)
+                    if is_soft_leverage_band
+                    else normalized_direction
+                )
                 approved_signals += 1
         elif signal_direction != 0:
             total_signals += 1
@@ -2113,6 +2267,7 @@ def _build_zero_fitness_summary(strategy_profile: OptimizationProfile) -> dict[s
             "average_trade_slippage_usd": 0.0,
             "average_trade_cost_usd": 0.0,
             "average_win_to_cost_ratio": 0.0,
+            "avg_profit_per_trade_net_pct": 0.0,
             "max_drawdown_pct": 0.0,
             "longest_consecutive_losses": 0.0,
             "total_slippage_penalty_usd": 0.0,
@@ -2316,6 +2471,7 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
             )
         ),
         strategy_exit_pre_take_profit=False,
+        strategy_name=strategy_name,
     )
     result.update(_calculate_trade_metrics_for_closed_trades(result["closed_trades"]))
     long_trades_count, short_trades_count = _calculate_trade_direction_counts(result["closed_trades"])
@@ -2335,6 +2491,7 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
         "average_trade_slippage_usd": float(result.get("average_trade_slippage_usd", 0.0)),
         "average_trade_cost_usd": float(result.get("average_trade_cost_usd", 0.0)),
         "average_win_to_cost_ratio": float(result.get("average_win_to_cost_ratio", 0.0)),
+        "avg_profit_per_trade_net_pct": float(_resolve_avg_profit_per_trade_net_pct(result)),
         "max_drawdown_pct": float(result.get("max_drawdown_pct", 0.0)),
         "longest_consecutive_losses": float(result.get("longest_consecutive_losses", 0.0)),
         "total_slippage_penalty_usd": float(result.get("total_slippage_penalty_usd", 0.0)),
@@ -4003,6 +4160,10 @@ class BacktestThread(QThread):
                         "total_trades": result.get("total_trades"),
                         "long_trades": result.get("long_trades"),
                         "short_trades": result.get("short_trades"),
+                        "reentry_trades_count": result.get("reentry_trades_count"),
+                        "soft_leverage_trades_count": result.get("soft_leverage_trades_count"),
+                        "partial_tp_hits": result.get("partial_tp_hits"),
+                        "real_leverage_avg": result.get("real_leverage_avg"),
                         "average_win": result.get("average_win_usd"),
                         "average_loss": result.get("average_loss_usd"),
                         "real_rrr": result.get("real_rrr"),
@@ -4181,6 +4342,7 @@ class BacktestThread(QThread):
                 else settings.trading.chandelier_multiplier
             ),
             strategy_exit_pre_take_profit=False,
+            strategy_name=strategy_name,
         )
         trailing_level_1_hits = int(result.get("breakeven_level_hits", 0) or 0)
         trailing_level_2_hits = int(result.get("normal_trailing_level_hits", 0) or 0)
@@ -4498,9 +4660,24 @@ class BacktestThread(QThread):
                 "Backtest scalper mode active: SmartSetupGate is disabled for optimizer workers."
             )
 
-        theoretical_profiles = len(self._optimization_grid)
+        strategy_label = strategy_name.replace("_", " ").title()
+        raw_grid_profiles = [dict(profile) for profile in self._optimization_grid]
+        full_grid_profiles = _apply_strategy_interval_profile_constraints(
+            raw_grid_profiles,
+            strategy_name=strategy_name,
+            interval=self._interval,
+        )
+        if len(full_grid_profiles) < len(raw_grid_profiles):
+            self.log_message.emit(
+                "Optimizer strategy/interval constraints active: "
+                f"{len(raw_grid_profiles)} -> {len(full_grid_profiles)} profiles "
+                f"for {self._symbol} {strategy_label} {self._interval}."
+            )
+        theoretical_profiles = len(full_grid_profiles)
         if theoretical_profiles == 0:
-            raise RuntimeError("Optimization grid is empty.")
+            raise RuntimeError(
+                "Optimization grid is empty after strategy/interval constraints."
+            )
 
         configured_search_window = _resolve_optimizer_search_window_candles(self._interval)
         if 0 < configured_search_window < len(candles_df):
@@ -4519,8 +4696,6 @@ class BacktestThread(QThread):
                     "Warning: regime mask length mismatch; disabling regime filter for optimizer window."
                 )
 
-        strategy_label = strategy_name.replace("_", " ").title()
-        full_grid_profiles = [dict(profile) for profile in self._optimization_grid]
         sampling_full_scan_floor = 10_000
         sampling_target_profiles = 12_500
         sampling_cap_ceiling = 15_000
@@ -4638,12 +4813,16 @@ class BacktestThread(QThread):
 
         min_required_trades = int(OPTIMIZER_MIN_TOTAL_TRADES)
         for profile_result in optimization_phase_summaries:
+            profile_result["avg_profit_per_trade_net_pct"] = float(
+                _resolve_avg_profit_per_trade_net_pct(profile_result)
+            )
             if float(profile_result.get("total_trades", 0.0)) < float(min_required_trades):
                 profile_result["stability_score"] = 0.0
                 profile_result["profit_factor"] = 0.0
                 profile_result["real_rrr"] = 0.0
                 profile_result["total_pnl_usd"] = 0.0
                 profile_result["average_win_to_cost_ratio"] = 0.0
+                profile_result["avg_profit_per_trade_net_pct"] = 0.0
 
         eligible_optimization_summaries = [
             summary
@@ -4651,6 +4830,7 @@ class BacktestThread(QThread):
             if (
                 float(summary.get("total_trades", 0.0)) >= float(min_required_trades)
                 and _profile_meets_breakeven_constraint(summary, strategy_name=strategy_name)
+                and _profile_meets_avg_profit_per_trade_hurdle(summary)
             )
         ]
         if not eligible_optimization_summaries:
@@ -4658,7 +4838,8 @@ class BacktestThread(QThread):
             raise RuntimeError(
                 "No optimization profile passed stability constraints: "
                 f"need >= {min_required_trades} trades and breakeven_activation_pct >= "
-                f"{OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT:.1f}%."
+                f"{OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT:.1f}% and "
+                f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%."
             )
         ranked_optimization_summaries = sorted(
             eligible_optimization_summaries,
@@ -5403,10 +5584,31 @@ class BacktestThread(QThread):
                 int(vectorized_payload["approved_signals"]),
                 int(vectorized_payload["blocked_signals"]),
             )
+        effective_signal_profile = _resolve_soft_signal_profile(
+            strategy_name,
+            strategy_profile,
+        )
         signals: list[int] = []
         total_signals = 0
         approved_signals = 0
         blocked_signals = 0
+        volume_ratio_array: np.ndarray | None = None
+        if self._setup_gate is not None:
+            with suppress(Exception):
+                volume_period = max(2, int(getattr(settings.strategy, "volume_sma_period", 20)))
+                volume_series = pd.to_numeric(candles_df["volume"], errors="coerce")
+                volume_sma_series = volume_series.rolling(
+                    window=volume_period,
+                    min_periods=volume_period,
+                ).mean()
+                volume_values = volume_series.to_numpy(dtype=np.float64, copy=False)
+                volume_sma_values = volume_sma_series.to_numpy(dtype=np.float64, copy=False)
+                volume_ratio_array = np.divide(
+                    volume_values,
+                    volume_sma_values,
+                    out=np.full_like(volume_values, np.nan, dtype=np.float64),
+                    where=np.isfinite(volume_sma_values) & (volume_sma_values > 0.0),
+                )
         for index in range(len(candles_df)):
             if self._should_stop():
                 return signals, total_signals, approved_signals, blocked_signals
@@ -5417,7 +5619,7 @@ class BacktestThread(QThread):
             signal_direction = _evaluate_strategy_signal(
                 strategy_name,
                 candles_slice,
-                strategy_profile,
+                effective_signal_profile,
             )
             if (
                 signal_direction != 0
@@ -5428,16 +5630,32 @@ class BacktestThread(QThread):
                 signal_direction = 0
             if signal_direction != 0 and self._setup_gate is not None:
                 total_signals += 1
+                normalized_direction = 1 if signal_direction > 0 else -1
                 is_approved, _score, _reason = self._setup_gate.evaluate_signal_at_index(
                     candles_df,
                     index,
-                    signal_direction,
+                    normalized_direction,
                     strategy_name,
                 )
-                if not is_approved:
+                volume_ratio = float("nan")
+                if volume_ratio_array is not None and 0 <= index < int(volume_ratio_array.size):
+                    volume_ratio = float(volume_ratio_array[index])
+                has_soft_volume_approval = (
+                    math.isfinite(volume_ratio)
+                    and volume_ratio >= float(SOFT_APPROVAL_VOLUME_RATIO_MIN)
+                )
+                if not has_soft_volume_approval:
                     blocked_signals += 1
                     signal_direction = 0
                 else:
+                    if not is_approved:
+                        is_approved = True
+                    is_soft_leverage_band = volume_ratio < float(SOFT_APPROVAL_VOLUME_RATIO_FULL)
+                    signal_direction = (
+                        normalized_direction * int(SOFT_APPROVAL_SIGNAL_MULTIPLIER)
+                        if is_soft_leverage_band
+                        else normalized_direction
+                    )
                     approved_signals += 1
             elif signal_direction != 0:
                 total_signals += 1
