@@ -10,6 +10,7 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import math
+import os
 import re
 import statistics
 import sys
@@ -72,6 +73,7 @@ from strategies.python.frama_cross import _calculate_frama_series as calculate_f
 STRATEGY_LABELS = {
     "__auto__": "Auto (from Config)",
     "ema_cross_volume": "EMA Cross + Volume",
+    "ema_band_rejection": "EMA Band Rejection",
     "frama_cross": "FRAMA Cross",
     "dual_thrust": "Dual Thrust",
 }
@@ -79,6 +81,7 @@ BACKTEST_AUTO_STRATEGY = "__auto__"
 BACKTEST_STRATEGY_NAMES = (
     BACKTEST_AUTO_STRATEGY,
     "ema_cross_volume",
+    "ema_band_rejection",
     "frama_cross",
     "dual_thrust",
 )
@@ -99,6 +102,7 @@ GUI_LOG_DIRECTORY = Path("logs")
 GUI_RUNTIME_LOG_PATH = GUI_LOG_DIRECTORY / "gui_runtime.log"
 GUI_CRASH_LOG_PATH = GUI_LOG_DIRECTORY / "gui_crash.log"
 GUI_FAULTHANDLER_LOG_PATH = GUI_LOG_DIRECTORY / "gui_faulthandler.log"
+GUI_BACKTEST_DEBUG_LOG_PATH = GUI_LOG_DIRECTORY / "backtest_debug.log"
 _GUI_LOGGING_INITIALIZED = False
 _FAULTHANDLER_FILE_HANDLE = None
 BacktestBatchItem = tuple[str, str, str | None]
@@ -866,6 +870,10 @@ class TradeReadinessBars(QFrame):
 
 class TradingTerminalWindow(QMainWindow):
     _HISTORY_PROGRESS_PREFIX = "[HISTORY_PROGRESS]"
+    _SIGNAL_CACHE_PROGRESS_PREFIX = "[SIGNAL_CACHE_PROGRESS]"
+    _BACKTEST_LOG_MODE_QUIET = "quiet"
+    _BACKTEST_LOG_MODE_STANDARD = "standard"
+    _BACKTEST_LOG_MODE_DEBUG = "debug"
     _MAX_LOG_LINES = 4000
     _BACKTEST_LOG_WRAP_COLUMNS = 120
     _MAX_BACKTEST_RESULT_TRADES = 5000
@@ -916,6 +924,7 @@ class TradingTerminalWindow(QMainWindow):
         self._backtest_stop_requested = False
         self._progress_generation = 0
         self._batch_queue: list[BacktestBatchItem] = []
+        self._batch_auto_strategy_flags: list[bool] = []
         self._batch_active = False
         self._batch_mode = "standard"
         self._batch_total_symbols = 0
@@ -930,8 +939,11 @@ class TradingTerminalWindow(QMainWindow):
         self._last_backtest_result: dict[str, object] | None = None
         self._analytics_splitter: QSplitter | None = None
         self._backtest_progress_log_active = False
+        self._active_backtest_log_mode = self._BACKTEST_LOG_MODE_STANDARD
+        self._active_backtest_log_context: dict[str, int] = {"coins": 1, "strategies": 1, "timeframes": 1}
         self.backtest_table = None
         self._backtest_period_user_modified = False
+        self._pending_close_request = False
 
         self.setWindowTitle("Bitunix Quant Station")
         self.resize(2048, 1152)
@@ -947,12 +959,30 @@ class TradingTerminalWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        self._stop_bot()
-        if self._bot_thread is not None:
-            self._bot_thread.wait(5000)
-        if self._backtest_thread is not None:
-            self._backtest_thread.stop()
-            self._backtest_thread.wait(5000)
+        bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
+        backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
+
+        if bot_running:
+            self._stop_bot()
+        if backtest_running or self._batch_active:
+            self._stop_backtest()
+
+        bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
+        backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
+        if bot_running or backtest_running:
+            self._pending_close_request = True
+            self.statusBar().showMessage(
+                "Waiting for running threads to stop before closing...",
+                5000,
+            )
+            self._append_backtest_log(
+                "Close requested while a worker thread is still running. "
+                "Waiting for graceful shutdown to prevent thread destruction."
+            )
+            event.ignore()
+            return
+
+        self._pending_close_request = False
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -1548,6 +1578,7 @@ class TradingTerminalWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_backtest_symbol_selector_viewport)
 
         self._select_default_backtest_symbols()
+        self._sync_backtest_symbol_universe()
         return panel
 
     def _build_backtest_strategy_selector(self) -> QFrame:
@@ -1907,20 +1938,7 @@ class TradingTerminalWindow(QMainWindow):
     ) -> str:
         selected_strategy = self._current_backtest_strategy_name() if strategy_name is None else strategy_name
         if self._is_backtest_auto_strategy(selected_strategy):
-            if self._is_optimization_mode_active():
-                resolved_strategy = resolve_optimizer_strategy_for_symbol(
-                    symbol,
-                    settings.strategy.default_strategy_name,
-                    apply_backtest_optimizer_overrides=True,
-                )
-                return self._sanitize_backtest_strategy_name(symbol, resolved_strategy)
-            if self._batch_active:
-                resolved_strategy = resolve_optimizer_strategy_for_symbol(
-                    symbol,
-                    settings.strategy.default_strategy_name,
-                    apply_backtest_optimizer_overrides=False,
-                )
-                return self._sanitize_backtest_strategy_name(symbol, resolved_strategy)
+            # Auto (from Config) always follows the current live-config mapping.
             resolved_strategy = resolve_strategy_for_symbol(
                 symbol,
                 settings.strategy.default_strategy_name,
@@ -1964,29 +1982,26 @@ class TradingTerminalWindow(QMainWindow):
                 if interval in BACKTEST_INTERVAL_OPTIONS
             ]
         if not selected_intervals:
-            selected_intervals = [self._current_backtest_interval()]
+            selected_intervals = list(BACKTEST_INTERVAL_OPTIONS)
         interval_label = (
             selected_intervals[0]
             if len(selected_intervals) == 1
             else f"{len(selected_intervals)} timeframes"
         )
 
-        if BACKTEST_AUTO_STRATEGY in selected_strategy_names:
-            base_queue: list[BacktestBatchItem] = []
+        base_queue: list[BacktestBatchItem] = []
+        base_auto_flags: list[bool] = []
+        has_auto = BACKTEST_AUTO_STRATEGY in selected_strategy_names
+        if has_auto:
             for symbol in symbols:
                 resolved_strategy = self._resolve_backtest_strategy_for_symbol(
                     symbol,
                     BACKTEST_AUTO_STRATEGY,
                 )
-                base_queue.append((symbol, resolved_strategy, None))
-            queue = self._expand_batch_queue_with_intervals(
-                base_queue,
-                tuple(selected_intervals),
-            )
-            mode_label = f"{STRATEGY_LABELS[BACKTEST_AUTO_STRATEGY]} / {interval_label}"
-            return queue, [BACKTEST_AUTO_STRATEGY], mode_label
+                batch_item: BacktestBatchItem = (symbol, resolved_strategy, None)
+                base_queue.append(batch_item)
+                base_auto_flags.append(True)
 
-        base_queue: list[BacktestBatchItem] = []
         for symbol in symbols:
             for strategy_name in selected_strategy_names:
                 if strategy_name == BACKTEST_AUTO_STRATEGY:
@@ -2000,16 +2015,36 @@ class TradingTerminalWindow(QMainWindow):
                 except Exception:
                     continue
                 base_queue.append((symbol, resolved_strategy, None))
+                base_auto_flags.append(False)
 
-        queue = self._expand_batch_queue_with_intervals(
+        queue: list[BacktestBatchItem] = []
+        auto_flags: list[bool] = []
+        for (symbol, strategy_name, interval_override), is_auto in zip(
             base_queue,
-            tuple(selected_intervals),
-        )
+            base_auto_flags,
+            strict=False,
+        ):
+            if interval_override is not None:
+                queue.append((symbol, strategy_name, interval_override))
+                auto_flags.append(bool(is_auto))
+                continue
+            for interval in selected_intervals:
+                queue.append((symbol, strategy_name, interval))
+                auto_flags.append(bool(is_auto))
+        self._batch_auto_strategy_flags = auto_flags
 
         effective_selected_strategies = list(
             dict.fromkeys(strategy_name for _symbol, strategy_name, _interval in queue)
         )
-        mode_label = f"{len(effective_selected_strategies)} strategies / {interval_label}"
+        if has_auto and len(selected_strategy_names) == 1:
+            mode_label = f"{STRATEGY_LABELS[BACKTEST_AUTO_STRATEGY]} / {interval_label}"
+        elif has_auto:
+            mode_label = (
+                f"{len(selected_strategy_names)} strategies "
+                f"(incl. {STRATEGY_LABELS[BACKTEST_AUTO_STRATEGY]}) / {interval_label}"
+            )
+        else:
+            mode_label = f"{len(effective_selected_strategies)} strategies / {interval_label}"
         return queue, effective_selected_strategies, mode_label
 
     @staticmethod
@@ -2475,6 +2510,221 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_live_symbol_cards()
         self._refresh_trade_readiness(force=True)
 
+    @staticmethod
+    def _normalize_backtest_log_mode(raw_mode: str | None) -> str:
+        normalized = str(raw_mode or "").strip().lower()
+        if normalized in {
+            TradingTerminalWindow._BACKTEST_LOG_MODE_QUIET,
+            TradingTerminalWindow._BACKTEST_LOG_MODE_STANDARD,
+            TradingTerminalWindow._BACKTEST_LOG_MODE_DEBUG,
+        }:
+            return normalized
+        return TradingTerminalWindow._BACKTEST_LOG_MODE_STANDARD
+
+    def _resolve_backtest_log_mode_for_run(
+        self,
+        *,
+        symbol_override: str | None,
+        strategy_override: str | None,
+        interval_override: str | None,
+    ) -> tuple[str, dict[str, int]]:
+        env_mode = self._normalize_backtest_log_mode(os.getenv("BACKTEST_LOG_MODE"))
+        if env_mode != self._BACKTEST_LOG_MODE_STANDARD:
+            context = {"coins": 1, "strategies": 1, "timeframes": 1}
+            return env_mode, context
+
+        configured_mode = self._normalize_backtest_log_mode(
+            getattr(settings.trading, "backtest_log_mode", None)
+        )
+        if configured_mode != self._BACKTEST_LOG_MODE_STANDARD:
+            context = {"coins": 1, "strategies": 1, "timeframes": 1}
+            return configured_mode, context
+
+        if self._batch_active:
+            context = {
+                "coins": max(1, self._batch_total_symbols),
+                "strategies": max(1, len(self._get_selected_backtest_strategy_names())),
+                "timeframes": max(1, len(self._get_selected_backtest_intervals())),
+            }
+            active_thread_runs = (
+                1
+                if self._backtest_thread is not None and self._backtest_thread.isRunning()
+                else 0
+            )
+            remaining_runs = len(self._batch_queue) + active_thread_runs
+            if (
+                context["coins"] == 1
+                and context["strategies"] == 1
+                and context["timeframes"] == 1
+                and remaining_runs <= 1
+            ):
+                return self._BACKTEST_LOG_MODE_QUIET, context
+            return self._BACKTEST_LOG_MODE_STANDARD, context
+
+        selected_symbols = self._get_selected_backtest_symbols()
+        selected_strategies = self._get_selected_backtest_strategy_names()
+        selected_intervals = self._get_selected_backtest_intervals()
+        context = {
+            "coins": 1 if symbol_override is not None else max(1, len(selected_symbols)),
+            "strategies": 1 if strategy_override is not None else max(1, len(selected_strategies)),
+            "timeframes": 1 if interval_override is not None else max(1, len(selected_intervals)),
+        }
+        if context["coins"] == 1 and context["strategies"] == 1 and context["timeframes"] == 1:
+            return self._BACKTEST_LOG_MODE_QUIET, context
+        return self._BACKTEST_LOG_MODE_STANDARD, context
+
+    def _set_active_backtest_log_mode(self, mode: str, context: dict[str, int]) -> None:
+        self._active_backtest_log_mode = self._normalize_backtest_log_mode(mode)
+        self._active_backtest_log_context = {
+            "coins": int(context.get("coins", 1) or 1),
+            "strategies": int(context.get("strategies", 1) or 1),
+            "timeframes": int(context.get("timeframes", 1) or 1),
+        }
+
+    def _write_backtest_detail_log(self, message: str) -> None:
+        try:
+            GUI_BACKTEST_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with GUI_BACKTEST_DEBUG_LOG_PATH.open("a", encoding="utf-8") as detail_file:
+                detail_file.write(f"[{timestamp}] {message}\n")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _summarize_profile_blob(profile_blob: str) -> str:
+        pairs = {
+            key: value.strip()
+            for key, value in re.findall(r"'([^']+)':\s*([^,}]+)", profile_blob)
+        }
+        if not pairs:
+            return "profile"
+
+        parts: list[str] = []
+        if {"ema_fast", "ema_mid", "ema_slow"}.issubset(pairs):
+            parts.append(f"EMA{pairs['ema_fast']}/{pairs['ema_mid']}/{pairs['ema_slow']}")
+        elif {"ema_fast_period", "ema_slow_period"}.issubset(pairs):
+            parts.append(f"EMA{pairs['ema_fast_period']}/{pairs['ema_slow_period']}")
+        elif {"frama_fast_period", "frama_slow_period"}.issubset(pairs):
+            parts.append(f"FRAMA{pairs['frama_fast_period']}/{pairs['frama_slow_period']}")
+        elif {"dual_thrust_period", "dual_thrust_k1", "dual_thrust_k2"}.issubset(pairs):
+            parts.append(
+                "DT "
+                f"p={pairs['dual_thrust_period']} "
+                f"k1={pairs['dual_thrust_k1']} "
+                f"k2={pairs['dual_thrust_k2']}"
+            )
+        for key, label in (
+            ("slope_lookback", "slope"),
+            ("min_ema_spread_pct", "spread"),
+            ("volume_multiplier", "vol"),
+            ("rsi_length", "rsi"),
+            ("volume_ma_length", "volMA"),
+            ("atr_stop_buffer_mult", "atrBuf"),
+            ("stop_loss_pct", "SL"),
+            ("take_profit_pct", "TP"),
+            ("trailing_activation_pct", "TrailOn"),
+            ("trailing_distance_pct", "TrailDist"),
+            ("breakeven_activation_pct", "BE"),
+        ):
+            if key in pairs:
+                parts.append(f"{label}={pairs[key]}")
+        if "use_rsi_filter" in pairs:
+            parts.append("RSI=on" if int(float(pairs["use_rsi_filter"])) > 0 else "RSI=off")
+        if "use_volume_filter" in pairs:
+            parts.append("VOL=on" if int(float(pairs["use_volume_filter"])) > 0 else "VOL=off")
+        if "use_atr_stop_buffer" in pairs:
+            parts.append("ATR=on" if int(float(pairs["use_atr_stop_buffer"])) > 0 else "ATR=off")
+        return " | ".join(parts[:8]) if parts else "profile"
+
+    @classmethod
+    def _compact_profile_preview(cls, profile: object) -> str:
+        if not isinstance(profile, dict) or not profile:
+            return "{}"
+        blob = ", ".join(f"'{key}': {value}" for key, value in profile.items())
+        return cls._summarize_profile_blob(blob)
+
+    def _compact_backtest_thread_log_message(self, message: str) -> str | None:
+        mode = self._active_backtest_log_mode
+        if mode == self._BACKTEST_LOG_MODE_DEBUG:
+            return message
+
+        if message.startswith("BACKTEST_TRACE|"):
+            return None
+
+        suppressed_in_standard = (
+            "top profile diagnostics",
+            "Stage 1 #",
+            "Stage 2 #",
+            "Backtest runtime leverage",
+            "Backtest fee stress active",
+            "Backtest slippage penalty active",
+            "Tiered trailing summary:",
+            "Trailing Level 1",
+            "Trailing Level 2",
+            "Trailing Level 3",
+            "Dynamic SL/TP overrides applied",
+            "Time-Stop exits applied",
+            "EMA Band Rejection JIT alignment check passed",
+            "EMA Band Rejection end-to-end consistency probe passed",
+            "Numba JIT path active for",
+            "Python vector path active for",
+            "Intermediate optimizer checkpoint cache restored",
+        )
+        if any(token in message for token in suppressed_in_standard):
+            return None
+
+        if mode != self._BACKTEST_LOG_MODE_QUIET:
+            return message
+
+        quiet_allow_tokens = (
+            "Backtest strategy selected:",
+            "Backtest history window",
+            "Historical data range loaded:",
+            "Backtest window in use:",
+            "optimizer mode:",
+            "Stage 1: evaluating",
+            "Stage 2: verifying",
+            "Stage 1 fail-reason summary:",
+            "Stage 2 fail-reason summary:",
+            "Stage 2 Verified Candidate:",
+            "Stage 2 Low-Edge Candidate:",
+            "Best Optimizer Candidate",
+            "Low-Edge Optimizer Candidate",
+            "Final Verified Result",
+            "Optimizer verdict for",
+            "Sampling mode active:",
+            "Full Scan active:",
+            "No eligible profile under strict avg_profit gate;",
+            "No optimization profile passed stability constraints",
+            "Stage 2 verification produced no eligible profile",
+            "Optimization did not produce any result.",
+            "Backtest result saved to DB",
+            "Optimization for ",
+            "HMM regime detector failed",
+            "JIT alignment check failed",
+            "consistency probe failed",
+            "consistency probe error",
+            "EMA Band Rejection audit",
+        )
+        if not any(token in message for token in quiet_allow_tokens):
+            return None
+
+        if "profile={" in message:
+            message = re.sub(
+                r"profile=\{([^}]*)\}",
+                lambda match: f"profile={self._summarize_profile_blob(match.group(1))}",
+                message,
+                count=1,
+            )
+        return message
+
+    def _handle_backtest_thread_log(self, message: str) -> None:
+        self._write_backtest_detail_log(message)
+        compact_message = self._compact_backtest_thread_log_message(message)
+        if compact_message is None:
+            return
+        self._append_backtest_log(compact_message)
+
     def _start_backtest(
         self,
         *,
@@ -2482,7 +2732,9 @@ class TradingTerminalWindow(QMainWindow):
         strategy_override: str | None = None,
         auto_from_config: bool | None = None,
         interval_override: str | None = None,
+        allow_auto_interval_override: bool | None = None,
     ) -> None:
+        self._sync_backtest_symbol_universe()
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
             return
         live_running = self._bot_thread is not None and self._bot_thread.isRunning()
@@ -2495,6 +2747,13 @@ class TradingTerminalWindow(QMainWindow):
             if len(selected_symbols) > 1:
                 self._append_backtest_log(
                     f"Multiple coins selected ({len(selected_symbols)}). Starting selected batch instead of single-coin backtest."
+                )
+                self._on_run_selected_clicked()
+                return
+            selected_strategies = self._get_selected_backtest_strategy_names()
+            if len(selected_strategies) > 1:
+                self._append_backtest_log(
+                    f"Multiple strategies selected ({len(selected_strategies)}). Starting selected batch instead of single-coin backtest."
                 )
                 self._on_run_selected_clicked()
                 return
@@ -2588,12 +2847,29 @@ class TradingTerminalWindow(QMainWindow):
                 f"{requested_end_text} UTC."
             )
 
+        log_mode, log_context = self._resolve_backtest_log_mode_for_run(
+            symbol_override=symbol_override,
+            strategy_override=strategy_override,
+            interval_override=interval_override,
+        )
+        self._set_active_backtest_log_mode(log_mode, log_context)
+        self._append_backtest_log(
+            "Backtest log mode: "
+            f"{log_mode.upper()} "
+            f"(coins={log_context['coins']}, strategies={log_context['strategies']}, timeframes={log_context['timeframes']})."
+        )
+
         self.backtest_button.setEnabled(False)
-        self._backtest_thread = BacktestThread(
+        backtest_thread = BacktestThread(
             symbol=symbol,
             interval=backtest_interval,
             strategy_name=strategy_name,
             auto_from_config=auto_strategy_mode,
+            allow_auto_interval_override=(
+                bool(allow_auto_interval_override)
+                if allow_auto_interval_override is not None
+                else interval_override is None
+            ),
             leverage=leverage,
             min_confidence_pct=min_confidence_pct,
             optimize_profile=optimize_profile,
@@ -2601,13 +2877,19 @@ class TradingTerminalWindow(QMainWindow):
             db_path=self._db_path,
             history_requested_start_utc=history_requested_start_utc,
             history_end_utc=history_end_utc,
+            log_mode=log_mode,
         )
-        self._backtest_thread.log_message.connect(self._append_backtest_log)
-        self._backtest_thread.progress_update.connect(self._update_progress)
-        self._backtest_thread.backtest_finished.connect(self._handle_backtest_finished)
-        self._backtest_thread.backtest_error.connect(self._handle_backtest_error)
-        self._backtest_thread.finished.connect(self._handle_backtest_thread_finished)
-        self._backtest_thread.start()
+        self._backtest_thread = backtest_thread
+        backtest_thread.log_message.connect(self._handle_backtest_thread_log)
+        backtest_thread.progress_update.connect(self._update_progress)
+        backtest_thread.backtest_finished.connect(self._handle_backtest_finished)
+        backtest_thread.backtest_error.connect(self._handle_backtest_error)
+        backtest_thread.finished.connect(
+            lambda finished_thread=backtest_thread: self._handle_backtest_thread_finished(
+                finished_thread
+            )
+        )
+        backtest_thread.start()
         self.symbol_combo.setEnabled(False)
         self.backtest_coin_combo.setEnabled(False)
         self.backtest_strategy_combo.setEnabled(False)
@@ -2621,10 +2903,11 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_backtest_symbol_cards()
 
     def _on_run_all_clicked(self) -> None:
+        self._sync_backtest_symbol_universe()
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
             return
 
-        symbols = [self.backtest_coin_combo.itemText(index) for index in range(self.backtest_coin_combo.count())]
+        symbols = list(_configured_backtest_symbols())
         if not symbols:
             self._append_backtest_log("No symbols available for batch backtest.")
             return
@@ -2656,6 +2939,7 @@ class TradingTerminalWindow(QMainWindow):
         self._process_next_in_batch()
 
     def _on_run_selected_clicked(self) -> None:
+        self._sync_backtest_symbol_universe()
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
             return
 
@@ -2693,19 +2977,21 @@ class TradingTerminalWindow(QMainWindow):
     def _process_next_in_batch(self) -> None:
         if not self._batch_active:
             return
-        if self._backtest_thread is not None:
-            if self._backtest_thread.isRunning():
-                QTimer.singleShot(50, self._process_next_in_batch)
-                return
-            self._backtest_thread.deleteLater()
-            self._backtest_thread = None
+        if self._backtest_thread is not None and self._backtest_thread.isRunning():
+            QTimer.singleShot(50, self._process_next_in_batch)
+            return
         if not self._batch_queue:
             self._batch_active = False
             self._batch_mode = "standard"
+            self._batch_auto_strategy_flags.clear()
             self._batch_total_symbols = 0
             self._batch_started_symbols.clear()
             self._batch_completed_symbols.clear()
             self._batch_symbol_remaining_runs.clear()
+            self._set_active_backtest_log_mode(
+                self._BACKTEST_LOG_MODE_STANDARD,
+                {"coins": 1, "strategies": 1, "timeframes": 1},
+            )
             self._append_backtest_log("Batch Backtest completed!")
             self._finalize_backtest_report_session(status="completed")
             self.backtest_coin_combo.setEnabled(True)
@@ -2736,7 +3022,12 @@ class TradingTerminalWindow(QMainWindow):
             self.backtest_interval_combo.setCurrentText(interval_override)
             self.backtest_interval_combo.blockSignals(was_blocked)
         strategy_label = STRATEGY_LABELS.get(strategy_name, strategy_name)
-        if not self._is_backtest_auto_strategy():
+        auto_from_config_for_run = (
+            bool(self._batch_auto_strategy_flags.pop(0))
+            if self._batch_auto_strategy_flags
+            else False
+        )
+        if not auto_from_config_for_run:
             self._set_current_backtest_strategy(strategy_name)
         else:
             strategy_label = f"{strategy_label} [Auto]"
@@ -2756,8 +3047,9 @@ class TradingTerminalWindow(QMainWindow):
         self._start_backtest(
             symbol_override=symbol,
             strategy_override=strategy_name,
-            auto_from_config=BACKTEST_AUTO_STRATEGY in self._selected_backtest_strategies,
+            auto_from_config=auto_from_config_for_run,
             interval_override=interval_override,
+            allow_auto_interval_override=False,
         )
 
     def _stop_bot(self) -> None:
@@ -2783,10 +3075,15 @@ class TradingTerminalWindow(QMainWindow):
             self._batch_active = False
             self._batch_mode = "standard"
             self._batch_queue.clear()
+            self._batch_auto_strategy_flags.clear()
             self._batch_total_symbols = 0
             self._batch_started_symbols.clear()
             self._batch_completed_symbols.clear()
             self._batch_symbol_remaining_runs.clear()
+            self._set_active_backtest_log_mode(
+                self._BACKTEST_LOG_MODE_STANDARD,
+                {"coins": 1, "strategies": 1, "timeframes": 1},
+            )
             self._append_backtest_log(
                 f"Stopping batch backtest ({remaining_runs} remaining run(s) canceled)."
             )
@@ -2830,6 +3127,12 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_backtest_symbol_cards()
         if hasattr(self, "readiness_bars"):
             self.readiness_bars.clear_items()
+        if self._pending_close_request:
+            bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
+            backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
+            if not bot_running and not backtest_running:
+                self._pending_close_request = False
+                QTimer.singleShot(0, self.close)
 
     def _handle_backtest_finished(self, result: dict) -> None:
         (
@@ -2919,6 +3222,7 @@ class TradingTerminalWindow(QMainWindow):
             )
         self._update_live_symbol_card(symbol)
         winner_tag = "[WINNER] " if profit_factor > 1.0 else ""
+        verdict = "PASS" if (total_pnl_usd > 0.0 and profit_factor >= 1.0) else "WARN"
         self.backtest_total_pnl_label.setText(f"Total PnL: {total_pnl_usd:,.2f} USD")
         self.backtest_win_rate_label.setText(f"Win Rate: {win_rate_pct:,.2f}%")
         self.backtest_total_trades_label.setText(f"Total Trades: {total_trades}")
@@ -2941,18 +3245,31 @@ class TradingTerminalWindow(QMainWindow):
                 )
             if result.get("validated_profiles") is not None:
                 sample_note += f" validated={int(result.get('validated_profiles', 0) or 0)}"
+            optimizer_quality_status = str(
+                compact_summary.get("optimizer_quality_status")
+                or result.get("optimizer_quality_status")
+                or ""
+            ).strip().upper()
+            if optimizer_quality_status:
+                sample_note += f" quality={optimizer_quality_status}"
+            best_profile_preview = (
+                self._compact_profile_preview(best_profile)
+                if self._active_backtest_log_mode == self._BACKTEST_LOG_MODE_QUIET
+                else str(best_profile)
+            )
             self._append_backtest_log(
                 "Optimization finished: "
                 f"{'[KOTH WIN] ' if incoming_is_winner else '[KOTH HOLD] '}"
                 f"{winner_tag}{symbol} "
                 f"[{strategy_label} {interval}] "
-                f"best_profile={best_profile} "
+                f"best_profile={best_profile_preview} "
                 f"pnl={total_pnl_usd:,.2f} "
                 f"win_rate={win_rate_pct:,.2f}% "
                 f"trades={total_trades} (L: {long_trades} / S: {short_trades}) "
                 f"profit_factor={profit_factor_display} "
                 f"max_dd={float(result.get('max_drawdown_pct', 0.0)):.2f}% "
                 f"longest_losses={int(result.get('longest_consecutive_losses', 0) or 0)}"
+                f" verdict={verdict}"
                 f"{sample_note}"
             )
         else:
@@ -2964,7 +3281,8 @@ class TradingTerminalWindow(QMainWindow):
                 f"pnl={total_pnl_usd:,.2f} "
                 f"win_rate={win_rate_pct:,.2f}% "
                 f"trades={total_trades} (L: {long_trades} / S: {short_trades}) "
-                f"profit_factor={profit_factor_display}"
+                f"profit_factor={profit_factor_display} "
+                f"verdict={verdict}"
             )
         self._mark_batch_symbol_progress(symbol, success=True)
         if self._batch_active:
@@ -3010,16 +3328,31 @@ class TradingTerminalWindow(QMainWindow):
         self._append_backtest_log(progress_message)
         self.statusBar().showMessage(progress_message, 5000)
 
-    def _handle_backtest_thread_finished(self) -> None:
-        if self._backtest_thread is not None:
+    def _handle_backtest_thread_finished(
+        self,
+        finished_thread: BacktestThread | None = None,
+    ) -> None:
+        if finished_thread is not None:
+            finished_thread.deleteLater()
+            if finished_thread is self._backtest_thread:
+                self._backtest_thread = None
+        elif self._backtest_thread is not None:
             self._backtest_thread.deleteLater()
             self._backtest_thread = None
+
+        if self._backtest_thread is not None and self._backtest_thread.isRunning():
+            return
+
         if not self._batch_active and self._backtest_report_pending:
             final_status = "stopped" if self._backtest_stop_requested else "completed"
             self._finalize_backtest_report_session(status=final_status)
         self._backtest_stop_requested = False
         if self._batch_active:
             return
+        self._set_active_backtest_log_mode(
+            self._BACKTEST_LOG_MODE_STANDARD,
+            {"coins": 1, "strategies": 1, "timeframes": 1},
+        )
         self.backtest_coin_combo.setEnabled(True)
         self.backtest_strategy_combo.setEnabled(True)
         self.backtest_interval_combo.setEnabled(True)
@@ -3033,6 +3366,12 @@ class TradingTerminalWindow(QMainWindow):
         self._apply_button_states()
         self._refresh_live_symbol_cards()
         self._refresh_backtest_symbol_cards()
+        if self._pending_close_request:
+            bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
+            backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
+            if not bot_running and not backtest_running:
+                self._pending_close_request = False
+                QTimer.singleShot(0, self.close)
 
     def _on_leverage_changed(self, value: int) -> None:
         if self._bot_thread is not None:
@@ -3375,9 +3714,6 @@ class TradingTerminalWindow(QMainWindow):
             f"configured={int(result.get('configured_leverage', settings.trading.default_leverage) or settings.trading.default_leverage)}x "
             f"effective={effective_leverage}x",
             "HF Metrics\t"
-            f"reentry={int(result.get('reentry_trades_count', 0) or 0)} "
-            f"soft_lev={int(result.get('soft_leverage_trades_count', 0) or 0)} "
-            f"partial_tp={int(result.get('partial_tp_hits', 0) or 0)} "
             f"real_lev_avg={float(result.get('real_leverage_avg', 0.0) or 0.0):.2f}x",
             f"Stop / Take %\t{float(result.get('stop_loss_pct', 0.0) or 0.0):.2f} / {float(result.get('take_profit_pct', 0.0) or 0.0):.2f}",
             "Trailing Act / Dist %\t"
@@ -3419,6 +3755,13 @@ class TradingTerminalWindow(QMainWindow):
             lines.append(f"Theoretical Profiles\t{int(result.get('theoretical_profiles', 0) or 0)}")
             lines.append(f"Sampling Coverage %\t{float(result.get('sampling_coverage_pct', 0.0) or 0.0):.2f}")
             lines.append(f"Sampling Mode\t{str(result.get('sampling_mode', '') or 'n/a')}")
+            optimizer_quality_status = str(
+                result.get("optimizer_quality_status")
+                or compact_summary.get("optimizer_quality_status")
+                or ""
+            ).strip().upper()
+            if optimizer_quality_status:
+                lines.append(f"Optimizer Verdict\t{optimizer_quality_status}")
             lines.append(f"Search Window Candles\t{int(result.get('search_window_candles', 0) or 0)}")
             lines.append(f"Optimizer Workers\t{int(result.get('optimizer_worker_processes', 0) or 0)}")
             lines.append(
@@ -3542,9 +3885,6 @@ class TradingTerminalWindow(QMainWindow):
             "avg_win_fee_ratio": float(compact_summary.get("avg_win_fee_ratio", 0.0) or 0.0),
             "avg_win_fee_ratio_display": str(compact_summary.get("avg_win_fee_ratio_display", "0.00") or "0.00"),
             "avg_win_usd": float(compact_summary.get("avg_win_usd", result.get("average_win_usd", 0.0)) or 0.0),
-            "reentry_trades_count": int(compact_summary.get("reentry_trades_count", result.get("reentry_trades_count", 0)) or 0),
-            "soft_leverage_trades_count": int(compact_summary.get("soft_leverage_trades_count", result.get("soft_leverage_trades_count", 0)) or 0),
-            "partial_tp_hits": int(compact_summary.get("partial_tp_hits", result.get("partial_tp_hits", 0)) or 0),
             "real_leverage_avg": float(compact_summary.get("real_leverage_avg", result.get("real_leverage_avg", 0.0)) or 0.0),
             "longest_consecutive_losses": int(result.get("longest_consecutive_losses", 0) or 0),
             "real_rrr": float(result.get("real_rrr", 0.0) or 0.0),
@@ -3613,6 +3953,11 @@ class TradingTerminalWindow(QMainWindow):
             "sampling_coverage_pct": float(result.get("sampling_coverage_pct", 0.0) or 0.0),
             "sampling_random_seed": int(result.get("sampling_random_seed", 0) or 0),
             "sampling_mode": str(result.get("sampling_mode", "") or "n/a"),
+            "optimizer_quality_status": str(
+                compact_summary.get("optimizer_quality_status")
+                or result.get("optimizer_quality_status")
+                or ""
+            ).strip().upper(),
             "search_window_candles": int(result.get("search_window_candles", 0) or 0),
             "full_history_optimization": bool(result.get("full_history_optimization")),
             "optimizer_worker_processes": int(result.get("optimizer_worker_processes", 0) or 0),
@@ -3970,7 +4315,7 @@ class TradingTerminalWindow(QMainWindow):
             f"Full-History Optimization: {full_history_optimization_display}",
             "",
             "Run Details",
-            "symbol | strategy | interval | leverage | real_leverage_avg | reentry_trades | soft_leverage_trades | partial_tp_hits | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top",
+            "symbol | strategy | interval | leverage | real_leverage_avg | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top",
         ]
         for entry in entries:
             strategy_name = str(entry.get("strategy_name", ""))
@@ -3990,9 +4335,6 @@ class TradingTerminalWindow(QMainWindow):
                         str(entry.get("interval", "-")),
                         f"{int(entry.get('effective_leverage', 0) or 0)}x",
                         f"{float(entry.get('real_leverage_avg', 0.0) or 0.0):.2f}x",
-                        str(int(entry.get("reentry_trades_count", 0) or 0)),
-                        str(int(entry.get("soft_leverage_trades_count", 0) or 0)),
-                        str(int(entry.get("partial_tp_hits", 0) or 0)),
                         period_utc,
                         str(int(entry.get("history_candles", 0) or 0)),
                         str(int(entry.get("total_signals", 0) or 0)),
@@ -4071,7 +4413,7 @@ class TradingTerminalWindow(QMainWindow):
                 [
                     "",
                     "Strategy Aggregates (All Coins)",
-                    "strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals | avg_reentry_trades | avg_soft_leverage_trades | avg_partial_tp_hits | avg_real_leverage",
+                    "strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals | avg_real_leverage",
                 ]
             )
             sorted_groups = sorted(
@@ -4160,33 +4502,6 @@ class TradingTerminalWindow(QMainWindow):
                     if group_runs > 0
                     else 0.0
                 )
-                group_avg_reentry_trades = (
-                    sum(
-                        int(group_entry.get("reentry_trades_count", 0) or 0)
-                        for group_entry in group_entries
-                    )
-                    / group_runs
-                    if group_runs > 0
-                    else 0.0
-                )
-                group_avg_soft_leverage_trades = (
-                    sum(
-                        int(group_entry.get("soft_leverage_trades_count", 0) or 0)
-                        for group_entry in group_entries
-                    )
-                    / group_runs
-                    if group_runs > 0
-                    else 0.0
-                )
-                group_avg_partial_tp_hits = (
-                    sum(
-                        int(group_entry.get("partial_tp_hits", 0) or 0)
-                        for group_entry in group_entries
-                    )
-                    / group_runs
-                    if group_runs > 0
-                    else 0.0
-                )
                 group_avg_real_leverage = (
                     sum(
                         float(group_entry.get("real_leverage_avg", 0.0) or 0.0)
@@ -4245,9 +4560,6 @@ class TradingTerminalWindow(QMainWindow):
                             f"{group_avg_total_signals:.2f}",
                             f"{group_avg_approved_signals:.2f}",
                             f"{group_avg_blocked_signals:.2f}",
-                            f"{group_avg_reentry_trades:.2f}",
-                            f"{group_avg_soft_leverage_trades:.2f}",
-                            f"{group_avg_partial_tp_hits:.2f}",
                             f"{group_avg_real_leverage:.2f}",
                         ]
                     )
@@ -4505,8 +4817,13 @@ class TradingTerminalWindow(QMainWindow):
         self._append_html_log(self.log_output, formatted_message, auto_scroll=is_trade_event)
 
     def _append_backtest_log(self, message: str) -> None:
+        progress_prefix = ""
         if message.startswith(self._HISTORY_PROGRESS_PREFIX):
-            compact_message = message[len(self._HISTORY_PROGRESS_PREFIX):].strip()
+            progress_prefix = self._HISTORY_PROGRESS_PREFIX
+        elif message.startswith(self._SIGNAL_CACHE_PROGRESS_PREFIX):
+            progress_prefix = self._SIGNAL_CACHE_PROGRESS_PREFIX
+        if progress_prefix:
+            compact_message = message[len(progress_prefix):].strip()
             formatted_message, _is_trade_event = self._format_log_html(compact_message)
             self._append_html_log(
                 self.backtest_log_output,
@@ -4550,6 +4867,68 @@ class TradingTerminalWindow(QMainWindow):
             trim_cursor.deleteChar()
         if auto_scroll and was_at_bottom:
             scrollbar.setValue(scrollbar.maximum())
+
+    def _sync_backtest_symbol_universe(self) -> None:
+        configured_symbols = list(_configured_backtest_symbols())
+        if not configured_symbols:
+            return
+
+        if hasattr(self, "backtest_coin_combo"):
+            existing_combo_symbols = [
+                self.backtest_coin_combo.itemText(index)
+                for index in range(self.backtest_coin_combo.count())
+            ]
+            if existing_combo_symbols != configured_symbols:
+                current_symbol = self.backtest_coin_combo.currentText()
+                was_blocked = self.backtest_coin_combo.blockSignals(True)
+                self.backtest_coin_combo.clear()
+                self.backtest_coin_combo.addItems(configured_symbols)
+                target_symbol = (
+                    current_symbol
+                    if current_symbol in configured_symbols
+                    else configured_symbols[0]
+                )
+                self.backtest_coin_combo.setCurrentText(target_symbol)
+                self.backtest_coin_combo.blockSignals(was_blocked)
+
+        stale_symbols = [
+            symbol
+            for symbol in list(self._backtest_coin_cards.keys())
+            if symbol not in configured_symbols
+        ]
+        for symbol in stale_symbols:
+            card = self._backtest_coin_cards.pop(symbol, None)
+            if card is None:
+                continue
+            with suppress(Exception):
+                card.setParent(None)
+            with suppress(Exception):
+                card.deleteLater()
+
+        for symbol in configured_symbols:
+            if symbol in self._backtest_coin_cards:
+                continue
+            card = LiveSymbolCard(symbol, compact=True, show_deploy_button=True)
+            card.clicked.connect(self._toggle_backtest_symbol_selection)
+            card.deploy_requested.connect(self._deploy_backtest_symbol_to_live)
+            self._backtest_coin_cards[symbol] = card
+
+        self._selected_backtest_symbols = {
+            symbol for symbol in self._selected_backtest_symbols if symbol in configured_symbols
+        }
+        if not self._selected_backtest_symbols:
+            fallback_symbol = (
+                self._current_backtest_symbol()
+                if hasattr(self, "backtest_coin_combo")
+                else configured_symbols[0]
+            )
+            if fallback_symbol not in configured_symbols:
+                fallback_symbol = configured_symbols[0]
+            self._selected_backtest_symbols = {fallback_symbol}
+
+        if hasattr(self, "backtest_symbols_layout"):
+            self._rebuild_backtest_symbol_grid()
+        self._refresh_backtest_symbol_cards()
 
     def _get_selected_live_symbols(self) -> list[str]:
         return [
@@ -4665,6 +5044,8 @@ class TradingTerminalWindow(QMainWindow):
         default_strategy_name = self._current_live_strategy_name()
         for symbol, card in self._coin_cards.items():
             is_selected = symbol in self._selected_live_symbols
+            runtime_profile = self._live_runtime_profiles.get(symbol, {})
+            is_live_candidate = bool(runtime_profile.get("live_candidate", False))
             resolved_strategy_name = resolve_strategy_for_symbol(symbol, default_strategy_name)
             resolved_interval = resolve_interval_for_symbol(symbol, self._live_interval)
             card.set_selected(is_selected)
@@ -4672,7 +5053,7 @@ class TradingTerminalWindow(QMainWindow):
             card.set_win_rate(self._live_win_rates.get(symbol))
             card.set_trade_count(self._live_trade_counts.get(symbol))
             card.set_strategy_badge(
-                get_strategy_badge(symbol, default_strategy_name),
+                "LIVE_CANDIDATE" if is_live_candidate else get_strategy_badge(symbol, default_strategy_name),
                 resolved_strategy_name,
                 resolved_interval,
             )
@@ -4751,11 +5132,7 @@ class TradingTerminalWindow(QMainWindow):
 
     def _toggle_backtest_strategy_selection(self, strategy_name: str, checked: bool) -> None:
         if checked:
-            if strategy_name == BACKTEST_AUTO_STRATEGY:
-                self._selected_backtest_strategies = {BACKTEST_AUTO_STRATEGY}
-            else:
-                self._selected_backtest_strategies.discard(BACKTEST_AUTO_STRATEGY)
-                self._selected_backtest_strategies.add(strategy_name)
+            self._selected_backtest_strategies.add(strategy_name)
         else:
             self._selected_backtest_strategies.discard(strategy_name)
         if len(self._selected_backtest_strategies) == 1:
@@ -4765,6 +5142,10 @@ class TradingTerminalWindow(QMainWindow):
                 was_blocked = self.backtest_strategy_combo.blockSignals(True)
                 self.backtest_strategy_combo.setCurrentIndex(combo_index)
                 self.backtest_strategy_combo.blockSignals(was_blocked)
+        elif len(self._selected_backtest_strategies) > 1:
+            was_blocked = self.backtest_strategy_combo.blockSignals(True)
+            self.backtest_strategy_combo.setCurrentIndex(-1)
+            self.backtest_strategy_combo.blockSignals(was_blocked)
         elif not self._selected_backtest_strategies:
             was_blocked = self.backtest_strategy_combo.blockSignals(True)
             self.backtest_strategy_combo.setCurrentIndex(-1)
@@ -4863,6 +5244,16 @@ class TradingTerminalWindow(QMainWindow):
         self.coin_radar_count_label.setText(f"({coin_count} coin{suffix})")
 
     def _determine_symbol_status(self, symbol: str, is_selected: bool) -> tuple[str, str]:
+        runtime_profile = self._live_runtime_profiles.get(symbol, {})
+        if bool(runtime_profile.get("live_candidate", False)):
+            candidate_status = str(
+                runtime_profile.get("live_candidate_status", "ACTIVE")
+            ).strip().upper() or "ACTIVE"
+            if candidate_status == "KILL_SWITCHED":
+                return "KILL_SWITCHED", ACCENT_DANGER
+            if candidate_status == "PAUSED":
+                return "PAUSED", ACCENT_WARNING
+            return "ACTIVE", ACCENT_PROFIT
         heartbeat_info = self._heartbeat_snapshot.get(symbol)
         if heartbeat_info is not None and str(heartbeat_info.get("status", "OK")).upper() == "LAGGING":
             return "LAGGING", ACCENT_WARNING
@@ -5445,7 +5836,10 @@ class TradingTerminalWindow(QMainWindow):
         profile_settings = runtime_settings.trading.coin_profiles.get(symbol)
         if profile_settings is None:
             return False
-        return profile_settings.default_leverage == 25
+        expected_leverage = 25
+        with suppress(Exception):
+            expected_leverage = int(production_profile.get("default_leverage", 25) or 25)
+        return profile_settings.default_leverage == expected_leverage
 
     def _is_live_leverage_confirmed_for_symbol(
         self,
@@ -5453,11 +5847,16 @@ class TradingTerminalWindow(QMainWindow):
         *,
         runtime_settings,
     ) -> bool:
+        production_registry = getattr(config_module, "PRODUCTION_PROFILE_REGISTRY", {}) or {}
+        production_profile = production_registry.get(symbol, {})
+        expected_leverage = 25
+        with suppress(Exception):
+            expected_leverage = int(production_profile.get("default_leverage", 25) or 25)
         runtime_profile = self._live_runtime_profiles.get(symbol)
         if runtime_profile is not None:
             effective_leverage = runtime_profile.get("effective_leverage")
             with suppress(Exception):
-                return int(effective_leverage) == 25
+                return int(effective_leverage) == int(expected_leverage)
             return False
         _ = runtime_settings
         return False

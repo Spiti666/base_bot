@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from copy import deepcopy
 import ctypes
 import gc
@@ -30,6 +31,8 @@ from config import (
     BACKTEST_ONLY_AVAILABLE_STRATEGIES,
     BACKTEST_OPTIMIZER_COIN_STRATEGIES,
     COIN_STRATEGIES,
+    EMA_BAND_REJECTION_1H_EXCLUDED_COINS,
+    EMA_BAND_REJECTION_1H_WINNERS,
     MAX_BACKTEST_CANDLES,
     PRODUCTION_PROFILE_REGISTRY,
     settings,
@@ -37,10 +40,12 @@ from config import (
 from core.api.bitunix import BitunixClient
 from core.api.websocket import MultiTimeframeWebSocketManager
 from core.data.db import CandleRecord, Database, PaperTrade
+from core.data_pipeline import PolarsDataLoader
 from core.data.history import HistoryManager
 from core.patterns.setup_gate import SmartSetupGate
 from core.regime.hmm_regime_detector import HMMRegimeDetector
 from core.paper_trading.engine import PaperTradingEngine
+from engine.compiled_core import run_fast_backtest_loop, run_fast_backtest_loop_detailed
 from strategies.python.dual_thrust_breakout import (
     build_dual_thrust_signal_frame,
     run_python_dual_thrust,
@@ -51,6 +56,10 @@ from strategies.python.ema_cross_volume import (
     build_ema_cross_volume_signal_frame,
     run_python_ema_cross_volume,
 )
+from strategies.python.ema_band_rejection import (
+    build_ema_band_rejection_signal_frame,
+    run_python_ema_band_rejection,
+)
 from strategies.python.frama_cross import (
     build_frama_cross_signal_frame,
     run_python_frama_cross,
@@ -58,6 +67,10 @@ from strategies.python.frama_cross import (
 from strategies.python.supertrend_ema import (
     run_python_supertrend_ema,
     should_exit_python_supertrend_ema,
+)
+from strategies.jit_indicators import (
+    compute_ema_band_rejection_signals,
+    generate_strategy_signals,
 )
 
 
@@ -68,6 +81,7 @@ STRATEGY_NAME_ALIASES = {
 }
 STRATEGY_RUNNERS: dict[str, StrategyRunner] = {
     "ema_cross_volume": run_python_ema_cross_volume,
+    "ema_band_rejection": run_python_ema_band_rejection,
     "frama_cross": run_python_frama_cross,
     "dual_thrust": run_python_dual_thrust,
     "supertrend_ema": run_python_supertrend_ema,
@@ -75,6 +89,7 @@ STRATEGY_RUNNERS: dict[str, StrategyRunner] = {
 BACKTEST_EXECUTION_STRATEGIES: frozenset[str] = frozenset(
     {
         "ema_cross_volume",
+        "ema_band_rejection",
         "frama_cross",
         "dual_thrust",
     }
@@ -82,7 +97,7 @@ BACKTEST_EXECUTION_STRATEGIES: frozenset[str] = frozenset(
 BACKTEST_STRATEGY_REGISTRY: dict[str, dict[str, object]] = {}
 SETUP_GATE_SETTLED_WARMUP_CANDLES = 500
 LIVE_SETTLED_WARMUP_CANDLES = SETUP_GATE_SETTLED_WARMUP_CANDLES
-MAX_OPTIMIZATION_WORKERS = 16
+MAX_OPTIMIZATION_WORKERS = 28
 OPTIMIZER_WORKER_MAX_TASKS_PER_CHILD = 100
 OPTIMIZER_MEMORY_RESERVE_GB = 2.0
 OPTIMIZER_MEMORY_PER_WORKER_GB = 0.75
@@ -94,11 +109,24 @@ BACKTEST_FEE_STRESS_MULTIPLIER = 1.25
 LIVE_TAKER_FEE_PCT_STRESS = 0.0625
 LIVE_BREAKEVEN_ACTIVATION_PCT = 3.5
 LIVE_BREAKEVEN_BUFFER_PCT = 0.2
+LIVE_EMA_BAND_REJECTION_CANDIDATE_SYMBOL = "FILUSDT"
+LIVE_EMA_BAND_REJECTION_CANDIDATE_POLICY: dict[str, float | int | str] = {
+    "strategy_name": "ema_band_rejection",
+    "interval": "1h",
+    "target_leverage": 5,
+    "risk_multiplier": 0.35,
+    "max_loss_streak": 4,
+    "max_drawdown_pct": 6.0,
+    "pf_window_size": 20,
+    "pf_minimum": 1.0,
+    "fill_slippage_window_size": 20,
+    "max_avg_fill_slippage_pct": 0.15,
+}
 MAX_OPTIMIZATION_GRID_PROFILES = 600_000
 OPTIMIZER_MIN_TOTAL_TRADES = 20
 OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT = 3.5
 OPTIMIZER_MIN_AVERAGE_WIN_TO_COST_RATIO = 3.0
-OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT = 0.15
+OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT = 0.05
 OPTIMIZER_SORT_PROFIT_FACTOR_CAP = 100.0
 RANKING_MIN_PROFIT_FACTOR = 1.25
 OPTIMIZER_STRONG_SAMPLE_MIN_TRADES = 100
@@ -115,21 +143,37 @@ OPTIMIZER_SHORT_INTERVAL_WINDOW_OVERRIDES: dict[str, int] = {
 }
 TRACE_VALUE_UNAVAILABLE = "unavailable"
 MAX_STRATEGY_FAMILY_GRID_PROFILES = 64_000
-SOFT_APPROVAL_VOLUME_RATIO_MIN = 1.1
-SOFT_APPROVAL_VOLUME_RATIO_FULL = 1.5
-SOFT_APPROVAL_SIGNAL_MULTIPLIER = 2
+OPTIMIZER_BREAKEVEN_MIN_BY_STRATEGY: dict[str, float | None] = {
+    "ema_band_rejection": 1.5,
+}
+OPTIMIZER_TWO_STAGE_DEFAULT_ENABLED = True
+OPTIMIZER_TWO_STAGE_DEFAULT_STRATEGIES: frozenset[str] = frozenset(
+    {"ema_band_rejection"}
+)
+OPTIMIZER_TWO_STAGE_STAGE1_TARGET_PROFILES_DEFAULT = 2_500
+OPTIMIZER_TWO_STAGE_STAGE2_TOP_N_DEFAULT = 100
+OPTIMIZER_TWO_STAGE_STAGE1_SEARCH_WINDOW_CANDLES_DEFAULT = 25_000
+OPTIMIZER_TWO_STAGE_STAGE2_SEARCH_WINDOW_CANDLES_DEFAULT = 70_000
+OPTIMIZER_WORKER_CAP_BY_STRATEGY_DEFAULT: dict[str, int] = {
+    "ema_band_rejection": 16,
+}
+OPTIMIZER_FORCE_FULL_VERIFICATION_FOR_WINNER_DEFAULT = True
+OPTIMIZER_JIT_STRATEGY_CONSISTENT_BACKTEST: frozenset[str] = frozenset(
+    {
+        "ema_band_rejection",
+        "frama_cross",
+    }
+)
 
 FRAMA_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "frama_fast_period": (6, 12, 20, 28),
-    "frama_slow_period": (40, 90, 150, 200),
-    "volume_multiplier": (1.75, 2.5, 4.0),
-    "chandelier_period": (30, 40),
-    "chandelier_multiplier": (2.5, 3.5),
-    "stop_loss_pct": (1.5, 3.0, 5.0, 7.0),
-    "take_profit_pct": (3.5, 5.0, 10.0, 15.0),
-    "trailing_activation_pct": (3.0, 4.5, 6.0, 8.0, 10.0),
-    "trailing_distance_pct": (0.2, 0.3, 0.8, 2.0),
-    "breakeven_activation_pct": (3.5,),
+    "frama_fast_period": (8, 13, 21),
+    "frama_slow_period": (40, 60, 100, 200, 400),
+    "volume_multiplier": (1.0, 1.5, 2.0, 2.5),
+    "stop_loss_pct": (0.5, 1.0, 1.5, 2.0, 3.0),
+    "take_profit_pct": (1.5, 3.0, 5.0, 7.5, 10.0, 15.0),
+    "trailing_activation_pct": (3.0, 5.0, 7.5, 10.0),
+    "trailing_distance_pct": (0.1, 0.3, 0.5),
+    "breakeven_activation_pct": (2.0, 3.5, 5.0),
     "breakeven_buffer_pct": (0.2,),
 }
 FRAMA_GRID_TRIM_ORDER: tuple[str, ...] = (
@@ -138,21 +182,17 @@ FRAMA_GRID_TRIM_ORDER: tuple[str, ...] = (
     "take_profit_pct",
     "stop_loss_pct",
     "volume_multiplier",
-    "chandelier_multiplier",
-    "chandelier_period",
 )
 
 EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "ema_fast_period": (5, 13, 21, 25, 55),
-    "ema_slow_period": (150, 180, 250, 300),
+    "ema_fast_period": (9, 13, 21, 55),
+    "ema_slow_period": (100, 200, 300, 600),
     "volume_multiplier": (2.25, 3.0, 4.0),
-    "chandelier_period": (14, 30),
-    "chandelier_multiplier": (3.0, 3.5),
-    "stop_loss_pct": (1.0, 3.0, 5.0, 7.0),
-    "take_profit_pct": (3.5, 5.0, 10.0, 15.0),
-    "trailing_activation_pct": (3.0, 4.5, 6.0, 8.0, 10.0),
-    "trailing_distance_pct": (0.3, 0.8, 2.0),
-    "breakeven_activation_pct": (3.5,),
+    "stop_loss_pct": (0.5, 1.0, 1.5, 2.0, 3.0),
+    "take_profit_pct": (1.5, 3.0, 5.0, 7.5, 10.0, 15.0),
+    "trailing_activation_pct": (3.0, 5.0, 7.5, 10.0),
+    "trailing_distance_pct": (0.1, 0.3, 0.5),
+    "breakeven_activation_pct": (2.0, 3.5, 5.0),
     "breakeven_buffer_pct": (0.2,),
     "tight_trailing_activation_pct": (8.0,),
     "tight_trailing_distance_pct": (0.3,),
@@ -163,21 +203,60 @@ EMA_CROSS_VOLUME_GRID_TRIM_ORDER: tuple[str, ...] = (
     "take_profit_pct",
     "stop_loss_pct",
     "volume_multiplier",
-    "chandelier_multiplier",
-    "chandelier_period",
+)
+
+EMA_BAND_REJECTION_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
+    "ema_fast": (5,),
+    "ema_mid": (10,),
+    "ema_slow": (20,),
+    "slope_lookback": (3, 5),
+    "min_ema_spread_pct": (0.05, 0.08),
+    "min_slow_slope_pct": (0.0, 0.02),
+    "pullback_requires_outer_band_touch": (0, 1),
+    "use_rejection_quality_filter": (0, 1),
+    "rejection_wick_min_ratio": (0.35,),
+    "rejection_body_min_ratio": (0.20,),
+    "use_rsi_filter": (0, 1),
+    "rsi_length": (14,),
+    "rsi_midline": (50.0,),
+    "use_rsi_cross_filter": (0, 1),
+    "rsi_midline_margin": (0.0, 1.0),
+    "use_volume_filter": (0, 1),
+    "volume_ma_length": (20,),
+    "volume_multiplier": (1.0, 1.25),
+    "use_atr_stop_buffer": (0, 1),
+    "atr_length": (14,),
+    "atr_stop_buffer_mult": (0.5,),
+    "signal_cooldown_bars": (0, 3),
+    "stop_loss_pct": (1.0, 1.5, 2.0),
+    "take_profit_pct": (2.0, 3.0, 5.0),
+    "trailing_activation_pct": (2.0, 3.0, 5.0),
+    "trailing_distance_pct": (0.1, 0.3),
+    "breakeven_activation_pct": (1.5, 2.0, 2.5),
+    "breakeven_buffer_pct": (0.2,),
+}
+EMA_BAND_REJECTION_GRID_TRIM_ORDER: tuple[str, ...] = (
+    "signal_cooldown_bars",
+    "min_slow_slope_pct",
+    "pullback_requires_outer_band_touch",
+    "use_rejection_quality_filter",
+    "trailing_distance_pct",
+    "trailing_activation_pct",
+    "take_profit_pct",
+    "stop_loss_pct",
+    "min_ema_spread_pct",
+    "slope_lookback",
 )
 
 DUAL_THRUST_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "dual_thrust_k1": (0.2, 0.5, 0.8, 1.0, 1.2, 1.5, 1.8),
-    "dual_thrust_k2": (0.2, 0.3, 0.5, 0.8),
-    "dual_thrust_period": (34, 55, 89, 144, 233),
-    "chandelier_period": (30,),
-    "chandelier_multiplier": (1.5, 2.5, 4.0),
-    "stop_loss_pct": (1.5, 2.0, 3.0, 4.0),
-    "take_profit_pct": (5.0, 10.0, 15.0),
-    "trailing_activation_pct": (6.0, 8.0, 10.0),
-    "trailing_distance_pct": (0.15, 0.3, 0.5, 1.0),
-    "breakeven_activation_pct": (3.5,),
+    "dual_thrust_k1": (0.2, 0.3, 0.5, 0.8),
+    "dual_thrust_k2": (0.1, 0.2, 0.3, 0.5),
+    "dual_thrust_period": (20, 55, 100, 200, 400, 610),
+    "stop_loss_pct": (0.5, 1.0, 1.5, 2.0, 3.0),
+    "take_profit_pct": (1.5, 3.0, 5.0, 7.5, 10.0, 15.0),
+    "trailing_activation_pct": (3.0, 5.0, 7.5, 10.0),
+    "trailing_distance_pct": (0.1, 0.3, 0.5),
+    "breakeven_activation_pct": (2.0, 3.5, 5.0),
     "breakeven_buffer_pct": (0.2,),
     "tight_trailing_activation_pct": (8.0,),
     "tight_trailing_distance_pct": (0.3,),
@@ -187,13 +266,14 @@ DUAL_THRUST_GRID_TRIM_ORDER: tuple[str, ...] = (
     "trailing_activation_pct",
     "take_profit_pct",
     "stop_loss_pct",
-    "chandelier_multiplier",
 )
 _OPTIMIZER_SETTINGS_LOCK = RLock()
 _WORKER_CANDLES_DF: pd.DataFrame | None = None
 _WORKER_CANDLE_ROWS: list[dict[str, object]] | None = None
 _WORKER_REGIME_MASK: list[int] | None = None
 _WORKER_STRATEGY_SIGNAL_CACHE: dict[object, dict[str, object]] | None = None
+_WORKER_OHLCV_ARRAYS: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+_NUMBA_WARMUP_DONE = False
 
 
 def _resolve_backtest_history_start_utc() -> datetime:
@@ -233,6 +313,29 @@ def _resolve_backtest_round_trip_cost_pct() -> float:
     return max(0.0, (_resolve_backtest_fee_pct() * 2.0) + BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE)
 
 
+def _resolve_optimizer_min_breakeven_activation_pct_for_strategy(
+    strategy_name: str | None,
+) -> float | None:
+    resolved_strategy_name = None
+    if strategy_name is not None:
+        with suppress(Exception):
+            resolved_strategy_name = _validate_strategy_name(str(strategy_name))
+    if resolved_strategy_name is None and strategy_name is not None:
+        resolved_strategy_name = str(strategy_name).strip().lower() or None
+    if resolved_strategy_name in OPTIMIZER_BREAKEVEN_MIN_BY_STRATEGY:
+        return OPTIMIZER_BREAKEVEN_MIN_BY_STRATEGY[resolved_strategy_name]
+    return float(OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT)
+
+
+def _describe_optimizer_breakeven_constraint(strategy_name: str | None) -> str:
+    minimum_value = _resolve_optimizer_min_breakeven_activation_pct_for_strategy(
+        strategy_name
+    )
+    if minimum_value is None:
+        return "breakeven_activation_pct: no minimum"
+    return f"breakeven_activation_pct >= {float(minimum_value):.1f}%"
+
+
 def _profile_meets_breakeven_constraint(
     strategy_profile: OptimizationProfile,
     *,
@@ -247,10 +350,20 @@ def _profile_meets_breakeven_constraint(
             resolved_strategy_name = _validate_strategy_name(
                 str(strategy_profile.get("strategy_name", ""))
             )
+    minimum_breakeven_activation_pct = (
+        _resolve_optimizer_min_breakeven_activation_pct_for_strategy(
+            resolved_strategy_name
+        )
+    )
+    if minimum_breakeven_activation_pct is None:
+        return True
     if "breakeven_activation_pct" not in strategy_profile:
         return True
     with suppress(Exception):
-        return float(strategy_profile["breakeven_activation_pct"]) >= OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT
+        return (
+            float(strategy_profile["breakeven_activation_pct"])
+            >= float(minimum_breakeven_activation_pct)
+        )
     return False
 
 
@@ -258,7 +371,7 @@ def _resolve_avg_profit_per_trade_net_pct(summary: Mapping[str, object]) -> floa
     total_trades = float(summary.get("total_trades", 0.0) or 0.0)
     if total_trades <= 0.0:
         return 0.0
-    start_capital = float(settings.trading.start_capital)
+    start_capital = float(summary.get("start_capital_usd", settings.trading.start_capital) or settings.trading.start_capital)
     if not math.isfinite(start_capital) or start_capital <= 0.0:
         return 0.0
     total_pnl_usd = float(summary.get("total_pnl_usd", 0.0) or 0.0)
@@ -278,26 +391,30 @@ def _profile_meets_avg_profit_per_trade_hurdle(summary: Mapping[str, object]) ->
     )
 
 
+def _resolve_optimizer_min_total_trades_for_interval(interval: str) -> int:
+    interval_text = str(interval).strip()
+    with suppress(Exception):
+        interval_text = _validate_interval_name(interval_text)
+    with suppress(Exception):
+        interval_seconds = int(_interval_total_seconds(interval_text))
+        if interval_seconds <= int(_interval_total_seconds("15m")):
+            return 20
+        if interval_seconds == int(_interval_total_seconds("1h")):
+            return 12
+        if interval_seconds >= int(_interval_total_seconds("4h")):
+            return 8
+    return int(OPTIMIZER_MIN_TOTAL_TRADES)
+
+
 def _apply_strategy_interval_profile_constraints(
     profiles: Sequence[OptimizationProfile],
     *,
     strategy_name: str,
     interval: str,
 ) -> list[OptimizationProfile]:
-    normalized_strategy = _validate_strategy_name(strategy_name)
-    normalized_interval = _validate_interval_name(interval)
-    constrained_profiles = [dict(profile) for profile in profiles]
-    if normalized_strategy == "frama_cross" and normalized_interval == "15m":
-        constrained_profiles = [
-            profile
-            for profile in constrained_profiles
-            if (
-                float(profile.get("frama_slow_period", 0.0) or 0.0) >= 150.0
-                and float(profile.get("volume_multiplier", 0.0) or 0.0) >= 1.25
-                and float(profile.get("take_profit_pct", 0.0) or 0.0) >= 1.5
-            )
-        ]
-    return constrained_profiles
+    _ = _validate_strategy_name(strategy_name)
+    _ = _validate_interval_name(interval)
+    return [dict(profile) for profile in profiles]
 
 
 def _enforce_optimizer_min_confidence_floor(min_confidence_pct: float | None) -> float | None:
@@ -359,66 +476,84 @@ def _resolve_optimizer_search_window_candles(interval: str) -> int:
     return max(1, min(configured_window, int(override_window)))
 
 
-def _optimization_chandelier_profiles() -> list[tuple[int, float]]:
-    period_options = tuple(
-        int(value)
-        for value in getattr(
-            settings.trading,
-            "universal_chandelier_period_options",
-            (settings.trading.chandelier_period,),
-        )
-    )
-    multiplier_options = tuple(
-        float(value)
-        for value in getattr(
-            settings.trading,
-            "universal_chandelier_multiplier_options",
-            (settings.trading.chandelier_multiplier,),
-        )
-    )
-    return [
-        (int(chandelier_period), float(chandelier_multiplier))
-        for chandelier_period, chandelier_multiplier in product(
-            period_options,
-            multiplier_options,
-        )
-        if int(chandelier_period) > 1 and float(chandelier_multiplier) > 0.0
-    ]
-
-
-def _optimization_risk_profiles() -> list[tuple[float, float, float, float, int, float]]:
+def _optimization_risk_profiles() -> list[tuple[float, float, float, float]]:
     # Use universal risk grid when present.
     tp_opts = getattr(settings.trading, "universal_take_profit_pct_options", settings.trading.optimization_take_profit_pct_options)
     sl_opts = getattr(settings.trading, "universal_stop_loss_pct_options", settings.trading.optimization_stop_loss_pct_options)
     ta_opts = getattr(settings.trading, "universal_trailing_activation_pct_options", settings.trading.optimization_trailing_activation_pct_options)
     td_opts = getattr(settings.trading, "universal_trailing_distance_pct_options", settings.trading.optimization_trailing_distance_pct_options)
-    chandelier_profiles = _optimization_chandelier_profiles()
-    if not chandelier_profiles:
-        chandelier_profiles = [(int(settings.trading.chandelier_period), float(settings.trading.chandelier_multiplier))]
     return [
         (
             float(take_profit_pct),
             float(stop_loss_pct),
             float(trailing_activation_pct),
             float(trailing_distance_pct),
-            int(chandelier_period),
-            float(chandelier_multiplier),
         )
         for (
             take_profit_pct,
             stop_loss_pct,
             trailing_activation_pct,
             trailing_distance_pct,
-            (chandelier_period, chandelier_multiplier),
         ) in product(
             tp_opts,
             sl_opts,
             ta_opts,
             td_opts,
-            chandelier_profiles,
         )
-        if float(trailing_distance_pct) < float(trailing_activation_pct)
+        if _passes_common_risk_profile_guards(
+            take_profit_pct=float(take_profit_pct),
+            stop_loss_pct=float(stop_loss_pct),
+            trailing_activation_pct=float(trailing_activation_pct),
+            trailing_distance_pct=float(trailing_distance_pct),
+        )
     ]
+
+
+def _passes_common_risk_profile_guards(
+    *,
+    take_profit_pct: float,
+    stop_loss_pct: float,
+    trailing_activation_pct: float,
+    trailing_distance_pct: float,
+) -> bool:
+    if not (
+        math.isfinite(take_profit_pct)
+        and math.isfinite(stop_loss_pct)
+        and math.isfinite(trailing_activation_pct)
+        and math.isfinite(trailing_distance_pct)
+    ):
+        return False
+    if stop_loss_pct <= 0.0:
+        return False
+    # Risk-Reward guard: reject non-positive edge and weak RRR combinations.
+    if take_profit_pct <= stop_loss_pct:
+        return False
+    if (take_profit_pct / stop_loss_pct) < 1.5:
+        return False
+    # Keep trailing distance meaningfully below activation threshold.
+    if trailing_distance_pct > (trailing_activation_pct * 0.5):
+        return False
+    return True
+
+
+def _passes_ema_band_rejection_exit_profile_guards(
+    *,
+    take_profit_pct: float,
+    trailing_activation_pct: float,
+    breakeven_activation_pct: float,
+) -> bool:
+    if not (
+        math.isfinite(take_profit_pct)
+        and math.isfinite(trailing_activation_pct)
+        and math.isfinite(breakeven_activation_pct)
+    ):
+        return False
+    # Avoid dead combinations where management cannot logically activate before TP.
+    if breakeven_activation_pct >= take_profit_pct:
+        return False
+    if trailing_activation_pct >= take_profit_pct:
+        return False
+    return True
 
 
 def generate_trade_management_optimization_grid() -> list[OptimizationProfile]:
@@ -428,16 +563,12 @@ def generate_trade_management_optimization_grid() -> list[OptimizationProfile]:
             "stop_loss_pct": stop_loss_pct,
             "trailing_activation_pct": trailing_activation_pct,
             "trailing_distance_pct": trailing_distance_pct,
-            "chandelier_period": float(chandelier_period),
-            "chandelier_multiplier": float(chandelier_multiplier),
         }
         for (
             take_profit_pct,
             stop_loss_pct,
             trailing_activation_pct,
             trailing_distance_pct,
-            chandelier_period,
-            chandelier_multiplier,
         ) in _optimization_risk_profiles()
     ]
 
@@ -448,6 +579,15 @@ def generate_ema_optimization_grid() -> list[OptimizationProfile]:
         base_options=EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS,
         trim_order=EMA_CROSS_VOLUME_GRID_TRIM_ORDER,
         profile_builder=_build_ema_cross_volume_profiles,
+    )
+
+
+def generate_ema_band_rejection_optimization_grid() -> list[OptimizationProfile]:
+    return _build_capped_strategy_family_profiles(
+        strategy_family_name="ema_band_rejection",
+        base_options=EMA_BAND_REJECTION_FIXED_GRID_OPTIONS,
+        trim_order=EMA_BAND_REJECTION_GRID_TRIM_ORDER,
+        profile_builder=_build_ema_band_rejection_profiles,
     )
 
 
@@ -525,8 +665,6 @@ def _build_frama_profiles(
         frama_fast_period,
         frama_slow_period,
         volume_multiplier,
-        chandelier_period,
-        chandelier_multiplier,
         stop_loss_pct,
         take_profit_pct,
         trailing_activation_pct,
@@ -537,8 +675,6 @@ def _build_frama_profiles(
         options["frama_fast_period"],
         options["frama_slow_period"],
         options["volume_multiplier"],
-        options["chandelier_period"],
-        options["chandelier_multiplier"],
         options["stop_loss_pct"],
         options["take_profit_pct"],
         options["trailing_activation_pct"],
@@ -548,15 +684,18 @@ def _build_frama_profiles(
     ):
         if int(frama_fast_period) >= int(frama_slow_period):
             continue
-        if float(trailing_distance_pct) >= float(trailing_activation_pct):
+        if not _passes_common_risk_profile_guards(
+            take_profit_pct=float(take_profit_pct),
+            stop_loss_pct=float(stop_loss_pct),
+            trailing_activation_pct=float(trailing_activation_pct),
+            trailing_distance_pct=float(trailing_distance_pct),
+        ):
             continue
         profiles.append(
             {
                 "frama_fast_period": float(frama_fast_period),
                 "frama_slow_period": float(frama_slow_period),
                 "volume_multiplier": float(volume_multiplier),
-                "chandelier_period": float(chandelier_period),
-                "chandelier_multiplier": float(chandelier_multiplier),
                 "stop_loss_pct": float(stop_loss_pct),
                 "take_profit_pct": float(take_profit_pct),
                 "trailing_activation_pct": float(trailing_activation_pct),
@@ -576,8 +715,6 @@ def _build_ema_cross_volume_profiles(
         ema_fast_period,
         ema_slow_period,
         volume_multiplier,
-        chandelier_period,
-        chandelier_multiplier,
         stop_loss_pct,
         take_profit_pct,
         trailing_activation_pct,
@@ -590,8 +727,6 @@ def _build_ema_cross_volume_profiles(
         options["ema_fast_period"],
         options["ema_slow_period"],
         options["volume_multiplier"],
-        options["chandelier_period"],
-        options["chandelier_multiplier"],
         options["stop_loss_pct"],
         options["take_profit_pct"],
         options["trailing_activation_pct"],
@@ -603,15 +738,18 @@ def _build_ema_cross_volume_profiles(
     ):
         if int(ema_fast_period) >= int(ema_slow_period):
             continue
-        if float(trailing_distance_pct) >= float(trailing_activation_pct):
+        if not _passes_common_risk_profile_guards(
+            take_profit_pct=float(take_profit_pct),
+            stop_loss_pct=float(stop_loss_pct),
+            trailing_activation_pct=float(trailing_activation_pct),
+            trailing_distance_pct=float(trailing_distance_pct),
+        ):
             continue
         profiles.append(
             {
                 "ema_fast_period": float(ema_fast_period),
                 "ema_slow_period": float(ema_slow_period),
                 "volume_multiplier": float(volume_multiplier),
-                "chandelier_period": float(chandelier_period),
-                "chandelier_multiplier": float(chandelier_multiplier),
                 "stop_loss_pct": float(stop_loss_pct),
                 "take_profit_pct": float(take_profit_pct),
                 "trailing_activation_pct": float(trailing_activation_pct),
@@ -625,6 +763,238 @@ def _build_ema_cross_volume_profiles(
     return profiles
 
 
+def _build_ema_band_rejection_profiles(
+    options: dict[str, tuple[float | int, ...]],
+) -> list[OptimizationProfile]:
+    profiles: list[OptimizationProfile] = []
+    default_rsi_length = int(options["rsi_length"][0])
+    default_rsi_midline = float(options["rsi_midline"][0])
+    default_use_rsi_cross_filter = int(options["use_rsi_cross_filter"][0])
+    default_rsi_midline_margin = float(options["rsi_midline_margin"][0])
+    default_volume_ma_length = int(options["volume_ma_length"][0])
+    default_volume_multiplier = float(options["volume_multiplier"][0])
+    default_atr_length = int(options["atr_length"][0])
+    default_atr_stop_buffer_mult = float(options["atr_stop_buffer_mult"][-1])
+    default_rejection_wick_min_ratio = float(options["rejection_wick_min_ratio"][0])
+    default_rejection_body_min_ratio = float(options["rejection_body_min_ratio"][0])
+
+    risk_profiles: list[tuple[float, float, float, float, float, float]] = []
+    for (
+        stop_loss_pct,
+        take_profit_pct,
+        trailing_activation_pct,
+        trailing_distance_pct,
+        breakeven_activation_pct,
+        breakeven_buffer_pct,
+    ) in product(
+        options["stop_loss_pct"],
+        options["take_profit_pct"],
+        options["trailing_activation_pct"],
+        options["trailing_distance_pct"],
+        options["breakeven_activation_pct"],
+        options["breakeven_buffer_pct"],
+    ):
+        resolved_stop_loss_pct = float(stop_loss_pct)
+        resolved_take_profit_pct = float(take_profit_pct)
+        resolved_trailing_activation_pct = float(trailing_activation_pct)
+        resolved_trailing_distance_pct = float(trailing_distance_pct)
+        resolved_breakeven_activation_pct = float(breakeven_activation_pct)
+        resolved_breakeven_buffer_pct = float(breakeven_buffer_pct)
+        if not _passes_common_risk_profile_guards(
+            take_profit_pct=resolved_take_profit_pct,
+            stop_loss_pct=resolved_stop_loss_pct,
+            trailing_activation_pct=resolved_trailing_activation_pct,
+            trailing_distance_pct=resolved_trailing_distance_pct,
+        ):
+            continue
+        if not _passes_ema_band_rejection_exit_profile_guards(
+            take_profit_pct=resolved_take_profit_pct,
+            trailing_activation_pct=resolved_trailing_activation_pct,
+            breakeven_activation_pct=resolved_breakeven_activation_pct,
+        ):
+            continue
+        risk_profiles.append(
+            (
+                resolved_stop_loss_pct,
+                resolved_take_profit_pct,
+                resolved_trailing_activation_pct,
+                resolved_trailing_distance_pct,
+                resolved_breakeven_activation_pct,
+                resolved_breakeven_buffer_pct,
+            )
+        )
+
+    for ema_fast, ema_mid, ema_slow in product(
+        options["ema_fast"],
+        options["ema_mid"],
+        options["ema_slow"],
+    ):
+        resolved_ema_fast = int(ema_fast)
+        resolved_ema_mid = int(ema_mid)
+        resolved_ema_slow = int(ema_slow)
+        if not (resolved_ema_fast < resolved_ema_mid < resolved_ema_slow):
+            continue
+        for slope_lookback, min_ema_spread_pct in product(
+            options["slope_lookback"],
+            options["min_ema_spread_pct"],
+        ):
+            resolved_slope_lookback = float(slope_lookback)
+            resolved_min_ema_spread_pct = float(min_ema_spread_pct)
+            for min_slow_slope_pct in options["min_slow_slope_pct"]:
+                resolved_min_slow_slope_pct = float(min_slow_slope_pct)
+                for pullback_requires_outer_band_touch in options["pullback_requires_outer_band_touch"]:
+                    resolved_pullback_requires_outer_band_touch = (
+                        1 if int(pullback_requires_outer_band_touch) > 0 else 0
+                    )
+                    for use_rejection_quality_filter in options["use_rejection_quality_filter"]:
+                        resolved_use_rejection_quality_filter = (
+                            1 if int(use_rejection_quality_filter) > 0 else 0
+                        )
+                        rejection_wick_min_ratio_values = (
+                            options["rejection_wick_min_ratio"]
+                            if resolved_use_rejection_quality_filter > 0
+                            else (default_rejection_wick_min_ratio,)
+                        )
+                        rejection_body_min_ratio_values = (
+                            options["rejection_body_min_ratio"]
+                            if resolved_use_rejection_quality_filter > 0
+                            else (default_rejection_body_min_ratio,)
+                        )
+                        for (
+                            rejection_wick_min_ratio,
+                            rejection_body_min_ratio,
+                        ) in product(
+                            rejection_wick_min_ratio_values,
+                            rejection_body_min_ratio_values,
+                        ):
+                            resolved_rejection_wick_min_ratio = float(rejection_wick_min_ratio)
+                            resolved_rejection_body_min_ratio = float(rejection_body_min_ratio)
+                            for use_rsi_filter in options["use_rsi_filter"]:
+                                resolved_use_rsi_filter = 1 if int(use_rsi_filter) > 0 else 0
+                                rsi_length_values = (
+                                    options["rsi_length"]
+                                    if resolved_use_rsi_filter > 0
+                                    else (default_rsi_length,)
+                                )
+                                rsi_midline_values = (
+                                    options["rsi_midline"]
+                                    if resolved_use_rsi_filter > 0
+                                    else (default_rsi_midline,)
+                                )
+                                rsi_cross_filter_values = (
+                                    options["use_rsi_cross_filter"]
+                                    if resolved_use_rsi_filter > 0
+                                    else (default_use_rsi_cross_filter,)
+                                )
+                                rsi_midline_margin_values = (
+                                    options["rsi_midline_margin"]
+                                    if resolved_use_rsi_filter > 0
+                                    else (default_rsi_midline_margin,)
+                                )
+                                for (
+                                    rsi_length,
+                                    rsi_midline,
+                                    use_rsi_cross_filter,
+                                    rsi_midline_margin,
+                                ) in product(
+                                    rsi_length_values,
+                                    rsi_midline_values,
+                                    rsi_cross_filter_values,
+                                    rsi_midline_margin_values,
+                                ):
+                                    resolved_rsi_length = float(rsi_length)
+                                    resolved_rsi_midline = float(rsi_midline)
+                                    resolved_use_rsi_cross_filter = (
+                                        1 if int(use_rsi_cross_filter) > 0 else 0
+                                    )
+                                    resolved_rsi_midline_margin = float(rsi_midline_margin)
+                                    for use_volume_filter in options["use_volume_filter"]:
+                                        resolved_use_volume_filter = 1 if int(use_volume_filter) > 0 else 0
+                                        volume_ma_length_values = (
+                                            options["volume_ma_length"]
+                                            if resolved_use_volume_filter > 0
+                                            else (default_volume_ma_length,)
+                                        )
+                                        volume_multiplier_values = (
+                                            options["volume_multiplier"]
+                                            if resolved_use_volume_filter > 0
+                                            else (default_volume_multiplier,)
+                                        )
+                                        for volume_ma_length, volume_multiplier in product(
+                                            volume_ma_length_values,
+                                            volume_multiplier_values,
+                                        ):
+                                            resolved_volume_ma_length = float(volume_ma_length)
+                                            resolved_volume_multiplier = float(volume_multiplier)
+                                            for use_atr_stop_buffer in options["use_atr_stop_buffer"]:
+                                                resolved_use_atr_stop_buffer = 1 if int(use_atr_stop_buffer) > 0 else 0
+                                                atr_length_values = (
+                                                    options["atr_length"]
+                                                    if resolved_use_atr_stop_buffer > 0
+                                                    else (default_atr_length,)
+                                                )
+                                                atr_stop_buffer_mult_values = (
+                                                    options["atr_stop_buffer_mult"]
+                                                    if resolved_use_atr_stop_buffer > 0
+                                                    else (default_atr_stop_buffer_mult,)
+                                                )
+                                                for atr_length, atr_stop_buffer_mult in product(
+                                                    atr_length_values,
+                                                    atr_stop_buffer_mult_values,
+                                                ):
+                                                    resolved_atr_length = float(atr_length)
+                                                    resolved_atr_stop_buffer_mult = float(atr_stop_buffer_mult)
+                                                    for signal_cooldown_bars in options["signal_cooldown_bars"]:
+                                                        resolved_signal_cooldown_bars = float(signal_cooldown_bars)
+                                                        for (
+                                                            resolved_stop_loss_pct,
+                                                            resolved_take_profit_pct,
+                                                            resolved_trailing_activation_pct,
+                                                            resolved_trailing_distance_pct,
+                                                            resolved_breakeven_activation_pct,
+                                                            resolved_breakeven_buffer_pct,
+                                                        ) in risk_profiles:
+                                                            profiles.append(
+                                                                {
+                                                                    "ema_fast": float(resolved_ema_fast),
+                                                                    "ema_mid": float(resolved_ema_mid),
+                                                                    "ema_slow": float(resolved_ema_slow),
+                                                                    "slope_lookback": resolved_slope_lookback,
+                                                                    "min_ema_spread_pct": resolved_min_ema_spread_pct,
+                                                                    "min_slow_slope_pct": resolved_min_slow_slope_pct,
+                                                                    "pullback_requires_outer_band_touch": float(
+                                                                        resolved_pullback_requires_outer_band_touch
+                                                                    ),
+                                                                    "use_rejection_quality_filter": float(
+                                                                        resolved_use_rejection_quality_filter
+                                                                    ),
+                                                                    "rejection_wick_min_ratio": resolved_rejection_wick_min_ratio,
+                                                                    "rejection_body_min_ratio": resolved_rejection_body_min_ratio,
+                                                                    "use_rsi_filter": float(resolved_use_rsi_filter),
+                                                                    "rsi_length": resolved_rsi_length,
+                                                                    "rsi_midline": resolved_rsi_midline,
+                                                                    "use_rsi_cross_filter": float(
+                                                                        resolved_use_rsi_cross_filter
+                                                                    ),
+                                                                    "rsi_midline_margin": resolved_rsi_midline_margin,
+                                                                    "use_volume_filter": float(resolved_use_volume_filter),
+                                                                    "volume_ma_length": resolved_volume_ma_length,
+                                                                    "volume_multiplier": resolved_volume_multiplier,
+                                                                    "use_atr_stop_buffer": float(resolved_use_atr_stop_buffer),
+                                                                    "atr_length": resolved_atr_length,
+                                                                    "atr_stop_buffer_mult": resolved_atr_stop_buffer_mult,
+                                                                    "signal_cooldown_bars": resolved_signal_cooldown_bars,
+                                                                    "stop_loss_pct": resolved_stop_loss_pct,
+                                                                    "take_profit_pct": resolved_take_profit_pct,
+                                                                    "trailing_activation_pct": resolved_trailing_activation_pct,
+                                                                    "trailing_distance_pct": resolved_trailing_distance_pct,
+                                                                    "breakeven_activation_pct": resolved_breakeven_activation_pct,
+                                                                    "breakeven_buffer_pct": resolved_breakeven_buffer_pct,
+                                                                }
+                                                            )
+    return profiles
+
+
 def _build_dual_thrust_profiles(
     options: dict[str, tuple[float | int, ...]],
 ) -> list[OptimizationProfile]:
@@ -633,8 +1003,6 @@ def _build_dual_thrust_profiles(
         dual_thrust_k1,
         dual_thrust_k2,
         dual_thrust_period,
-        chandelier_period,
-        chandelier_multiplier,
         stop_loss_pct,
         take_profit_pct,
         trailing_activation_pct,
@@ -647,8 +1015,6 @@ def _build_dual_thrust_profiles(
         options["dual_thrust_k1"],
         options["dual_thrust_k2"],
         options["dual_thrust_period"],
-        options["chandelier_period"],
-        options["chandelier_multiplier"],
         options["stop_loss_pct"],
         options["take_profit_pct"],
         options["trailing_activation_pct"],
@@ -658,15 +1024,18 @@ def _build_dual_thrust_profiles(
         options["tight_trailing_activation_pct"],
         options["tight_trailing_distance_pct"],
     ):
-        if float(trailing_distance_pct) >= float(trailing_activation_pct):
+        if not _passes_common_risk_profile_guards(
+            take_profit_pct=float(take_profit_pct),
+            stop_loss_pct=float(stop_loss_pct),
+            trailing_activation_pct=float(trailing_activation_pct),
+            trailing_distance_pct=float(trailing_distance_pct),
+        ):
             continue
         profiles.append(
             {
                 "dual_thrust_k1": float(dual_thrust_k1),
                 "dual_thrust_k2": float(dual_thrust_k2),
                 "dual_thrust_period": float(dual_thrust_period),
-                "chandelier_period": float(chandelier_period),
-                "chandelier_multiplier": float(chandelier_multiplier),
                 "stop_loss_pct": float(stop_loss_pct),
                 "take_profit_pct": float(take_profit_pct),
                 "trailing_activation_pct": float(trailing_activation_pct),
@@ -718,6 +1087,8 @@ def generate_optimization_grid(
     )
     if resolved_strategy == "ema_cross_volume":
         return generate_ema_optimization_grid()
+    if resolved_strategy == "ema_band_rejection":
+        return generate_ema_band_rejection_optimization_grid()
     if resolved_strategy == "frama_cross":
         return generate_frama_optimization_grid()
     if resolved_strategy == "dual_thrust":
@@ -785,6 +1156,55 @@ def resolve_optimizer_strategy_for_symbol(
         resolved_strategy,
         fallback_strategy_name=default_strategy_name,
     )
+
+
+def resolve_ema_band_rejection_1h_winner_profile(
+    symbol: str,
+) -> tuple[str, OptimizationProfile] | None:
+    normalized_symbol = str(symbol).strip().upper()
+    preset_entry = EMA_BAND_REJECTION_1H_WINNERS.get(normalized_symbol)
+    if not isinstance(preset_entry, Mapping):
+        return None
+
+    preset_strategy_name = _sanitize_backtest_strategy_name(
+        str(preset_entry.get("strategy", "") or "ema_band_rejection"),
+        fallback_strategy_name="ema_band_rejection",
+    )
+    if preset_strategy_name != "ema_band_rejection":
+        return None
+
+    preset_interval = _validate_interval_name(
+        str(preset_entry.get("interval", "1h") or "1h").strip()
+    )
+    flattened_profile: OptimizationProfile = {}
+    for section_name in ("params", "risk"):
+        section_payload = preset_entry.get(section_name)
+        if not isinstance(section_payload, Mapping):
+            continue
+        for field_name, field_value in section_payload.items():
+            with suppress(Exception):
+                flattened_profile[str(field_name)] = float(field_value)
+
+    return preset_interval, flattened_profile
+
+
+def resolve_live_candidate_policy(symbol: str) -> dict[str, float | int | str] | None:
+    normalized_symbol = str(symbol).strip().upper()
+    if normalized_symbol != LIVE_EMA_BAND_REJECTION_CANDIDATE_SYMBOL:
+        return None
+    production_profile = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol)
+    if not isinstance(production_profile, Mapping):
+        return None
+    strategy_name = _sanitize_backtest_strategy_name(
+        str(production_profile.get("strategy_name", "") or ""),
+        fallback_strategy_name="",
+    )
+    interval_text = str(production_profile.get("interval", "") or "").strip()
+    if strategy_name != str(LIVE_EMA_BAND_REJECTION_CANDIDATE_POLICY["strategy_name"]):
+        return None
+    if interval_text != str(LIVE_EMA_BAND_REJECTION_CANDIDATE_POLICY["interval"]):
+        return None
+    return dict(LIVE_EMA_BAND_REJECTION_CANDIDATE_POLICY)
 
 
 def _sanitize_backtest_strategy_name(
@@ -877,6 +1297,8 @@ def _required_candle_count_for_strategy(strategy_name: str, *, use_setup_gate: b
             settings.strategy.ema_slow_period + 1,
             settings.strategy.volume_sma_period,
         )
+    elif strategy_name == "ema_band_rejection":
+        required_count = 64
     elif strategy_name == "frama_cross":
         required_count = max(settings.strategy.frama_slow_period + 1, 6)
     elif strategy_name == "supertrend_ema":
@@ -906,6 +1328,27 @@ def _required_candle_count_for_profile(
     use_setup_gate: bool = False,
 ) -> int:
     strategy_name = _validate_strategy_name(strategy_name)
+    if strategy_name == "ema_band_rejection":
+        ema_slow = int(float(strategy_profile.get("ema_slow", 20.0) or 20.0))
+        slope_lookback = int(float(strategy_profile.get("slope_lookback", 5.0) or 5.0))
+        rsi_length = int(float(strategy_profile.get("rsi_length", 14.0) or 14.0))
+        volume_ma_length = int(float(strategy_profile.get("volume_ma_length", 20.0) or 20.0))
+        atr_length = int(float(strategy_profile.get("atr_length", 14.0) or 14.0))
+        required_count = max(
+            ema_slow + slope_lookback + 2,
+            rsi_length + 2,
+            volume_ma_length + 2,
+            atr_length + 2,
+            64,
+            int(settings.trading.chandelier_period) + 2,
+        )
+        if use_setup_gate:
+            required_count = max(
+                required_count,
+                SmartSetupGate.required_candle_count(),
+                SETUP_GATE_SETTLED_WARMUP_CANDLES,
+            )
+        return int(required_count)
     with _temporary_strategy_profile(strategy_profile):
         return _required_candle_count_for_strategy(
             strategy_name,
@@ -967,6 +1410,32 @@ def _clear_strategy_indicator_cache(candles_dataframe: pd.DataFrame | None) -> N
         "dual_short_entry",
         "dual_long_exit",
         "dual_short_exit",
+        "ema_band_ema_fast",
+        "ema_band_ema_mid",
+        "ema_band_ema_slow",
+        "ema_band_ema_slow_slope_pct",
+        "ema_band_ema_spread_pct",
+        "ema_band_zone_low",
+        "ema_band_zone_high",
+        "ema_band_rsi",
+        "ema_band_volume_ma",
+        "ema_band_atr",
+        "ema_band_trend_long",
+        "ema_band_trend_short",
+        "ema_band_pullback_long",
+        "ema_band_pullback_short",
+        "ema_band_rejection_long",
+        "ema_band_rejection_short",
+        "ema_band_setup_long",
+        "ema_band_setup_short",
+        "ema_band_long_entry",
+        "ema_band_short_entry",
+        "ema_band_long_exit",
+        "ema_band_short_exit",
+        "ema_band_dynamic_stop_loss_pct",
+        "ema_band_signal_direction",
+        "ema_band_signal_cooldown_bars",
+        "ema_band_cooldown_blocked_signals",
     )
     for column_name in indicator_columns:
         if column_name in candles_dataframe.columns:
@@ -977,13 +1446,14 @@ def _clear_strategy_indicator_cache(candles_dataframe: pd.DataFrame | None) -> N
 
 
 def _initialize_optimizer_worker(
-    candles_records: list[dict[str, object]],
+    candles_payload: Mapping[str, object],
     regime_mask: list[int] | None = None,
     strategy_signal_cache: dict[object, dict[str, object]] | None = None,
 ) -> None:
-    global _WORKER_CANDLES_DF, _WORKER_CANDLE_ROWS, _WORKER_REGIME_MASK, _WORKER_STRATEGY_SIGNAL_CACHE
-    _WORKER_CANDLES_DF = pd.DataFrame(candles_records)
+    global _WORKER_CANDLES_DF, _WORKER_CANDLE_ROWS, _WORKER_REGIME_MASK, _WORKER_STRATEGY_SIGNAL_CACHE, _WORKER_OHLCV_ARRAYS
+    _WORKER_CANDLES_DF = _worker_payload_to_pandas_dataframe(candles_payload)
     _WORKER_CANDLE_ROWS = PaperTradingEngine._extract_backtest_rows(_WORKER_CANDLES_DF)
+    _WORKER_OHLCV_ARRAYS = _extract_ohlcv_numpy_arrays_from_payload(candles_payload)
     _WORKER_REGIME_MASK = None if regime_mask is None else list(regime_mask)
     _WORKER_STRATEGY_SIGNAL_CACHE = (
         {}
@@ -1002,6 +1472,12 @@ def _worker_candle_rows() -> list[dict[str, object]]:
     if _WORKER_CANDLE_ROWS is None:
         raise RuntimeError("Optimizer worker candle rows were not initialized.")
     return list(_WORKER_CANDLE_ROWS)
+
+
+def _worker_ohlcv_arrays() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    if _WORKER_OHLCV_ARRAYS is None:
+        return None
+    return _WORKER_OHLCV_ARRAYS
 
 
 def _worker_regime_mask() -> list[int] | None:
@@ -1049,10 +1525,19 @@ def _available_memory_bytes() -> int | None:
     return None
 
 
-def _memory_safe_worker_count(total_profiles: int) -> int:
+def _memory_safe_worker_count(
+    total_profiles: int,
+    *,
+    worker_cap_override: int | None = None,
+) -> int:
     if total_profiles <= 0:
         return 1
-    requested = max(1, int(MAX_OPTIMIZATION_WORKERS))
+    resolved_worker_cap = (
+        int(MAX_OPTIMIZATION_WORKERS)
+        if worker_cap_override is None
+        else int(worker_cap_override)
+    )
+    requested = max(1, int(resolved_worker_cap))
     if FORCE_MAX_OPTIMIZATION_WORKERS:
         return max(1, requested)
     available_memory = _available_memory_bytes()
@@ -1068,7 +1553,7 @@ def _memory_safe_worker_count(total_profiles: int) -> int:
 
 def _create_optimizer_pool(
     worker_count: int,
-    candles_records: list[dict[str, object]],
+    candles_payload: Mapping[str, object],
     *,
     regime_mask: Sequence[int] | None = None,
     strategy_signal_cache: dict[object, dict[str, object]] | None = None,
@@ -1077,7 +1562,7 @@ def _create_optimizer_pool(
         processes=worker_count,
         initializer=_initialize_optimizer_worker,
         initargs=(
-            candles_records,
+            dict(candles_payload),
             None if regime_mask is None else list(regime_mask),
             None if strategy_signal_cache is None else dict(strategy_signal_cache),
         ),
@@ -1120,23 +1605,6 @@ def _finalize_signal_series(
     if setup_gate is None:
         return signal_array.tolist(), total_signals, total_signals, 0
 
-    volume_ratio_array: np.ndarray | None = None
-    with suppress(Exception):
-        volume_period = max(2, int(getattr(settings.strategy, "volume_sma_period", 20)))
-        volume_series = pd.to_numeric(candles_df["volume"], errors="coerce")
-        volume_sma_series = volume_series.rolling(
-            window=volume_period,
-            min_periods=volume_period,
-        ).mean()
-        volume_values = volume_series.to_numpy(dtype=np.float64, copy=False)
-        volume_sma_values = volume_sma_series.to_numpy(dtype=np.float64, copy=False)
-        volume_ratio_array = np.divide(
-            volume_values,
-            volume_sma_values,
-            out=np.full_like(volume_values, np.nan, dtype=np.float64),
-            where=np.isfinite(volume_sma_values) & (volume_sma_values > 0.0),
-        )
-
     approved_signals = 0
     blocked_signals = 0
     approved_array = np.zeros(signal_count, dtype=np.int8)
@@ -1149,32 +1617,11 @@ def _finalize_signal_series(
             normalized_direction,
             strategy_name,
         )
-        volume_ratio = float("nan")
-        if volume_ratio_array is not None and 0 <= index < int(volume_ratio_array.size):
-            volume_ratio = float(volume_ratio_array[index])
-        has_soft_volume_approval = (
-            math.isfinite(volume_ratio)
-            and volume_ratio >= float(SOFT_APPROVAL_VOLUME_RATIO_MIN)
-        )
-        if not has_soft_volume_approval:
-            blocked_signals += 1
-            continue
-        if not is_approved:
-            # Setup-Gate soft-approval path: allow when minimum volume ratio is met.
-            is_approved = True
         if not is_approved:
             blocked_signals += 1
             continue
-        is_soft_leverage_band = volume_ratio < float(SOFT_APPROVAL_VOLUME_RATIO_FULL)
         approved_signals += 1
-        approved_array[index] = np.int8(
-            normalized_direction
-            * (
-                int(SOFT_APPROVAL_SIGNAL_MULTIPLIER)
-                if is_soft_leverage_band
-                else 1
-            )
-        )
+        approved_array[index] = np.int8(normalized_direction)
     return approved_array.tolist(), total_signals, approved_signals, blocked_signals
 
 
@@ -1251,31 +1698,6 @@ def _normalize_dynamic_pct_series(values: object) -> list[float] | None:
             continue
         normalized_values.append(float("nan"))
     return normalized_values
-
-
-def _resolve_soft_signal_profile(
-    strategy_name: str,
-    strategy_profile: OptimizationProfile | None,
-) -> OptimizationProfile | None:
-    if strategy_name not in {"ema_cross_volume", "frama_cross"}:
-        return strategy_profile
-    effective_profile: OptimizationProfile = (
-        {}
-        if strategy_profile is None
-        else dict(strategy_profile)
-    )
-    current_multiplier = effective_profile.get(
-        "volume_multiplier",
-        float(settings.strategy.volume_multiplier),
-    )
-    with suppress(Exception):
-        effective_profile["volume_multiplier"] = min(
-            float(current_multiplier),
-            float(SOFT_APPROVAL_VOLUME_RATIO_MIN),
-        )
-    return effective_profile
-
-
 def _pack_strategy_signal_payload(payload: dict[str, object]) -> dict[str, object]:
     packed_payload: dict[str, object] = {
         "total_signals": int(payload.get("total_signals", 0)),
@@ -1325,11 +1747,9 @@ def _build_vectorized_strategy_cache_payload(
     setup_gate: SmartSetupGate | None,
     strategy_profile: OptimizationProfile | None = None,
     regime_mask: Sequence[int] | None = None,
+    raw_signal_override: Sequence[int] | None = None,
 ) -> dict[str, object] | None:
-    effective_strategy_profile = _resolve_soft_signal_profile(
-        strategy_name,
-        strategy_profile,
-    )
+    effective_strategy_profile = strategy_profile
     if strategy_name == "ema_cross_volume":
         with _temporary_strategy_profile(effective_strategy_profile, candles_df):
             working_df = build_ema_cross_volume_signal_frame(candles_df)
@@ -1353,6 +1773,248 @@ def _build_vectorized_strategy_cache_payload(
             "blocked_signals": blocked_signals,
         })
         return payload
+
+    if strategy_name == "ema_band_rejection":
+        profile_values = {} if strategy_profile is None else dict(strategy_profile)
+
+        def _profile_int(field_name: str, default_value: int) -> int:
+            with suppress(Exception):
+                return int(float(profile_values.get(field_name, default_value) or default_value))
+            return int(default_value)
+
+        def _profile_float(field_name: str, default_value: float) -> float:
+            with suppress(Exception):
+                return float(profile_values.get(field_name, default_value) or default_value)
+            return float(default_value)
+
+        def _profile_flag(field_name: str, default_value: bool = False) -> bool:
+            raw_value = profile_values.get(field_name, default_value)
+            if isinstance(raw_value, bool):
+                return bool(raw_value)
+            with suppress(Exception):
+                return bool(float(raw_value) >= 0.5)
+            return bool(default_value)
+
+        working_df = build_ema_band_rejection_signal_frame(
+            candles_df,
+            ema_fast=_profile_int("ema_fast", 5),
+            ema_mid=_profile_int("ema_mid", 10),
+            ema_slow=_profile_int("ema_slow", 20),
+            slope_lookback=_profile_int("slope_lookback", 5),
+            min_ema_spread_pct=_profile_float("min_ema_spread_pct", 0.05),
+            min_slow_slope_pct=_profile_float("min_slow_slope_pct", 0.0),
+            pullback_requires_outer_band_touch=_profile_flag(
+                "pullback_requires_outer_band_touch",
+                False,
+            ),
+            use_rejection_quality_filter=_profile_flag(
+                "use_rejection_quality_filter",
+                False,
+            ),
+            rejection_wick_min_ratio=_profile_float("rejection_wick_min_ratio", 0.35),
+            rejection_body_min_ratio=_profile_float("rejection_body_min_ratio", 0.20),
+            use_rsi_filter=_profile_flag("use_rsi_filter", False),
+            rsi_length=_profile_int("rsi_length", 14),
+            rsi_midline=_profile_float("rsi_midline", 50.0),
+            use_rsi_cross_filter=_profile_flag("use_rsi_cross_filter", False),
+            rsi_midline_margin=_profile_float("rsi_midline_margin", 0.0),
+            use_volume_filter=_profile_flag("use_volume_filter", False),
+            volume_ma_length=_profile_int("volume_ma_length", 20),
+            volume_multiplier=_profile_float("volume_multiplier", 1.0),
+            use_atr_stop_buffer=_profile_flag("use_atr_stop_buffer", False),
+            atr_length=_profile_int("atr_length", 14),
+            atr_stop_buffer_mult=_profile_float("atr_stop_buffer_mult", 0.5),
+            signal_cooldown_bars=_profile_int("signal_cooldown_bars", 0),
+        )
+
+        if raw_signal_override is None:
+            raw_signals = pd.to_numeric(
+                working_df["ema_band_signal_direction"],
+                errors="coerce",
+            ).fillna(0).astype("int8").tolist()
+        else:
+            raw_signals = _align_signal_series_to_candle_count(
+                raw_signal_override,
+                candle_count=len(working_df),
+            )
+        long_exit_flags = working_df["ema_band_long_exit"].fillna(False).astype(bool).tolist()
+        short_exit_flags = working_df["ema_band_short_exit"].fillna(False).astype(bool).tolist()
+        dynamic_stop_loss_pcts = pd.to_numeric(
+            working_df["ema_band_dynamic_stop_loss_pct"],
+            errors="coerce",
+        ).tolist()
+
+        signals, total_signals, approved_signals, blocked_signals = _finalize_signal_series(
+            working_df,
+            raw_signals,
+            required_candles=required_candles,
+            setup_gate=setup_gate,
+            strategy_name=strategy_name,
+            regime_mask=regime_mask,
+        )
+        aligned_dynamic_stop_loss_pcts: list[float] = []
+        for index, signal_value in enumerate(signals):
+            raw_value = (
+                dynamic_stop_loss_pcts[index]
+                if index < len(dynamic_stop_loss_pcts)
+                else float("nan")
+            )
+            with suppress(Exception):
+                raw_value = float(raw_value)
+            if int(signal_value) == 0:
+                aligned_dynamic_stop_loss_pcts.append(float("nan"))
+                continue
+            if not isinstance(raw_value, float) or not math.isfinite(raw_value) or raw_value <= 0.0:
+                aligned_dynamic_stop_loss_pcts.append(float("nan"))
+                continue
+            aligned_dynamic_stop_loss_pcts.append(float(raw_value))
+
+        latest_signal_direction = int(signals[-1]) if signals else 0
+        latest_trend_ok = False
+        latest_pullback_ok = False
+        latest_rejection_ok = False
+        if len(working_df) > 0:
+            latest_row = working_df.iloc[-1]
+            latest_trend_ok = bool(
+                bool(latest_row.get("ema_band_trend_long", False))
+                or bool(latest_row.get("ema_band_trend_short", False))
+            )
+            latest_pullback_ok = bool(
+                bool(latest_row.get("ema_band_pullback_long", False))
+                or bool(latest_row.get("ema_band_pullback_short", False))
+            )
+            latest_rejection_ok = bool(
+                bool(latest_row.get("ema_band_rejection_long", False))
+                or bool(latest_row.get("ema_band_rejection_short", False))
+            )
+
+        entry_mask = (
+            working_df["ema_band_long_entry"].fillna(False)
+            | working_df["ema_band_short_entry"].fillna(False)
+        )
+        spread_series = pd.to_numeric(
+            working_df["ema_band_ema_spread_pct"],
+            errors="coerce",
+        )
+        spread_entry_series = spread_series.where(entry_mask, np.nan)
+        dynamic_stop_series = pd.to_numeric(
+            working_df["ema_band_dynamic_stop_loss_pct"],
+            errors="coerce",
+        )
+        dynamic_stop_entry_series = dynamic_stop_series.where(entry_mask, np.nan)
+
+        def _series_stats(series: pd.Series) -> tuple[float, float, float, int]:
+            numeric_values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+            finite_values = numeric_values[np.isfinite(numeric_values)]
+            if finite_values.size <= 0:
+                return 0.0, 0.0, 0.0, 0
+            return (
+                float(np.min(finite_values)),
+                float(np.max(finite_values)),
+                float(np.mean(finite_values)),
+                int(finite_values.size),
+            )
+
+        spread_min, spread_max, spread_mean, spread_count = _series_stats(spread_series)
+        spread_entry_min, spread_entry_max, spread_entry_mean, spread_entry_count = _series_stats(
+            spread_entry_series
+        )
+        dynamic_stop_min, dynamic_stop_max, dynamic_stop_mean, dynamic_stop_count = _series_stats(
+            dynamic_stop_entry_series
+        )
+        dynamic_stop_entry_values = pd.to_numeric(
+            dynamic_stop_entry_series,
+            errors="coerce",
+        ).to_numpy(dtype=np.float64, copy=False)
+        dynamic_stop_entry_finite = dynamic_stop_entry_values[np.isfinite(dynamic_stop_entry_values)]
+        dynamic_stop_clip_low_count = int(np.count_nonzero(dynamic_stop_entry_finite <= 0.0500001))
+        dynamic_stop_clip_high_count = int(np.count_nonzero(dynamic_stop_entry_finite >= 94.9999))
+        cooldown_blocked_signals = 0
+        with suppress(Exception):
+            cooldown_blocked_signals = int(
+                pd.to_numeric(
+                    working_df.get("ema_band_cooldown_blocked_signals"),
+                    errors="coerce",
+                ).fillna(0.0).max()
+            )
+
+        return {
+            "signals": signals,
+            "total_signals": total_signals,
+            "approved_signals": approved_signals,
+            "blocked_signals": blocked_signals,
+            "precomputed_long_exit_flags": long_exit_flags,
+            "precomputed_short_exit_flags": short_exit_flags,
+            "precomputed_dynamic_stop_loss_pcts": aligned_dynamic_stop_loss_pcts,
+            "strategy_diagnostics": {
+                "trend_ok_count": int(
+                    (
+                        working_df["ema_band_trend_long"].fillna(False)
+                        | working_df["ema_band_trend_short"].fillna(False)
+                    ).sum()
+                ),
+                "pullback_ok_count": int(
+                    (
+                        working_df["ema_band_pullback_long"].fillna(False)
+                        | working_df["ema_band_pullback_short"].fillna(False)
+                    ).sum()
+                ),
+                "rejection_ok_count": int(
+                    (
+                        working_df["ema_band_rejection_long"].fillna(False)
+                        | working_df["ema_band_rejection_short"].fillna(False)
+                    ).sum()
+                ),
+                "long_entry_count": int(working_df["ema_band_long_entry"].fillna(False).sum()),
+                "short_entry_count": int(working_df["ema_band_short_entry"].fillna(False).sum()),
+                "latest_trend_ok": int(latest_trend_ok),
+                "latest_pullback_ok": int(latest_pullback_ok),
+                "latest_rejection_ok": int(latest_rejection_ok),
+                "latest_signal_direction": int(latest_signal_direction),
+                "ema_fast": _profile_int("ema_fast", 5),
+                "ema_mid": _profile_int("ema_mid", 10),
+                "ema_slow": _profile_int("ema_slow", 20),
+                "slope_lookback": _profile_int("slope_lookback", 5),
+                "min_ema_spread_pct": _profile_float("min_ema_spread_pct", 0.05),
+                "min_slow_slope_pct": _profile_float("min_slow_slope_pct", 0.0),
+                "pullback_requires_outer_band_touch": int(
+                    _profile_flag("pullback_requires_outer_band_touch", False)
+                ),
+                "use_rejection_quality_filter": int(
+                    _profile_flag("use_rejection_quality_filter", False)
+                ),
+                "rejection_wick_min_ratio": _profile_float("rejection_wick_min_ratio", 0.35),
+                "rejection_body_min_ratio": _profile_float("rejection_body_min_ratio", 0.20),
+                "ema_spread_pct_min": float(spread_min),
+                "ema_spread_pct_max": float(spread_max),
+                "ema_spread_pct_mean": float(spread_mean),
+                "ema_spread_pct_count": int(spread_count),
+                "ema_spread_entry_pct_min": float(spread_entry_min),
+                "ema_spread_entry_pct_max": float(spread_entry_max),
+                "ema_spread_entry_pct_mean": float(spread_entry_mean),
+                "ema_spread_entry_pct_count": int(spread_entry_count),
+                "use_rsi_filter": int(_profile_flag("use_rsi_filter", False)),
+                "rsi_length": _profile_int("rsi_length", 14),
+                "rsi_midline": _profile_float("rsi_midline", 50.0),
+                "use_rsi_cross_filter": int(_profile_flag("use_rsi_cross_filter", False)),
+                "rsi_midline_margin": _profile_float("rsi_midline_margin", 0.0),
+                "use_volume_filter": int(_profile_flag("use_volume_filter", False)),
+                "volume_ma_length": _profile_int("volume_ma_length", 20),
+                "volume_multiplier": _profile_float("volume_multiplier", 1.0),
+                "use_atr_stop_buffer": int(_profile_flag("use_atr_stop_buffer", False)),
+                "atr_length": _profile_int("atr_length", 14),
+                "atr_stop_buffer_mult": _profile_float("atr_stop_buffer_mult", 0.5),
+                "signal_cooldown_bars": _profile_int("signal_cooldown_bars", 0),
+                "cooldown_blocked_signals": int(cooldown_blocked_signals),
+                "dynamic_stop_loss_entry_pct_min": float(dynamic_stop_min),
+                "dynamic_stop_loss_entry_pct_max": float(dynamic_stop_max),
+                "dynamic_stop_loss_entry_pct_mean": float(dynamic_stop_mean),
+                "dynamic_stop_loss_entry_pct_count": int(dynamic_stop_count),
+                "dynamic_stop_loss_clip_low_count": int(dynamic_stop_clip_low_count),
+                "dynamic_stop_loss_clip_high_count": int(dynamic_stop_clip_high_count),
+                "dynamic_stop_loss_reference": "close",
+            },
+        }
 
     if strategy_name == "frama_cross":
         with _temporary_strategy_profile(effective_strategy_profile, candles_df):
@@ -1517,6 +2179,7 @@ def get_strategy_badge(
     )
     if strategy_name in {
         "ema_cross_volume",
+        "ema_band_rejection",
         "frama_cross",
         "dual_thrust",
         "supertrend_ema",
@@ -1786,6 +2449,7 @@ def _optimization_sort_key(
 
 
 OPTIMIZATION_METRIC_FIELDS = {
+    "start_capital_usd",
     "total_pnl_usd",
     "win_rate_pct",
     "profit_factor",
@@ -1814,6 +2478,7 @@ def _extract_profile_from_summary(summary: dict[str, float]) -> OptimizationProf
         key: float(value)
         for key, value in summary.items()
         if key not in OPTIMIZATION_METRIC_FIELDS
+        and key not in {"chandelier_period", "chandelier_multiplier", "chandelier_mult"}
     }
 
 
@@ -1821,6 +2486,31 @@ def _strategy_variant_field_names(strategy_name: str) -> tuple[str, ...]:
     strategy_name = _validate_strategy_name(strategy_name)
     if strategy_name == "ema_cross_volume":
         return ("ema_fast_period", "ema_slow_period", "volume_multiplier")
+    if strategy_name == "ema_band_rejection":
+        return (
+            "ema_fast",
+            "ema_mid",
+            "ema_slow",
+            "slope_lookback",
+            "min_ema_spread_pct",
+            "min_slow_slope_pct",
+            "pullback_requires_outer_band_touch",
+            "use_rejection_quality_filter",
+            "rejection_wick_min_ratio",
+            "rejection_body_min_ratio",
+            "use_rsi_filter",
+            "rsi_length",
+            "rsi_midline",
+            "use_rsi_cross_filter",
+            "rsi_midline_margin",
+            "use_volume_filter",
+            "volume_ma_length",
+            "volume_multiplier",
+            "use_atr_stop_buffer",
+            "atr_length",
+            "atr_stop_buffer_mult",
+            "signal_cooldown_bars",
+        )
     if strategy_name == "frama_cross":
         return ("frama_fast_period", "frama_slow_period", "volume_multiplier")
     if strategy_name == "dual_thrust":
@@ -1854,6 +2544,188 @@ def _collect_strategy_variant_profiles(
     if not unique_profiles:
         return _strategy_cache_profiles(strategy_name)
     return unique_profiles
+
+
+def _resolve_random_search_sample_cap() -> int | None:
+    raw_value = getattr(settings.trading, "random_search_samples", None)
+    if raw_value is None:
+        return None
+    with suppress(Exception):
+        resolved_value = int(raw_value)
+        if resolved_value <= 0:
+            return None
+        return max(1, resolved_value)
+    return None
+
+
+def _resolve_optimizer_two_stage_strategy_names() -> set[str]:
+    configured = getattr(settings.trading, "optimizer_two_stage_strategies", None)
+    if isinstance(configured, Sequence) and not isinstance(configured, (str, bytes)):
+        resolved: set[str] = set()
+        for item in configured:
+            item_text = str(item).strip()
+            if not item_text:
+                continue
+            with suppress(Exception):
+                item_text = _validate_strategy_name(item_text)
+            resolved.add(item_text)
+        if resolved:
+            return resolved
+    return set(OPTIMIZER_TWO_STAGE_DEFAULT_STRATEGIES)
+
+
+def _resolve_optimizer_worker_cap_for_strategy(strategy_name: str) -> int | None:
+    normalized_strategy_name = _validate_strategy_name(strategy_name)
+    worker_cap_mapping: dict[str, int] = dict(OPTIMIZER_WORKER_CAP_BY_STRATEGY_DEFAULT)
+    configured_mapping = getattr(settings.trading, "optimizer_worker_cap_by_strategy", None)
+    if isinstance(configured_mapping, Mapping):
+        for raw_key, raw_value in configured_mapping.items():
+            key_text = str(raw_key).strip()
+            if not key_text:
+                continue
+            with suppress(Exception):
+                key_text = _validate_strategy_name(key_text)
+            with suppress(Exception):
+                worker_cap_mapping[key_text] = int(raw_value)
+    resolved_cap = worker_cap_mapping.get(normalized_strategy_name)
+    if resolved_cap is None:
+        return None
+    with suppress(Exception):
+        cap_value = int(resolved_cap)
+        if cap_value > 0:
+            return max(1, min(cap_value, int(MAX_OPTIMIZATION_WORKERS)))
+    return None
+
+
+def _resolve_strategy_specific_positive_int(
+    *,
+    strategy_name: str,
+    global_field_name: str,
+    strategy_field_name: str,
+    default_value: int,
+) -> int:
+    normalized_strategy_name = _validate_strategy_name(strategy_name)
+    resolved_value = int(default_value)
+    with suppress(Exception):
+        global_value = int(getattr(settings.trading, global_field_name, default_value) or default_value)
+        if global_value > 0:
+            resolved_value = global_value
+    configured_mapping = getattr(settings.trading, strategy_field_name, None)
+    if isinstance(configured_mapping, Mapping):
+        candidate_value = None
+        for raw_key, raw_value in configured_mapping.items():
+            key_text = str(raw_key).strip()
+            if not key_text:
+                continue
+            with suppress(Exception):
+                key_text = _validate_strategy_name(key_text)
+            if key_text == normalized_strategy_name:
+                candidate_value = raw_value
+                break
+        if candidate_value is not None:
+            with suppress(Exception):
+                mapped_value = int(candidate_value)
+                if mapped_value > 0:
+                    resolved_value = mapped_value
+    return max(1, int(resolved_value))
+
+
+def _resolve_two_stage_search_window_candles(
+    *,
+    strategy_name: str,
+    interval: str,
+    stage_index: int,
+) -> int:
+    base_window = max(1, int(_resolve_optimizer_search_window_candles(interval)))
+    if stage_index <= 1:
+        resolved_window = _resolve_strategy_specific_positive_int(
+            strategy_name=strategy_name,
+            global_field_name="optimizer_stage1_search_window_candles",
+            strategy_field_name="optimizer_stage1_search_window_candles_by_strategy",
+            default_value=min(base_window, OPTIMIZER_TWO_STAGE_STAGE1_SEARCH_WINDOW_CANDLES_DEFAULT),
+        )
+        return max(1, min(base_window, resolved_window))
+    resolved_window = _resolve_strategy_specific_positive_int(
+        strategy_name=strategy_name,
+        global_field_name="optimizer_stage2_search_window_candles",
+        strategy_field_name="optimizer_stage2_search_window_candles_by_strategy",
+        default_value=max(base_window, OPTIMIZER_TWO_STAGE_STAGE2_SEARCH_WINDOW_CANDLES_DEFAULT),
+    )
+    return max(1, resolved_window)
+
+
+def _resolve_optimizer_two_stage_policy(
+    *,
+    strategy_name: str,
+    interval: str,
+    theoretical_profiles: int,
+) -> dict[str, object]:
+    normalized_strategy_name = _validate_strategy_name(strategy_name)
+    global_two_stage_enabled = bool(
+        getattr(
+            settings.trading,
+            "optimizer_two_stage_enabled",
+            OPTIMIZER_TWO_STAGE_DEFAULT_ENABLED,
+        )
+    )
+    two_stage_strategy_names = _resolve_optimizer_two_stage_strategy_names()
+    two_stage_enabled = bool(
+        global_two_stage_enabled
+        and normalized_strategy_name in two_stage_strategy_names
+        and int(theoretical_profiles) > 1
+    )
+
+    sample_cap = _resolve_random_search_sample_cap()
+    stage1_target_profiles = _resolve_strategy_specific_positive_int(
+        strategy_name=normalized_strategy_name,
+        global_field_name="optimizer_stage1_target_profiles",
+        strategy_field_name="optimizer_stage1_target_profiles_by_strategy",
+        default_value=OPTIMIZER_TWO_STAGE_STAGE1_TARGET_PROFILES_DEFAULT,
+    )
+    if sample_cap is not None:
+        stage1_target_profiles = min(stage1_target_profiles, int(sample_cap))
+    stage1_target_profiles = max(1, min(int(theoretical_profiles), int(stage1_target_profiles)))
+
+    stage2_top_n = _resolve_strategy_specific_positive_int(
+        strategy_name=normalized_strategy_name,
+        global_field_name="optimizer_stage2_top_n",
+        strategy_field_name="optimizer_stage2_top_n_by_strategy",
+        default_value=OPTIMIZER_TWO_STAGE_STAGE2_TOP_N_DEFAULT,
+    )
+    stage2_top_n = max(
+        1,
+        min(int(stage2_top_n), int(stage1_target_profiles), int(theoretical_profiles)),
+    )
+
+    stage1_window_candles = _resolve_two_stage_search_window_candles(
+        strategy_name=normalized_strategy_name,
+        interval=interval,
+        stage_index=1,
+    )
+    stage2_window_candles = _resolve_two_stage_search_window_candles(
+        strategy_name=normalized_strategy_name,
+        interval=interval,
+        stage_index=2,
+    )
+    worker_cap = _resolve_optimizer_worker_cap_for_strategy(normalized_strategy_name)
+    force_full_verification_for_winner = bool(
+        getattr(
+            settings.trading,
+            "optimizer_force_full_verification_for_winner",
+            OPTIMIZER_FORCE_FULL_VERIFICATION_FOR_WINNER_DEFAULT,
+        )
+    )
+
+    return {
+        "two_stage_enabled": bool(two_stage_enabled),
+        "sample_cap": sample_cap,
+        "stage1_target_profiles": int(stage1_target_profiles),
+        "stage2_top_n": int(stage2_top_n),
+        "stage1_search_window_candles": int(stage1_window_candles),
+        "stage2_search_window_candles": int(stage2_window_candles),
+        "worker_cap": worker_cap,
+        "force_full_verification_for_winner": bool(force_full_verification_for_winner),
+    }
 
 
 def _sample_optimization_profiles(
@@ -1897,8 +2769,21 @@ def _format_profile_dict(profile: OptimizationProfile) -> str:
         "dual_thrust_period",
         "ema_fast_period",
         "ema_slow_period",
+        "ema_fast",
+        "ema_mid",
+        "ema_slow",
+        "slope_lookback",
+        "rsi_length",
+        "volume_ma_length",
+        "atr_length",
+        "use_rsi_filter",
+        "use_rsi_cross_filter",
+        "use_volume_filter",
+        "use_atr_stop_buffer",
+        "pullback_requires_outer_band_touch",
+        "use_rejection_quality_filter",
+        "signal_cooldown_bars",
         "ema_length",
-        "chandelier_period",
         "frama_fast_period",
         "frama_slow_period",
     }
@@ -1931,6 +2816,176 @@ def _strategy_cache_profiles(strategy_name: str) -> list[OptimizationProfile]:
             )
             if int(ema_fast_period) < int(ema_slow_period)
         ]
+    if strategy_name == "ema_band_rejection":
+        default_rsi_length = int(EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rsi_length"][0])
+        default_rsi_midline = float(EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rsi_midline"][0])
+        default_use_rsi_cross_filter = int(
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["use_rsi_cross_filter"][0]
+        )
+        default_rsi_midline_margin = float(
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rsi_midline_margin"][0]
+        )
+        default_volume_ma_length = int(EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["volume_ma_length"][0])
+        default_volume_multiplier = float(EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["volume_multiplier"][0])
+        default_atr_length = int(EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["atr_length"][0])
+        default_atr_stop_buffer_mult = float(
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["atr_stop_buffer_mult"][-1]
+        )
+        default_rejection_wick_min_ratio = float(
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rejection_wick_min_ratio"][0]
+        )
+        default_rejection_body_min_ratio = float(
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rejection_body_min_ratio"][0]
+        )
+        profiles: list[OptimizationProfile] = []
+        for ema_fast, ema_mid, ema_slow in product(
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["ema_fast"],
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["ema_mid"],
+            EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["ema_slow"],
+        ):
+            resolved_ema_fast = int(ema_fast)
+            resolved_ema_mid = int(ema_mid)
+            resolved_ema_slow = int(ema_slow)
+            if not (resolved_ema_fast < resolved_ema_mid < resolved_ema_slow):
+                continue
+            for slope_lookback, min_ema_spread_pct in product(
+                EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["slope_lookback"],
+                EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["min_ema_spread_pct"],
+            ):
+                for min_slow_slope_pct in EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["min_slow_slope_pct"]:
+                    for pullback_requires_outer_band_touch in EMA_BAND_REJECTION_FIXED_GRID_OPTIONS[
+                        "pullback_requires_outer_band_touch"
+                    ]:
+                        resolved_pullback_requires_outer_band_touch = (
+                            1 if int(pullback_requires_outer_band_touch) > 0 else 0
+                        )
+                        for use_rejection_quality_filter in EMA_BAND_REJECTION_FIXED_GRID_OPTIONS[
+                            "use_rejection_quality_filter"
+                        ]:
+                            resolved_use_rejection_quality_filter = (
+                                1 if int(use_rejection_quality_filter) > 0 else 0
+                            )
+                            rejection_wick_min_ratio_values = (
+                                EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rejection_wick_min_ratio"]
+                                if resolved_use_rejection_quality_filter > 0
+                                else (default_rejection_wick_min_ratio,)
+                            )
+                            rejection_body_min_ratio_values = (
+                                EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rejection_body_min_ratio"]
+                                if resolved_use_rejection_quality_filter > 0
+                                else (default_rejection_body_min_ratio,)
+                            )
+                            for rejection_wick_min_ratio, rejection_body_min_ratio in product(
+                                rejection_wick_min_ratio_values,
+                                rejection_body_min_ratio_values,
+                            ):
+                                for use_rsi_filter in EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["use_rsi_filter"]:
+                                    resolved_use_rsi_filter = 1 if int(use_rsi_filter) > 0 else 0
+                                    rsi_length_values = (
+                                        EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rsi_length"]
+                                        if resolved_use_rsi_filter > 0
+                                        else (default_rsi_length,)
+                                    )
+                                    rsi_midline_values = (
+                                        EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rsi_midline"]
+                                        if resolved_use_rsi_filter > 0
+                                        else (default_rsi_midline,)
+                                    )
+                                    rsi_cross_filter_values = (
+                                        EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["use_rsi_cross_filter"]
+                                        if resolved_use_rsi_filter > 0
+                                        else (default_use_rsi_cross_filter,)
+                                    )
+                                    rsi_midline_margin_values = (
+                                        EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["rsi_midline_margin"]
+                                        if resolved_use_rsi_filter > 0
+                                        else (default_rsi_midline_margin,)
+                                    )
+                                    for (
+                                        rsi_length,
+                                        rsi_midline,
+                                        use_rsi_cross_filter,
+                                        rsi_midline_margin,
+                                    ) in product(
+                                        rsi_length_values,
+                                        rsi_midline_values,
+                                        rsi_cross_filter_values,
+                                        rsi_midline_margin_values,
+                                    ):
+                                        for use_volume_filter in EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["use_volume_filter"]:
+                                            resolved_use_volume_filter = 1 if int(use_volume_filter) > 0 else 0
+                                            volume_ma_length_values = (
+                                                EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["volume_ma_length"]
+                                                if resolved_use_volume_filter > 0
+                                                else (default_volume_ma_length,)
+                                            )
+                                            volume_multiplier_values = (
+                                                EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["volume_multiplier"]
+                                                if resolved_use_volume_filter > 0
+                                                else (default_volume_multiplier,)
+                                            )
+                                            for volume_ma_length, volume_multiplier in product(
+                                                volume_ma_length_values,
+                                                volume_multiplier_values,
+                                            ):
+                                                for use_atr_stop_buffer in EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["use_atr_stop_buffer"]:
+                                                    resolved_use_atr_stop_buffer = 1 if int(use_atr_stop_buffer) > 0 else 0
+                                                    atr_length_values = (
+                                                        EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["atr_length"]
+                                                        if resolved_use_atr_stop_buffer > 0
+                                                        else (default_atr_length,)
+                                                    )
+                                                    atr_stop_buffer_mult_values = (
+                                                        EMA_BAND_REJECTION_FIXED_GRID_OPTIONS["atr_stop_buffer_mult"]
+                                                        if resolved_use_atr_stop_buffer > 0
+                                                        else (default_atr_stop_buffer_mult,)
+                                                    )
+                                                    for atr_length, atr_stop_buffer_mult in product(
+                                                        atr_length_values,
+                                                        atr_stop_buffer_mult_values,
+                                                    ):
+                                                        for signal_cooldown_bars in EMA_BAND_REJECTION_FIXED_GRID_OPTIONS[
+                                                            "signal_cooldown_bars"
+                                                        ]:
+                                                            profiles.append(
+                                                                {
+                                                                    "ema_fast": float(resolved_ema_fast),
+                                                                    "ema_mid": float(resolved_ema_mid),
+                                                                    "ema_slow": float(resolved_ema_slow),
+                                                                    "slope_lookback": float(slope_lookback),
+                                                                    "min_ema_spread_pct": float(min_ema_spread_pct),
+                                                                    "min_slow_slope_pct": float(min_slow_slope_pct),
+                                                                    "pullback_requires_outer_band_touch": float(
+                                                                        resolved_pullback_requires_outer_band_touch
+                                                                    ),
+                                                                    "use_rejection_quality_filter": float(
+                                                                        resolved_use_rejection_quality_filter
+                                                                    ),
+                                                                    "rejection_wick_min_ratio": float(
+                                                                        rejection_wick_min_ratio
+                                                                    ),
+                                                                    "rejection_body_min_ratio": float(
+                                                                        rejection_body_min_ratio
+                                                                    ),
+                                                                    "use_rsi_filter": float(resolved_use_rsi_filter),
+                                                                    "rsi_length": float(rsi_length),
+                                                                    "rsi_midline": float(rsi_midline),
+                                                                    "use_rsi_cross_filter": float(
+                                                                        1 if int(use_rsi_cross_filter) > 0 else 0
+                                                                    ),
+                                                                    "rsi_midline_margin": float(rsi_midline_margin),
+                                                                    "use_volume_filter": float(resolved_use_volume_filter),
+                                                                    "volume_ma_length": float(volume_ma_length),
+                                                                    "volume_multiplier": float(volume_multiplier),
+                                                                    "use_atr_stop_buffer": float(
+                                                                        resolved_use_atr_stop_buffer
+                                                                    ),
+                                                                    "atr_length": float(atr_length),
+                                                                    "atr_stop_buffer_mult": float(atr_stop_buffer_mult),
+                                                                    "signal_cooldown_bars": float(signal_cooldown_bars),
+                                                                }
+                                                            )
+        return profiles
     if strategy_name == "frama_cross":
         frama_fast_period_options = FRAMA_FIXED_GRID_OPTIONS["frama_fast_period"]
         frama_slow_period_options = FRAMA_FIXED_GRID_OPTIONS["frama_slow_period"]
@@ -1972,6 +3027,31 @@ def _strategy_cache_key(strategy_name: str, strategy_profile: OptimizationProfil
             int(strategy_profile.get("ema_slow_period", 0.0)),
             float(strategy_profile.get("volume_multiplier", 0.0)),
         )
+    if strategy_name == "ema_band_rejection":
+        return (
+            int(strategy_profile.get("ema_fast", 0.0)),
+            int(strategy_profile.get("ema_mid", 0.0)),
+            int(strategy_profile.get("ema_slow", 0.0)),
+            int(strategy_profile.get("slope_lookback", 0.0)),
+            float(strategy_profile.get("min_ema_spread_pct", 0.0)),
+            float(strategy_profile.get("min_slow_slope_pct", 0.0)),
+            int(round(float(strategy_profile.get("pullback_requires_outer_band_touch", 0.0)))),
+            int(round(float(strategy_profile.get("use_rejection_quality_filter", 0.0)))),
+            float(strategy_profile.get("rejection_wick_min_ratio", 0.0)),
+            float(strategy_profile.get("rejection_body_min_ratio", 0.0)),
+            int(round(float(strategy_profile.get("use_rsi_filter", 0.0)))),
+            int(strategy_profile.get("rsi_length", 0.0)),
+            float(strategy_profile.get("rsi_midline", 0.0)),
+            int(round(float(strategy_profile.get("use_rsi_cross_filter", 0.0)))),
+            float(strategy_profile.get("rsi_midline_margin", 0.0)),
+            int(round(float(strategy_profile.get("use_volume_filter", 0.0)))),
+            int(strategy_profile.get("volume_ma_length", 0.0)),
+            float(strategy_profile.get("volume_multiplier", 0.0)),
+            int(round(float(strategy_profile.get("use_atr_stop_buffer", 0.0)))),
+            int(strategy_profile.get("atr_length", 0.0)),
+            float(strategy_profile.get("atr_stop_buffer_mult", 0.0)),
+            int(strategy_profile.get("signal_cooldown_bars", 0.0)),
+        )
     if strategy_name == "frama_cross":
         return (
             int(strategy_profile.get("frama_fast_period", 0.0)),
@@ -1988,21 +3068,64 @@ def _strategy_cache_key(strategy_name: str, strategy_profile: OptimizationProfil
 
 
 def _candles_to_dataframe(candles: Sequence[CandleRecord]) -> pd.DataFrame:
+    try:
+        polars_loader = (
+            PolarsDataLoader.from_candle_records(candles)
+            .with_setup_gate_ema(period=200)
+        )
+        return _worker_payload_to_pandas_dataframe(polars_loader.to_worker_payload())
+    except Exception:
+        # Fallback for environments where polars is not installed yet.
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": candle.symbol,
+                    "interval": candle.interval,
+                    "open_time": candle.open_time,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                }
+                for candle in candles
+            ]
+        )
+
+
+def _worker_payload_to_pandas_dataframe(
+    candles_payload: Mapping[str, object],
+) -> pd.DataFrame:
     return pd.DataFrame(
-        [
-            {
-                "symbol": candle.symbol,
-                "interval": candle.interval,
-                "open_time": candle.open_time,
-                "open": candle.open,
-                "high": candle.high,
-                "low": candle.low,
-                "close": candle.close,
-                "volume": candle.volume,
-            }
-            for candle in candles
-        ]
+        {
+            "symbol": list(candles_payload.get("symbol", [])),
+            "interval": list(candles_payload.get("interval", [])),
+            "open_time": list(candles_payload.get("open_time", [])),
+            "open": np.asarray(candles_payload.get("open", []), dtype=np.float64),
+            "high": np.asarray(candles_payload.get("high", []), dtype=np.float64),
+            "low": np.asarray(candles_payload.get("low", []), dtype=np.float64),
+            "close": np.asarray(candles_payload.get("close", []), dtype=np.float64),
+            "volume": np.asarray(candles_payload.get("volume", []), dtype=np.float64),
+        }
     )
+
+
+def _candles_dataframe_to_worker_payload(
+    candles_df: pd.DataFrame,
+) -> dict[str, object]:
+    try:
+        return PolarsDataLoader.from_pandas_dataframe(candles_df).to_worker_payload()
+    except Exception:
+        return {
+            "symbol": candles_df["symbol"].astype(str).tolist(),
+            "interval": candles_df["interval"].astype(str).tolist(),
+            "open_time": candles_df["open_time"].tolist(),
+            "open": candles_df["open"].to_numpy(dtype=np.float64, copy=False),
+            "high": candles_df["high"].to_numpy(dtype=np.float64, copy=False),
+            "low": candles_df["low"].to_numpy(dtype=np.float64, copy=False),
+            "close": candles_df["close"].to_numpy(dtype=np.float64, copy=False),
+            "volume": candles_df["volume"].to_numpy(dtype=np.float64, copy=False),
+        }
 
 
 class _NoopDatabase:
@@ -2059,6 +3182,674 @@ def _calculate_trade_direction_counts(closed_trades: Sequence[dict]) -> tuple[in
     return long_trades_count, short_trades_count
 
 
+def _extract_ohlcv_numpy_arrays(
+    candles_df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    open_arr = pd.to_numeric(candles_df["open"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    high_arr = pd.to_numeric(candles_df["high"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    low_arr = pd.to_numeric(candles_df["low"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    close_arr = pd.to_numeric(candles_df["close"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    volume_arr = pd.to_numeric(candles_df["volume"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    return (
+        np.ascontiguousarray(open_arr, dtype=np.float64),
+        np.ascontiguousarray(high_arr, dtype=np.float64),
+        np.ascontiguousarray(low_arr, dtype=np.float64),
+        np.ascontiguousarray(close_arr, dtype=np.float64),
+        np.ascontiguousarray(volume_arr, dtype=np.float64),
+    )
+
+
+def _extract_ohlcv_numpy_arrays_from_payload(
+    candles_payload: Mapping[str, object],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    try:
+        open_arr = np.ascontiguousarray(np.asarray(candles_payload.get("open", ()), dtype=np.float64))
+        high_arr = np.ascontiguousarray(np.asarray(candles_payload.get("high", ()), dtype=np.float64))
+        low_arr = np.ascontiguousarray(np.asarray(candles_payload.get("low", ()), dtype=np.float64))
+        close_arr = np.ascontiguousarray(np.asarray(candles_payload.get("close", ()), dtype=np.float64))
+        volume_arr = np.ascontiguousarray(np.asarray(candles_payload.get("volume", ()), dtype=np.float64))
+    except Exception:
+        return None
+    sample_count = int(close_arr.size)
+    if sample_count <= 0:
+        return None
+    if (
+        int(open_arr.size) != sample_count
+        or int(high_arr.size) != sample_count
+        or int(low_arr.size) != sample_count
+        or int(volume_arr.size) != sample_count
+    ):
+        return None
+    return open_arr, high_arr, low_arr, close_arr, volume_arr
+
+
+def _task_ohlcv_numpy_arrays(
+    task: Mapping[str, object],
+    *,
+    candles_df: pd.DataFrame | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    candles_payload = task.get("candles_payload")
+    if isinstance(candles_payload, Mapping):
+        payload_arrays = _extract_ohlcv_numpy_arrays_from_payload(candles_payload)
+        if payload_arrays is not None:
+            return payload_arrays
+    worker_arrays = _worker_ohlcv_arrays()
+    if worker_arrays is not None:
+        return worker_arrays
+    effective_df = candles_df if candles_df is not None else _task_candles_dataframe(dict(task))
+    return _extract_ohlcv_numpy_arrays(effective_df)
+
+
+def _warmup_numba_runtime(log_callback: Callable[[str], None] | None = None) -> None:
+    global _NUMBA_WARMUP_DONE
+    if _NUMBA_WARMUP_DONE:
+        return
+    dummy_open = np.ascontiguousarray(np.linspace(100.0, 101.0, 10, dtype=np.float64))
+    dummy_close = np.ascontiguousarray(np.linspace(100.1, 101.1, 10, dtype=np.float64))
+    dummy_high = np.ascontiguousarray(dummy_close + 0.2, dtype=np.float64)
+    dummy_low = np.ascontiguousarray(dummy_open - 0.2, dtype=np.float64)
+    dummy_volume = np.ascontiguousarray(np.linspace(1000.0, 1200.0, 10, dtype=np.float64))
+
+    # Trigger strategy JIT signatures.
+    for strategy_code in (1, 2, 3):
+        _ = generate_strategy_signals(
+            int(strategy_code),
+            dummy_open,
+            dummy_high,
+            dummy_low,
+            dummy_close,
+            dummy_volume,
+            float(12.0),
+            float(60.0),
+            float(2.0),
+            int(settings.strategy.volume_sma_period),
+        )
+    _ = compute_ema_band_rejection_signals(
+        dummy_open,
+        dummy_high,
+        dummy_low,
+        dummy_close,
+        dummy_volume,
+        5,
+        10,
+        20,
+        5,
+        0.05,
+        0.0,
+        0,
+        0,
+        0.35,
+        0.20,
+        0,
+        14,
+        50.0,
+        0,
+        0.0,
+        0,
+        20,
+        1.0,
+        0,
+    )
+
+    # Trigger core loop signature.
+    dummy_signals = np.zeros(10, dtype=np.int8)
+    dummy_signals[5] = np.int8(1)
+    _ = run_fast_backtest_loop(
+        dummy_open,
+        dummy_high,
+        dummy_low,
+        dummy_close,
+        dummy_signals,
+        float(1.5),
+        float(3.0),
+        float(settings.trading.default_leverage),
+        float(_resolve_backtest_fee_pct()),
+        float(BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE),
+        float(settings.trading.start_capital),
+    )
+
+    _NUMBA_WARMUP_DONE = True
+    if log_callback is not None:
+        with suppress(Exception):
+            log_callback("[INFO] Numba JIT Compilation triggered successfully.")
+
+
+def _jit_strategy_code(strategy_name: str) -> int:
+    normalized_name = _validate_strategy_name(strategy_name)
+    if normalized_name == "ema_cross_volume":
+        return 1
+    if normalized_name == "frama_cross":
+        return 2
+    if normalized_name == "dual_thrust":
+        return 3
+    if normalized_name == "ema_band_rejection":
+        return 4
+    return 0
+
+
+def _build_jit_signal_array(
+    open_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    close_arr: np.ndarray,
+    volume_arr: np.ndarray,
+    *,
+    strategy_name: str,
+    strategy_profile: OptimizationProfile,
+) -> np.ndarray | None:
+    strategy_code = _jit_strategy_code(strategy_name)
+    if strategy_code == 0:
+        return None
+
+    def _profile_float(field_name: str, default_value: float) -> float:
+        with suppress(Exception):
+            return float(strategy_profile.get(field_name, default_value))
+        return float(default_value)
+
+    def _profile_int(field_name: str, default_value: int) -> int:
+        with suppress(Exception):
+            return int(float(strategy_profile.get(field_name, default_value)))
+        return int(default_value)
+
+    def _profile_flag(field_name: str, default_value: bool = False) -> int:
+        raw_value = strategy_profile.get(field_name, 1.0 if default_value else 0.0)
+        if isinstance(raw_value, bool):
+            return 1 if bool(raw_value) else 0
+        with suppress(Exception):
+            return 1 if float(raw_value) >= 0.5 else 0
+        return 1 if default_value else 0
+
+    if strategy_code == 1:
+        param_a = _profile_float("ema_fast_period", settings.strategy.ema_fast_period)
+        param_b = _profile_float("ema_slow_period", settings.strategy.ema_slow_period)
+        param_c = _profile_float("volume_multiplier", settings.strategy.volume_multiplier)
+    elif strategy_code == 2:
+        param_a = _profile_float("frama_fast_period", settings.strategy.frama_fast_period)
+        param_b = _profile_float("frama_slow_period", settings.strategy.frama_slow_period)
+        param_c = _profile_float("volume_multiplier", settings.strategy.volume_multiplier)
+    elif strategy_code == 3:
+        param_a = _profile_float("dual_thrust_period", settings.strategy.dual_thrust_period)
+        param_b = _profile_float("dual_thrust_k1", settings.strategy.dual_thrust_k1)
+        param_c = _profile_float("dual_thrust_k2", settings.strategy.dual_thrust_k2)
+    else:
+        raw_signals = compute_ema_band_rejection_signals(
+            open_arr,
+            high_arr,
+            low_arr,
+            close_arr,
+            volume_arr,
+            _profile_int("ema_fast", 5),
+            _profile_int("ema_mid", 10),
+            _profile_int("ema_slow", 20),
+            _profile_int("slope_lookback", 5),
+            _profile_float("min_ema_spread_pct", 0.05),
+            _profile_float("min_slow_slope_pct", 0.0),
+            _profile_flag("pullback_requires_outer_band_touch", False),
+            _profile_flag("use_rejection_quality_filter", False),
+            _profile_float("rejection_wick_min_ratio", 0.35),
+            _profile_float("rejection_body_min_ratio", 0.20),
+            _profile_flag("use_rsi_filter", False),
+            _profile_int("rsi_length", 14),
+            _profile_float("rsi_midline", 50.0),
+            _profile_flag("use_rsi_cross_filter", False),
+            _profile_float("rsi_midline_margin", 0.0),
+            _profile_flag("use_volume_filter", False),
+            _profile_int("volume_ma_length", 20),
+            _profile_float("volume_multiplier", 1.0),
+            _profile_int("signal_cooldown_bars", 0),
+        )
+        return np.ascontiguousarray(raw_signals, dtype=np.int8)
+
+    raw_signals = generate_strategy_signals(
+        int(strategy_code),
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
+        float(param_a),
+        float(param_b),
+        float(param_c),
+        int(settings.strategy.volume_sma_period),
+    )
+    return np.ascontiguousarray(raw_signals, dtype=np.int8)
+
+
+def _build_python_ema_band_reference_signals(
+    candles_df: pd.DataFrame,
+    strategy_profile: OptimizationProfile,
+) -> np.ndarray:
+    def _profile_int(field_name: str, default_value: int) -> int:
+        with suppress(Exception):
+            return int(float(strategy_profile.get(field_name, default_value)))
+        return int(default_value)
+
+    def _profile_float(field_name: str, default_value: float) -> float:
+        with suppress(Exception):
+            return float(strategy_profile.get(field_name, default_value))
+        return float(default_value)
+
+    def _profile_flag(field_name: str, default_value: bool = False) -> bool:
+        raw_value = strategy_profile.get(field_name, default_value)
+        if isinstance(raw_value, bool):
+            return bool(raw_value)
+        with suppress(Exception):
+            return bool(float(raw_value) >= 0.5)
+        return bool(default_value)
+
+    working_df = build_ema_band_rejection_signal_frame(
+        candles_df,
+        ema_fast=_profile_int("ema_fast", 5),
+        ema_mid=_profile_int("ema_mid", 10),
+        ema_slow=_profile_int("ema_slow", 20),
+        slope_lookback=_profile_int("slope_lookback", 5),
+        min_ema_spread_pct=_profile_float("min_ema_spread_pct", 0.05),
+        min_slow_slope_pct=_profile_float("min_slow_slope_pct", 0.0),
+        pullback_requires_outer_band_touch=_profile_flag(
+            "pullback_requires_outer_band_touch",
+            False,
+        ),
+        use_rejection_quality_filter=_profile_flag(
+            "use_rejection_quality_filter",
+            False,
+        ),
+        rejection_wick_min_ratio=_profile_float("rejection_wick_min_ratio", 0.35),
+        rejection_body_min_ratio=_profile_float("rejection_body_min_ratio", 0.20),
+        use_rsi_filter=_profile_flag("use_rsi_filter", False),
+        rsi_length=_profile_int("rsi_length", 14),
+        rsi_midline=_profile_float("rsi_midline", 50.0),
+        use_rsi_cross_filter=_profile_flag("use_rsi_cross_filter", False),
+        rsi_midline_margin=_profile_float("rsi_midline_margin", 0.0),
+        use_volume_filter=_profile_flag("use_volume_filter", False),
+        volume_ma_length=_profile_int("volume_ma_length", 20),
+        volume_multiplier=_profile_float("volume_multiplier", 1.0),
+        use_atr_stop_buffer=_profile_flag("use_atr_stop_buffer", False),
+        atr_length=_profile_int("atr_length", 14),
+        atr_stop_buffer_mult=_profile_float("atr_stop_buffer_mult", 0.5),
+        signal_cooldown_bars=_profile_int("signal_cooldown_bars", 0),
+    )
+    raw_signals = pd.to_numeric(
+        working_df["ema_band_signal_direction"],
+        errors="coerce",
+    ).fillna(0).astype("int8").to_numpy(copy=False)
+    return np.ascontiguousarray(raw_signals, dtype=np.int8)
+
+
+def _validate_ema_band_jit_alignment(
+    candles_df: pd.DataFrame,
+    open_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    close_arr: np.ndarray,
+    volume_arr: np.ndarray,
+    strategy_profile: OptimizationProfile,
+    *,
+    mismatch_tolerance_pct: float = 1.0,
+) -> tuple[bool, int, int, float]:
+    jit_signals = _build_jit_signal_array(
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
+        strategy_name="ema_band_rejection",
+        strategy_profile=strategy_profile,
+    )
+    if jit_signals is None:
+        return False, 0, 0, 100.0
+    py_signals = _build_python_ema_band_reference_signals(candles_df, strategy_profile)
+    compare_count = int(min(jit_signals.size, py_signals.size))
+    if compare_count <= 0:
+        return False, 0, 0, 100.0
+    mismatch_count = int(np.count_nonzero(jit_signals[:compare_count] != py_signals[:compare_count]))
+    mismatch_pct = (float(mismatch_count) / float(compare_count)) * 100.0
+    return mismatch_pct <= float(mismatch_tolerance_pct), mismatch_count, compare_count, mismatch_pct
+
+
+def _build_strategy_jit_precomputed_payload(
+    candles_df: pd.DataFrame,
+    open_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    close_arr: np.ndarray,
+    volume_arr: np.ndarray,
+    *,
+    strategy_name: str,
+    strategy_profile: OptimizationProfile,
+    use_setup_gate: bool,
+    min_confidence_pct: float | None,
+    regime_mask: Sequence[int] | None,
+) -> dict[str, object] | None:
+    raw_signal_array = _build_jit_signal_array(
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
+        strategy_name=strategy_name,
+        strategy_profile=strategy_profile,
+    )
+    if raw_signal_array is None:
+        return None
+    required_candles = _required_candle_count_for_profile(
+        strategy_name,
+        strategy_profile,
+        use_setup_gate=use_setup_gate,
+    )
+    setup_gate = SmartSetupGate(min_confidence_pct=min_confidence_pct) if use_setup_gate else None
+    return _build_vectorized_strategy_cache_payload(
+        candles_df,
+        strategy_name=strategy_name,
+        required_candles=required_candles,
+        setup_gate=setup_gate,
+        strategy_profile=strategy_profile,
+        regime_mask=regime_mask,
+        raw_signal_override=raw_signal_array.tolist(),
+    )
+
+
+def _build_ema_band_rejection_jit_precomputed_payload(
+    candles_df: pd.DataFrame,
+    open_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    close_arr: np.ndarray,
+    volume_arr: np.ndarray,
+    *,
+    strategy_profile: OptimizationProfile,
+    use_setup_gate: bool,
+    min_confidence_pct: float | None,
+    regime_mask: Sequence[int] | None,
+) -> dict[str, object] | None:
+    return _build_strategy_jit_precomputed_payload(
+        candles_df,
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
+        strategy_name="ema_band_rejection",
+        strategy_profile=strategy_profile,
+        use_setup_gate=use_setup_gate,
+        min_confidence_pct=min_confidence_pct,
+        regime_mask=regime_mask,
+    )
+
+
+def _compare_optimizer_final_summary_metrics(
+    optimizer_summary: Mapping[str, object],
+    final_summary: Mapping[str, object],
+) -> tuple[bool, list[str]]:
+    metric_tolerances: dict[str, tuple[float, float]] = {
+        "total_trades": (0.0, 0.0),
+        "profit_factor": (0.20, 0.10),
+        "total_pnl_usd": (5.0, 0.05),
+        "win_rate_pct": (1.5, 0.05),
+        "max_drawdown_pct": (1.5, 0.10),
+        "real_rrr": (0.30, 0.20),
+    }
+    mismatches: list[str] = []
+    for metric_name, (absolute_tolerance, relative_tolerance) in metric_tolerances.items():
+        with suppress(Exception):
+            optimizer_value = float(optimizer_summary.get(metric_name, 0.0) or 0.0)
+            final_value = float(final_summary.get(metric_name, 0.0) or 0.0)
+            if not math.isfinite(optimizer_value) and not math.isfinite(final_value):
+                continue
+            if not math.isfinite(optimizer_value) or not math.isfinite(final_value):
+                mismatches.append(
+                    f"{metric_name}: optimizer={optimizer_value} final={final_value}"
+                )
+                continue
+            max_allowed_delta = max(
+                float(absolute_tolerance),
+                abs(final_value) * float(relative_tolerance),
+            )
+            actual_delta = abs(optimizer_value - final_value)
+            if actual_delta > max_allowed_delta:
+                mismatches.append(
+                    f"{metric_name}: optimizer={optimizer_value:.4f} final={final_value:.4f} "
+                    f"(delta={actual_delta:.4f} > tol={max_allowed_delta:.4f})"
+                )
+    return len(mismatches) == 0, mismatches
+
+
+def _run_strategy_consistent_profile_evaluation(
+    candles_df: pd.DataFrame,
+    open_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    close_arr: np.ndarray,
+    volume_arr: np.ndarray,
+    *,
+    strategy_name: str,
+    strategy_profile: OptimizationProfile,
+    use_setup_gate: bool,
+    min_confidence_pct: float | None,
+    regime_mask: Sequence[int] | None,
+    leverage_override: int | None,
+    symbol: str,
+    interval: str,
+    apply_optimizer_early_stop: bool,
+) -> tuple[dict[str, float], int, int, int] | None:
+    payload = _build_strategy_jit_precomputed_payload(
+        candles_df,
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
+        strategy_name=strategy_name,
+        strategy_profile=strategy_profile,
+        use_setup_gate=use_setup_gate,
+        min_confidence_pct=min_confidence_pct,
+        regime_mask=regime_mask,
+    )
+    if payload is None:
+        return None
+    return _run_python_profile_evaluation(
+        candles_df,
+        strategy_name=strategy_name,
+        strategy_profile=strategy_profile,
+        use_setup_gate=use_setup_gate,
+        min_confidence_pct=min_confidence_pct,
+        regime_mask=regime_mask,
+        leverage_override=leverage_override,
+        symbol=symbol,
+        interval=interval,
+        precomputed_payload=payload,
+        apply_optimizer_early_stop=bool(apply_optimizer_early_stop),
+    )
+
+
+def _run_ema_band_rejection_consistent_profile_evaluation(
+    candles_df: pd.DataFrame,
+    open_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    close_arr: np.ndarray,
+    volume_arr: np.ndarray,
+    *,
+    strategy_profile: OptimizationProfile,
+    use_setup_gate: bool,
+    min_confidence_pct: float | None,
+    regime_mask: Sequence[int] | None,
+    leverage_override: int | None,
+    symbol: str,
+    interval: str,
+) -> tuple[dict[str, float], int, int, int] | None:
+    return _run_strategy_consistent_profile_evaluation(
+        candles_df,
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
+        strategy_name="ema_band_rejection",
+        strategy_profile=strategy_profile,
+        use_setup_gate=use_setup_gate,
+        min_confidence_pct=min_confidence_pct,
+        regime_mask=regime_mask,
+        leverage_override=leverage_override,
+        symbol=symbol,
+        interval=interval,
+        apply_optimizer_early_stop=False,
+    )
+
+
+def _run_jit_profile_evaluation(
+    candles_df: pd.DataFrame,
+    open_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    close_arr: np.ndarray,
+    volume_arr: np.ndarray,
+    *,
+    strategy_name: str,
+    strategy_profile: OptimizationProfile,
+    use_setup_gate: bool,
+    min_confidence_pct: float | None,
+    regime_mask: Sequence[int] | None,
+    leverage_override: int | None,
+) -> tuple[dict[str, float], int, int, int] | None:
+    raw_signal_array = _build_jit_signal_array(
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
+        strategy_name=strategy_name,
+        strategy_profile=strategy_profile,
+    )
+    if raw_signal_array is None:
+        return None
+
+    required_candles = _required_candle_count_for_strategy(
+        strategy_name,
+        use_setup_gate=use_setup_gate,
+    )
+    setup_gate = SmartSetupGate(min_confidence_pct=min_confidence_pct) if use_setup_gate else None
+    signal_list, total_signals, approved_signals, blocked_signals = _finalize_signal_series(
+        candles_df,
+        raw_signal_array.tolist(),
+        required_candles=required_candles,
+        setup_gate=setup_gate,
+        strategy_name=strategy_name,
+        regime_mask=regime_mask,
+    )
+    if not signal_list:
+        return None
+
+    signal_arr = np.ascontiguousarray(signal_list, dtype=np.int8)
+    effective_leverage = (
+        int(leverage_override)
+        if leverage_override is not None
+        else int(settings.trading.default_leverage)
+    )
+    (
+        total_pnl_usd,
+        win_rate_pct,
+        max_drawdown_pct,
+        total_trades,
+        gross_profit,
+        gross_loss,
+        win_count,
+        loss_count,
+        long_trades,
+        short_trades,
+        longest_consecutive_losses,
+        total_fees_usd,
+        total_slippage_usd,
+    ) = run_fast_backtest_loop_detailed(
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        signal_arr,
+        float(strategy_profile["stop_loss_pct"]),
+        float(strategy_profile["take_profit_pct"]),
+        float(effective_leverage),
+        float(_resolve_backtest_fee_pct()),
+        float(BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE),
+        float(settings.trading.start_capital),
+    )
+    if total_trades <= 0:
+        return None
+
+    if gross_loss <= 0.0:
+        profit_factor = float("inf") if gross_profit > 0.0 else 0.0
+    else:
+        profit_factor = float(gross_profit / gross_loss)
+    average_win_usd = float(gross_profit / float(max(win_count, 1)))
+    average_loss_usd = float(gross_loss / float(max(loss_count, 1)))
+    if average_loss_usd <= 0.0:
+        real_rrr = float("inf") if average_win_usd > 0.0 else 0.0
+    else:
+        real_rrr = float(average_win_usd / average_loss_usd)
+    average_trade_fees_usd = float(total_fees_usd / float(total_trades))
+    average_trade_slippage_usd = float(total_slippage_usd / float(total_trades))
+    average_trade_cost_usd = float(average_trade_fees_usd + average_trade_slippage_usd)
+    if average_trade_cost_usd <= 0.0:
+        average_win_to_cost_ratio = float("inf") if average_win_usd > 0.0 else 0.0
+    else:
+        average_win_to_cost_ratio = float(average_win_usd / average_trade_cost_usd)
+
+    summary = {
+        **{key: float(value) for key, value in strategy_profile.items()},
+        "start_capital_usd": float(settings.trading.start_capital),
+        "total_pnl_usd": float(total_pnl_usd),
+        "win_rate_pct": float(win_rate_pct),
+        "profit_factor": float(profit_factor),
+        "total_trades": float(total_trades),
+        "long_trades": float(long_trades),
+        "short_trades": float(short_trades),
+        "average_win_usd": float(average_win_usd),
+        "average_loss_usd": float(average_loss_usd),
+        "real_rrr": float(real_rrr),
+        "average_trade_fees_usd": float(average_trade_fees_usd),
+        "average_trade_slippage_usd": float(average_trade_slippage_usd),
+        "average_trade_cost_usd": float(average_trade_cost_usd),
+        "average_win_to_cost_ratio": float(average_win_to_cost_ratio),
+        "max_drawdown_pct": float(max_drawdown_pct),
+        "longest_consecutive_losses": float(longest_consecutive_losses),
+        "total_slippage_penalty_usd": float(total_slippage_usd),
+        "slippage_penalty_pct_per_side": float(BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE),
+        "slippage_penalty_pct_per_trade": float(BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE),
+    }
+    summary["avg_profit_per_trade_net_pct"] = float(_resolve_avg_profit_per_trade_net_pct(summary))
+    summary["stability_score"] = _calculate_stability_score(summary)
+    return summary, int(total_signals), int(approved_signals), int(blocked_signals)
+
+
+def _should_early_stop_profile(
+    closed_trades: Sequence[dict],
+    *,
+    start_capital: float,
+    max_trades_to_evaluate: int = 30,
+    max_drawdown_pct: float = 40.0,
+) -> bool:
+    if not closed_trades or max_trades_to_evaluate <= 0:
+        return False
+    if not math.isfinite(start_capital) or start_capital <= 0.0:
+        return False
+
+    equity = float(start_capital)
+    peak_equity = float(start_capital)
+    trades_checked = 0
+    for trade in closed_trades:
+        if trades_checked >= max_trades_to_evaluate:
+            break
+        with suppress(Exception):
+            equity += float(trade.get("pnl", 0.0) or 0.0)
+            trades_checked += 1
+            if equity > peak_equity:
+                peak_equity = equity
+            if peak_equity > 0.0:
+                current_drawdown_pct = ((peak_equity - equity) / peak_equity) * 100.0
+                if current_drawdown_pct > max_drawdown_pct:
+                    return True
+    return False
+
+
 def _generate_signals_for_worker(
     candles_df: pd.DataFrame,
     *,
@@ -2100,31 +3891,11 @@ def _generate_signals_for_worker(
             int(vectorized_payload["blocked_signals"]),
         )
 
-    effective_signal_profile = _resolve_soft_signal_profile(
-        strategy_name,
-        strategy_profile,
-    )
+    effective_signal_profile = strategy_profile
     signals: list[int] = []
     total_signals = 0
     approved_signals = 0
     blocked_signals = 0
-    volume_ratio_array: np.ndarray | None = None
-    if setup_gate is not None:
-        with suppress(Exception):
-            volume_period = max(2, int(getattr(settings.strategy, "volume_sma_period", 20)))
-            volume_series = pd.to_numeric(candles_df["volume"], errors="coerce")
-            volume_sma_series = volume_series.rolling(
-                window=volume_period,
-                min_periods=volume_period,
-            ).mean()
-            volume_values = volume_series.to_numpy(dtype=np.float64, copy=False)
-            volume_sma_values = volume_sma_series.to_numpy(dtype=np.float64, copy=False)
-            volume_ratio_array = np.divide(
-                volume_values,
-                volume_sma_values,
-                out=np.full_like(volume_values, np.nan, dtype=np.float64),
-                where=np.isfinite(volume_sma_values) & (volume_sma_values > 0.0),
-            )
     for index in range(len(candles_df)):
         if index + 1 < required_candles:
             signals.append(0)
@@ -2151,25 +3922,11 @@ def _generate_signals_for_worker(
                 normalized_direction,
                 strategy_name,
             )
-            volume_ratio = float("nan")
-            if volume_ratio_array is not None and 0 <= index < int(volume_ratio_array.size):
-                volume_ratio = float(volume_ratio_array[index])
-            has_soft_volume_approval = (
-                math.isfinite(volume_ratio)
-                and volume_ratio >= float(SOFT_APPROVAL_VOLUME_RATIO_MIN)
-            )
-            if not has_soft_volume_approval:
+            if not is_approved:
                 blocked_signals += 1
                 signal_direction = 0
             else:
-                if not is_approved:
-                    is_approved = True
-                is_soft_leverage_band = volume_ratio < float(SOFT_APPROVAL_VOLUME_RATIO_FULL)
-                signal_direction = (
-                    normalized_direction * int(SOFT_APPROVAL_SIGNAL_MULTIPLIER)
-                    if is_soft_leverage_band
-                    else normalized_direction
-                )
+                signal_direction = normalized_direction
                 approved_signals += 1
         elif signal_direction != 0:
             total_signals += 1
@@ -2184,6 +3941,10 @@ def _generate_signals_for_worker(
 
 
 def _task_candles_dataframe(task: dict[str, object], *, copy_deep: bool = False) -> pd.DataFrame:
+    candles_payload = task.get("candles_payload")
+    if isinstance(candles_payload, Mapping):
+        df = _worker_payload_to_pandas_dataframe(candles_payload)
+        return df.copy(deep=copy_deep) if copy_deep else df
     candles_records = task.get("candles_records")
     if candles_records is not None:
         # avoid unnecessary deep copies inside worker processes
@@ -2193,6 +3954,10 @@ def _task_candles_dataframe(task: dict[str, object], *, copy_deep: bool = False)
 
 
 def _task_candle_rows(task: dict[str, object]) -> list[dict[str, object]]:
+    candles_payload = task.get("candles_payload")
+    if isinstance(candles_payload, Mapping):
+        candles_df = _worker_payload_to_pandas_dataframe(candles_payload)
+        return PaperTradingEngine._extract_backtest_rows(candles_df)
     candles_records = task.get("candles_records")
     if candles_records is not None:
         candles_df = pd.DataFrame(candles_records)
@@ -2254,6 +4019,7 @@ def _build_zero_fitness_summary(strategy_profile: OptimizationProfile) -> dict[s
             summary[str(key)] = float(value)
     summary.update(
         {
+            "start_capital_usd": float(settings.trading.start_capital),
             "total_pnl_usd": 0.0,
             "win_rate_pct": 0.0,
             "profit_factor": 0.0,
@@ -2279,39 +4045,313 @@ def _build_zero_fitness_summary(strategy_profile: OptimizationProfile) -> dict[s
     return summary
 
 
-def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, object]:
-    candle_rows = _task_candle_rows(task)
-    strategy_name = str(task["strategy_name"])
-    strategy_profile = dict(task["strategy_profile"])
-    strategy_profile.setdefault(
-        "chandelier_period",
-        float(settings.trading.chandelier_period),
-    )
-    if "chandelier_mult" in strategy_profile and "chandelier_multiplier" not in strategy_profile:
-        strategy_profile["chandelier_multiplier"] = float(strategy_profile["chandelier_mult"])
-    strategy_profile.setdefault(
-        "chandelier_multiplier",
-        float(settings.trading.chandelier_multiplier),
-    )
-    if "breakeven_activation_pct" not in strategy_profile:
-        strategy_profile["breakeven_activation_pct"] = float(OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT)
-    use_setup_gate = bool(task["use_setup_gate"])
-    min_confidence_pct = (
-        None if task["min_confidence_pct"] is None else float(task["min_confidence_pct"])
-    )
-    if use_setup_gate:
-        min_confidence_pct = _enforce_optimizer_min_confidence_floor(min_confidence_pct)
-    regime_mask = _task_regime_mask(task)
-    leverage_override = (
-        None if task["leverage_override"] is None else int(task["leverage_override"])
-    )
-    symbol = str(task["symbol"])
-    interval = str(task.get("interval") or settings.trading.interval)
+def _unpack_strategy_signal_payload(packed_payload: Mapping[str, object]) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "total_signals": int(packed_payload.get("total_signals", 0) or 0),
+        "approved_signals": int(packed_payload.get("approved_signals", 0) or 0),
+        "blocked_signals": int(packed_payload.get("blocked_signals", 0) or 0),
+    }
+    if "signals_bytes" in packed_payload and "signals_len" in packed_payload:
+        payload["signals"] = _unpack_int8_series(
+            bytes(packed_payload["signals_bytes"]),
+            int(packed_payload["signals_len"]),
+        )
+    else:
+        payload["signals"] = list(packed_payload.get("signals", []))
+
+    if (
+        "precomputed_long_exit_flags_bytes" in packed_payload
+        and "precomputed_long_exit_flags_len" in packed_payload
+    ):
+        payload["precomputed_long_exit_flags"] = _unpack_bool_series(
+            bytes(packed_payload["precomputed_long_exit_flags_bytes"]),
+            int(packed_payload["precomputed_long_exit_flags_len"]),
+        )
+    elif "precomputed_long_exit_flags" in packed_payload:
+        payload["precomputed_long_exit_flags"] = list(
+            packed_payload.get("precomputed_long_exit_flags", [])
+        )
+
+    if (
+        "precomputed_short_exit_flags_bytes" in packed_payload
+        and "precomputed_short_exit_flags_len" in packed_payload
+    ):
+        payload["precomputed_short_exit_flags"] = _unpack_bool_series(
+            bytes(packed_payload["precomputed_short_exit_flags_bytes"]),
+            int(packed_payload["precomputed_short_exit_flags_len"]),
+        )
+    elif "precomputed_short_exit_flags" in packed_payload:
+        payload["precomputed_short_exit_flags"] = list(
+            packed_payload.get("precomputed_short_exit_flags", [])
+        )
+
+    if (
+        "precomputed_dynamic_stop_loss_pcts_bytes" in packed_payload
+        and "precomputed_dynamic_stop_loss_pcts_len" in packed_payload
+    ):
+        payload["precomputed_dynamic_stop_loss_pcts"] = _unpack_float_series(
+            bytes(packed_payload["precomputed_dynamic_stop_loss_pcts_bytes"]),
+            int(packed_payload["precomputed_dynamic_stop_loss_pcts_len"]),
+        )
+    elif "precomputed_dynamic_stop_loss_pcts" in packed_payload:
+        payload["precomputed_dynamic_stop_loss_pcts"] = list(
+            packed_payload.get("precomputed_dynamic_stop_loss_pcts", [])
+        )
+
+    if (
+        "precomputed_dynamic_take_profit_pcts_bytes" in packed_payload
+        and "precomputed_dynamic_take_profit_pcts_len" in packed_payload
+    ):
+        payload["precomputed_dynamic_take_profit_pcts"] = _unpack_float_series(
+            bytes(packed_payload["precomputed_dynamic_take_profit_pcts_bytes"]),
+            int(packed_payload["precomputed_dynamic_take_profit_pcts_len"]),
+        )
+    elif "precomputed_dynamic_take_profit_pcts" in packed_payload:
+        payload["precomputed_dynamic_take_profit_pcts"] = list(
+            packed_payload.get("precomputed_dynamic_take_profit_pcts", [])
+        )
+    return payload
+
+
+def _task_precomputed_signal_payload(task: Mapping[str, object]) -> dict[str, object] | None:
+    cache_key = task.get("precomputed_cache_key")
+    if cache_key is not None:
+        cached_payload = _worker_strategy_signal_group(cache_key)
+        if cached_payload is not None:
+            return _unpack_strategy_signal_payload(cached_payload)
+
     precomputed_signals = task.get("precomputed_signals")
-    precomputed_long_exit_flags = task.get("precomputed_long_exit_flags")
-    precomputed_short_exit_flags = task.get("precomputed_short_exit_flags")
-    precomputed_dynamic_stop_loss_pcts = task.get("precomputed_dynamic_stop_loss_pcts")
-    precomputed_dynamic_take_profit_pcts = task.get("precomputed_dynamic_take_profit_pcts")
+    if precomputed_signals is None:
+        return None
+
+    return {
+        "signals": list(precomputed_signals),
+        "total_signals": int(task.get("total_signals", 0) or 0),
+        "approved_signals": int(task.get("approved_signals", 0) or 0),
+        "blocked_signals": int(task.get("blocked_signals", 0) or 0),
+        "precomputed_long_exit_flags": list(task.get("precomputed_long_exit_flags") or []),
+        "precomputed_short_exit_flags": list(task.get("precomputed_short_exit_flags") or []),
+        "precomputed_dynamic_stop_loss_pcts": list(task.get("precomputed_dynamic_stop_loss_pcts") or []),
+        "precomputed_dynamic_take_profit_pcts": list(task.get("precomputed_dynamic_take_profit_pcts") or []),
+    }
+
+
+def _build_worker_backtest_engine(
+    *,
+    symbol: str,
+    interval: str,
+    strategy_profile: OptimizationProfile,
+    leverage_override: int | None,
+) -> PaperTradingEngine:
+    def _profile_or_default(field_name: str, default_value: float) -> float:
+        raw_value = strategy_profile.get(field_name)
+        if raw_value is None:
+            return float(default_value)
+        with suppress(Exception):
+            return float(raw_value)
+        return float(default_value)
+
+    breakeven_activation_default = float(LIVE_BREAKEVEN_ACTIVATION_PCT)
+    breakeven_buffer_default = float(LIVE_BREAKEVEN_BUFFER_PCT)
+    tight_trailing_activation_default = 8.0
+    tight_trailing_distance_default = 0.3
+
+    return PaperTradingEngine(
+        _NoopDatabase(),
+        symbol=symbol,
+        interval=interval,
+        leverage=leverage_override,
+        take_profit_pct=_profile_or_default("take_profit_pct", settings.trading.take_profit_pct),
+        stop_loss_pct=_profile_or_default("stop_loss_pct", settings.trading.stop_loss_pct),
+        trailing_activation_pct=_profile_or_default(
+            "trailing_activation_pct",
+            settings.trading.trailing_activation_pct,
+        ),
+        trailing_distance_pct=_profile_or_default(
+            "trailing_distance_pct",
+            settings.trading.trailing_distance_pct,
+        ),
+        breakeven_activation_pct=_profile_or_default(
+            "breakeven_activation_pct",
+            breakeven_activation_default,
+        ),
+        breakeven_buffer_pct=_profile_or_default(
+            "breakeven_buffer_pct",
+            breakeven_buffer_default,
+        ),
+        tight_trailing_activation_pct=_profile_or_default(
+            "tight_trailing_activation_pct",
+            tight_trailing_activation_default,
+        ),
+        tight_trailing_distance_pct=_profile_or_default(
+            "tight_trailing_distance_pct",
+            tight_trailing_distance_default,
+        ),
+        fee_pct_override=_resolve_backtest_fee_pct(),
+        enable_persistence=False,
+    )
+
+
+def _run_python_profile_evaluation(
+    candles_df: pd.DataFrame,
+    *,
+    strategy_name: str,
+    strategy_profile: OptimizationProfile,
+    use_setup_gate: bool,
+    min_confidence_pct: float | None,
+    regime_mask: Sequence[int] | None,
+    leverage_override: int | None,
+    symbol: str,
+    interval: str,
+    precomputed_payload: Mapping[str, object] | None = None,
+    apply_optimizer_early_stop: bool = True,
+) -> tuple[dict[str, float], int, int, int] | None:
+    if precomputed_payload is None:
+        required_candles = _required_candle_count_for_profile(
+            strategy_name,
+            strategy_profile,
+            use_setup_gate=use_setup_gate,
+        )
+        setup_gate = SmartSetupGate(min_confidence_pct=min_confidence_pct) if use_setup_gate else None
+        vectorized_payload = _build_vectorized_strategy_cache_payload(
+            candles_df,
+            strategy_name=strategy_name,
+            required_candles=required_candles,
+            setup_gate=setup_gate,
+            strategy_profile=strategy_profile,
+            regime_mask=regime_mask,
+        )
+        if vectorized_payload is None:
+            (
+                signals,
+                total_signals,
+                approved_signals,
+                blocked_signals,
+            ) = _generate_signals_for_worker(
+                candles_df,
+                strategy_name=strategy_name,
+                use_setup_gate=use_setup_gate,
+                min_confidence_pct=min_confidence_pct,
+                strategy_profile=strategy_profile,
+                regime_mask=regime_mask,
+            )
+            payload: dict[str, object] = {
+                "signals": signals,
+                "total_signals": total_signals,
+                "approved_signals": approved_signals,
+                "blocked_signals": blocked_signals,
+            }
+        else:
+            payload = {
+                "signals": list(vectorized_payload.get("signals", [])),
+                "total_signals": int(vectorized_payload.get("total_signals", 0) or 0),
+                "approved_signals": int(vectorized_payload.get("approved_signals", 0) or 0),
+                "blocked_signals": int(vectorized_payload.get("blocked_signals", 0) or 0),
+            }
+            for optional_field_name in (
+                "precomputed_long_exit_flags",
+                "precomputed_short_exit_flags",
+                "precomputed_dynamic_stop_loss_pcts",
+                "precomputed_dynamic_take_profit_pcts",
+            ):
+                if optional_field_name in vectorized_payload:
+                    payload[optional_field_name] = list(vectorized_payload[optional_field_name])  # type: ignore[index]
+    else:
+        payload = dict(precomputed_payload)
+
+    aligned_signals = _align_signal_series_to_candle_count(
+        payload.get("signals", []),
+        candle_count=len(candles_df),
+    )
+    if not any(int(value) != 0 for value in aligned_signals):
+        return None
+
+    candle_rows = PaperTradingEngine._extract_backtest_rows(candles_df)
+    precomputed_exit_rule = _build_precomputed_exit_rule(
+        candle_rows,
+        long_exit_flags=payload.get("precomputed_long_exit_flags"),  # type: ignore[arg-type]
+        short_exit_flags=payload.get("precomputed_short_exit_flags"),  # type: ignore[arg-type]
+    )
+    normalized_dynamic_stop_loss_pcts = _normalize_dynamic_pct_series(
+        payload.get("precomputed_dynamic_stop_loss_pcts")
+    )
+    normalized_dynamic_take_profit_pcts = _normalize_dynamic_pct_series(
+        payload.get("precomputed_dynamic_take_profit_pcts")
+    )
+
+    engine = _build_worker_backtest_engine(
+        symbol=symbol,
+        interval=interval,
+        strategy_profile=strategy_profile,
+        leverage_override=leverage_override,
+    )
+    result = engine.run_historical_backtest(
+        candles_df,
+        aligned_signals,
+        strategy_exit_rule=precomputed_exit_rule,
+        dynamic_stop_loss_pcts=normalized_dynamic_stop_loss_pcts,
+        dynamic_take_profit_pcts=normalized_dynamic_take_profit_pcts,
+        enable_chandelier_exit=True,
+        strategy_exit_pre_take_profit=False,
+        strategy_name=strategy_name,
+        early_stop_max_trades=(30 if apply_optimizer_early_stop else None),
+        early_stop_max_drawdown_pct=(40.0 if apply_optimizer_early_stop else None),
+    )
+
+    total_trades = int(result.get("total_trades", 0) or 0)
+    if total_trades <= 0:
+        return None
+
+    closed_trades = list(result.get("closed_trades", []))
+    trade_metrics = _calculate_trade_metrics_for_closed_trades(closed_trades)
+    long_trades, short_trades = _calculate_trade_direction_counts(closed_trades)
+    summary: dict[str, float] = {
+        **{key: float(value) for key, value in strategy_profile.items()},
+        "start_capital_usd": float(settings.trading.start_capital),
+        "total_pnl_usd": float(result.get("total_pnl_usd", 0.0) or 0.0),
+        "win_rate_pct": float(result.get("win_rate_pct", 0.0) or 0.0),
+        "profit_factor": float(result.get("profit_factor", 0.0) or 0.0),
+        "total_trades": float(total_trades),
+        "long_trades": float(long_trades),
+        "short_trades": float(short_trades),
+        "max_drawdown_pct": float(result.get("max_drawdown_pct", 0.0) or 0.0),
+        "longest_consecutive_losses": float(result.get("longest_consecutive_losses", 0) or 0),
+        "total_slippage_penalty_usd": float(result.get("total_slippage_penalty_usd", 0.0) or 0.0),
+        "slippage_penalty_pct_per_side": float(
+            result.get("slippage_penalty_pct_per_side", BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE) or 0.0
+        ),
+        "slippage_penalty_pct_per_trade": float(
+            result.get("slippage_penalty_pct_per_trade", BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE) or 0.0
+        ),
+        **{key: float(value) for key, value in trade_metrics.items()},
+    }
+    summary["avg_profit_per_trade_net_pct"] = float(_resolve_avg_profit_per_trade_net_pct(summary))
+    summary["stability_score"] = _calculate_stability_score(summary)
+    return (
+        summary,
+        int(payload.get("total_signals", 0) or 0),
+        int(payload.get("approved_signals", 0) or 0),
+        int(payload.get("blocked_signals", 0) or 0),
+    )
+
+
+def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, object] | None:
+    strategy_name = str(task["strategy_name"])
+    force_python_path = bool(task.get("force_python_path", False))
+    strategy_profile = dict(task["strategy_profile"])
+    with suppress(Exception):
+        strategy_profile.pop("chandelier_period", None)
+        strategy_profile.pop("chandelier_multiplier", None)
+        strategy_profile.pop("chandelier_mult", None)
+    if "breakeven_activation_pct" not in strategy_profile:
+        minimum_breakeven_activation_pct = (
+            _resolve_optimizer_min_breakeven_activation_pct_for_strategy(strategy_name)
+        )
+        if minimum_breakeven_activation_pct is not None:
+            strategy_profile["breakeven_activation_pct"] = float(
+                minimum_breakeven_activation_pct
+            )
+
     total_signals = int(task.get("total_signals", 0))
     approved_signals = int(task.get("approved_signals", 0))
     blocked_signals = int(task.get("blocked_signals", 0))
@@ -2326,192 +4366,108 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
             "blocked_signals": blocked_signals,
         }
 
-    precomputed_cache_key = task.get("precomputed_cache_key")
-    if precomputed_signals is None and precomputed_cache_key is not None:
-        cached_group = _worker_strategy_signal_group(precomputed_cache_key)
-        if cached_group is not None:
-            precomputed_signals = _unpack_int8_series(
-                bytes(cached_group.get("signals_bytes", b"")),
-                int(cached_group.get("signals_len", 0)),
-            )
-            total_signals = int(cached_group.get("total_signals", total_signals))
-            approved_signals = int(cached_group.get("approved_signals", approved_signals))
-            blocked_signals = int(cached_group.get("blocked_signals", blocked_signals))
-            if (
-                "precomputed_long_exit_flags_bytes" in cached_group
-                and "precomputed_long_exit_flags_len" in cached_group
-            ):
-                precomputed_long_exit_flags = _unpack_bool_series(
-                    bytes(cached_group["precomputed_long_exit_flags_bytes"]),
-                    int(cached_group["precomputed_long_exit_flags_len"]),
-                )
-            if (
-                "precomputed_short_exit_flags_bytes" in cached_group
-                and "precomputed_short_exit_flags_len" in cached_group
-            ):
-                precomputed_short_exit_flags = _unpack_bool_series(
-                    bytes(cached_group["precomputed_short_exit_flags_bytes"]),
-                    int(cached_group["precomputed_short_exit_flags_len"]),
-                )
-            if (
-                "precomputed_dynamic_stop_loss_pcts_bytes" in cached_group
-                and "precomputed_dynamic_stop_loss_pcts_len" in cached_group
-            ):
-                precomputed_dynamic_stop_loss_pcts = _unpack_float_series(
-                    bytes(cached_group["precomputed_dynamic_stop_loss_pcts_bytes"]),
-                    int(cached_group["precomputed_dynamic_stop_loss_pcts_len"]),
-                )
-            if (
-                "precomputed_dynamic_take_profit_pcts_bytes" in cached_group
-                and "precomputed_dynamic_take_profit_pcts_len" in cached_group
-            ):
-                precomputed_dynamic_take_profit_pcts = _unpack_float_series(
-                    bytes(cached_group["precomputed_dynamic_take_profit_pcts_bytes"]),
-                    int(cached_group["precomputed_dynamic_take_profit_pcts_len"]),
-                )
-
-    precomputed_exit_rule = _build_precomputed_exit_rule(
-        candle_rows,
-        long_exit_flags=precomputed_long_exit_flags,
-        short_exit_flags=precomputed_short_exit_flags,
+    use_setup_gate = bool(task["use_setup_gate"])
+    min_confidence_pct = (
+        None if task["min_confidence_pct"] is None else float(task["min_confidence_pct"])
     )
-    candles_df = _task_candles_dataframe(task)
-    if len(candle_rows) != len(candles_df):
-        candle_rows = PaperTradingEngine._extract_backtest_rows(candles_df)
-        precomputed_exit_rule = _build_precomputed_exit_rule(
-            candle_rows,
-            long_exit_flags=precomputed_long_exit_flags,
-            short_exit_flags=precomputed_short_exit_flags,
+    if use_setup_gate:
+        min_confidence_pct = _enforce_optimizer_min_confidence_floor(min_confidence_pct)
+    regime_mask = _task_regime_mask(task)
+    leverage_override = (
+        None if task["leverage_override"] is None else int(task["leverage_override"])
+    )
+    symbol = str(task.get("symbol", "") or "").strip().upper()
+    interval = str(task.get("interval", settings.trading.interval) or settings.trading.interval).strip()
+
+    if (
+        strategy_name in OPTIMIZER_JIT_STRATEGY_CONSISTENT_BACKTEST
+        and not force_python_path
+        and _jit_strategy_code(strategy_name) != 0
+    ):
+        candles_df = _task_candles_dataframe(task)
+        open_arr, high_arr, low_arr, close_arr, volume_arr = _task_ohlcv_numpy_arrays(
+            task,
+            candles_df=candles_df,
         )
-    candle_count = len(candle_rows)
-    if precomputed_signals is not None:
-        signals = list(precomputed_signals)
-    else:
-        (
-            signals,
-            total_signals,
-            approved_signals,
-            blocked_signals,
-        ) = _generate_signals_for_worker(
+        consistent_result = _run_strategy_consistent_profile_evaluation(
             candles_df,
+            open_arr,
+            high_arr,
+            low_arr,
+            close_arr,
+            volume_arr,
             strategy_name=strategy_name,
+            strategy_profile=strategy_profile,
             use_setup_gate=use_setup_gate,
             min_confidence_pct=min_confidence_pct,
-            strategy_profile=strategy_profile,
             regime_mask=regime_mask,
+            leverage_override=leverage_override,
+            symbol=symbol or "BACKTEST",
+            interval=interval or str(settings.trading.interval),
+            apply_optimizer_early_stop=False,
         )
-    signals = _align_signal_series_to_candle_count(
-        signals,
-        candle_count=candle_count,
+        if consistent_result is None:
+            return None
+        summary, total_signals, approved_signals, blocked_signals = consistent_result
+        return {
+            "summary": summary,
+            "total_signals": int(total_signals),
+            "approved_signals": int(approved_signals),
+            "blocked_signals": int(blocked_signals),
+        }
+
+    if force_python_path or _jit_strategy_code(strategy_name) == 0:
+        python_result = _run_python_profile_evaluation(
+            _task_candles_dataframe(task),
+            strategy_name=strategy_name,
+            strategy_profile=strategy_profile,
+            use_setup_gate=use_setup_gate,
+            min_confidence_pct=min_confidence_pct,
+            regime_mask=regime_mask,
+            leverage_override=leverage_override,
+            symbol=symbol or "BACKTEST",
+            interval=interval or str(settings.trading.interval),
+            precomputed_payload=_task_precomputed_signal_payload(task),
+            apply_optimizer_early_stop=(strategy_name != "ema_band_rejection"),
+        )
+        if python_result is None:
+            return None
+        py_summary, py_total_signals, py_approved_signals, py_blocked_signals = python_result
+        return {
+            "summary": py_summary,
+            "total_signals": int(py_total_signals),
+            "approved_signals": int(py_approved_signals),
+            "blocked_signals": int(py_blocked_signals),
+        }
+
+    candles_df = _task_candles_dataframe(task)
+    open_arr, high_arr, low_arr, close_arr, volume_arr = _task_ohlcv_numpy_arrays(
+        task,
+        candles_df=candles_df,
     )
 
-    engine = PaperTradingEngine(
-        _NoopDatabase(),
-        symbol=symbol,
-        interval=interval,
-        leverage=leverage_override,
-        take_profit_pct=float(strategy_profile["take_profit_pct"]),
-        stop_loss_pct=float(strategy_profile["stop_loss_pct"]),
-        trailing_activation_pct=float(strategy_profile["trailing_activation_pct"]),
-        trailing_distance_pct=float(strategy_profile["trailing_distance_pct"]),
-        breakeven_activation_pct=(
-            float(strategy_profile["breakeven_activation_pct"])
-            if "breakeven_activation_pct" in strategy_profile
-            else None
-        ),
-        breakeven_buffer_pct=(
-            float(strategy_profile["breakeven_buffer_pct"])
-            if "breakeven_buffer_pct" in strategy_profile
-            else None
-        ),
-        tight_trailing_activation_pct=(
-            float(strategy_profile["tight_trailing_activation_pct"])
-            if "tight_trailing_activation_pct" in strategy_profile
-            else None
-        ),
-        tight_trailing_distance_pct=(
-            float(strategy_profile["tight_trailing_distance_pct"])
-            if "tight_trailing_distance_pct" in strategy_profile
-            else None
-        ),
-        enable_persistence=False,
-    )
-    normalized_dynamic_stop_loss_pcts = _normalize_dynamic_pct_series(
-        precomputed_dynamic_stop_loss_pcts
-    )
-    normalized_dynamic_take_profit_pcts = _normalize_dynamic_pct_series(
-        precomputed_dynamic_take_profit_pcts
-    )
-    result = engine.run_historical_backtest(
-        candles_df if precomputed_exit_rule is None else None,
-        signals,
-        strategy_exit_rule=(
-            precomputed_exit_rule
-            if precomputed_exit_rule is not None
-            else _build_strategy_exit_rule(
-                strategy_name,
-                candles_df,
-                strategy_profile=strategy_profile,
-            )
-        ),
-        candle_rows=candle_rows,
-        dynamic_stop_loss_pcts=normalized_dynamic_stop_loss_pcts,
-        dynamic_take_profit_pcts=normalized_dynamic_take_profit_pcts,
-        enable_chandelier_exit=True,
-        chandelier_period=int(
-            float(strategy_profile.get("chandelier_period", settings.trading.chandelier_period))
-        ),
-        chandelier_multiplier=float(
-            strategy_profile.get(
-                "chandelier_multiplier",
-                strategy_profile.get(
-                    "chandelier_mult",
-                    settings.trading.chandelier_multiplier,
-                ),
-            )
-        ),
-        strategy_exit_pre_take_profit=False,
+    jit_result = _run_jit_profile_evaluation(
+        candles_df,
+        open_arr,
+        high_arr,
+        low_arr,
+        close_arr,
+        volume_arr,
         strategy_name=strategy_name,
+        strategy_profile=strategy_profile,
+        use_setup_gate=use_setup_gate,
+        min_confidence_pct=min_confidence_pct,
+        regime_mask=regime_mask,
+        leverage_override=leverage_override,
     )
-    result.update(_calculate_trade_metrics_for_closed_trades(result["closed_trades"]))
-    long_trades_count, short_trades_count = _calculate_trade_direction_counts(result["closed_trades"])
-
-    summary = {
-        **{key: float(value) for key, value in strategy_profile.items()},
-        "total_pnl_usd": float(result["total_pnl_usd"]),
-        "win_rate_pct": float(result["win_rate_pct"]),
-        "profit_factor": float(result["profit_factor"]),
-        "total_trades": float(result["total_trades"]),
-        "long_trades": float(long_trades_count),
-        "short_trades": float(short_trades_count),
-        "average_win_usd": float(result["average_win_usd"]),
-        "average_loss_usd": float(result["average_loss_usd"]),
-        "real_rrr": float(result["real_rrr"]),
-        "average_trade_fees_usd": float(result.get("average_trade_fees_usd", 0.0)),
-        "average_trade_slippage_usd": float(result.get("average_trade_slippage_usd", 0.0)),
-        "average_trade_cost_usd": float(result.get("average_trade_cost_usd", 0.0)),
-        "average_win_to_cost_ratio": float(result.get("average_win_to_cost_ratio", 0.0)),
-        "avg_profit_per_trade_net_pct": float(_resolve_avg_profit_per_trade_net_pct(result)),
-        "max_drawdown_pct": float(result.get("max_drawdown_pct", 0.0)),
-        "longest_consecutive_losses": float(result.get("longest_consecutive_losses", 0.0)),
-        "total_slippage_penalty_usd": float(result.get("total_slippage_penalty_usd", 0.0)),
-        "slippage_penalty_pct_per_side": float(
-            result.get("slippage_penalty_pct_per_side", BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE)
-        ),
-        "slippage_penalty_pct_per_trade": float(
-            result.get("slippage_penalty_pct_per_trade", BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE)
-        ),
-    }
-    summary["stability_score"] = _calculate_stability_score(summary)
-    with suppress(Exception):
-        result.pop("closed_trades", None)
-    with suppress(Exception):
-        result.clear()
+    if jit_result is None:
+        return None
+    jit_summary, jit_total_signals, jit_approved_signals, jit_blocked_signals = jit_result
     return {
-        "summary": summary,
-        "total_signals": total_signals,
-        "approved_signals": approved_signals,
-        "blocked_signals": blocked_signals,
+        "summary": jit_summary,
+        "total_signals": int(jit_total_signals),
+        "approved_signals": int(jit_approved_signals),
+        "blocked_signals": int(jit_blocked_signals),
     }
 
 
@@ -2698,6 +4654,24 @@ class BotEngineThread(QThread):
         self._last_optimization_print_time = 0.0
         self._last_signal_cache_progress_ratio = 0.0
         self._last_optimization_progress_ratio = 0.0
+        self._live_candidate_policies: dict[str, dict[str, float | int | str]] = {}
+        self._live_candidate_status: dict[str, str] = {}
+        self._live_candidate_reason: dict[str, str] = {}
+        self._live_candidate_entry_slippage_pct: dict[str, deque[float]] = {}
+        for symbol_name in self._symbols:
+            candidate_policy = resolve_live_candidate_policy(symbol_name)
+            if candidate_policy is None:
+                continue
+            self._live_candidate_policies[symbol_name] = dict(candidate_policy)
+            self._live_candidate_status[symbol_name] = "ACTIVE"
+            self._live_candidate_reason[symbol_name] = ""
+            slippage_window_size = max(
+                1,
+                int(float(candidate_policy.get("fill_slippage_window_size", 20) or 20)),
+            )
+            self._live_candidate_entry_slippage_pct[symbol_name] = deque(
+                maxlen=slippage_window_size
+            )
 
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -2774,22 +4748,30 @@ class BotEngineThread(QThread):
         for symbol in self._symbols:
             resolved_strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
             runtime_settings = self._paper_engine.get_runtime_settings(symbol)
-            self.runtime_profile_update.emit(
-                {
-                    "symbol": symbol,
-                    "resolved_strategy_name": resolved_strategy_name,
-                    "resolved_interval": runtime_settings.interval,
-                    "effective_leverage": int(runtime_settings.leverage),
-                    "configured_leverage": int(self._configured_leverage),
-                    "production_profile_loaded": bool(symbol in PRODUCTION_PROFILE_REGISTRY),
-                }
-            )
+            self._emit_runtime_profile_for_symbol(symbol)
             if symbol in PRODUCTION_PROFILE_REGISTRY:
                 profile_strategy = str(PRODUCTION_PROFILE_REGISTRY[symbol].get("strategy_name", ""))
                 profile_strategy = STRATEGY_NAME_ALIASES.get(profile_strategy, profile_strategy)
                 self.log_message.emit(
                     f"[PRODUCTION] Loaded optimized profile for {symbol} "
                     f"({profile_strategy} + HMM enabled)."
+                )
+            if self._is_live_candidate_symbol(symbol):
+                policy = self._live_candidate_policies.get(symbol, {})
+                self.log_message.emit(
+                    f"[LIVE_CANDIDATE] {symbol} enabled: "
+                    f"strategy={resolved_strategy_name} interval={runtime_settings.interval} "
+                    f"target_leverage={int(float(policy.get('target_leverage', runtime_settings.leverage) or runtime_settings.leverage))}x "
+                    f"risk_multiplier={float(policy.get('risk_multiplier', 1.0) or 1.0):.2f}."
+                )
+                candidate_metrics = self._sync_live_candidate_state(
+                    symbol,
+                    context="startup",
+                )
+                self._log_live_candidate_snapshot(
+                    symbol,
+                    event_label="startup",
+                    metrics=candidate_metrics,
                 )
             self.log_message.emit(f"Strategy switcher: {symbol} -> {resolved_strategy_name}")
             self.log_message.emit(
@@ -2910,6 +4892,10 @@ class BotEngineThread(QThread):
 
         try:
             resolved_strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
+            strategy_profile = self._resolve_live_strategy_profile(
+                symbol,
+                resolved_strategy_name,
+            )
             self._db.upsert_candles([candle])
             # Keep a fallback market price for startup/recovery paths when no live tick update is present yet.
             self._latest_market_prices.setdefault(symbol, float(candle.close))
@@ -2935,6 +4921,15 @@ class BotEngineThread(QThread):
                 )
             if closed_trade_ids:
                 self._emit_positions_snapshot()
+                candidate_metrics_after_close = self._sync_live_candidate_state(
+                    symbol,
+                    context="post_close",
+                )
+                self._log_live_candidate_snapshot(
+                    symbol,
+                    event_label="post_close",
+                    metrics=candidate_metrics_after_close,
+                )
 
             required_candle_count = _required_candle_count_for_strategy(
                 resolved_strategy_name,
@@ -2981,15 +4976,35 @@ class BotEngineThread(QThread):
                 # Recovered candles are historical gap fills; avoid opening fresh entries on stale prices.
                 return
 
+            if self._is_live_candidate_symbol(symbol):
+                candidate_metrics_pre_signal = self._sync_live_candidate_state(
+                    symbol,
+                    context="pre_signal",
+                )
+                candidate_state = self._live_candidate_status.get(symbol, "ACTIVE")
+                if candidate_state != "ACTIVE":
+                    self._log_live_candidate_snapshot(
+                        symbol,
+                        event_label="entries_blocked",
+                        metrics=candidate_metrics_pre_signal,
+                    )
+                    return
+
             execution_price = float(self._latest_market_prices.get(symbol, candle.close))
-            signal_direction = _evaluate_strategy_signal(
-                resolved_strategy_name,
-                candles_dataframe,
+            signal_direction = self._evaluate_live_signal_direction(
+                strategy_name=resolved_strategy_name,
+                candles_dataframe=candles_dataframe,
+                strategy_profile=strategy_profile,
+                required_candle_count=required_candle_count,
             )
             signal_name = "LONG" if signal_direction > 0 else "SHORT" if signal_direction < 0 else "NEUTRAL"
             self.log_message.emit(
                 f"Signal evaluation: {signal_name} on {symbol} {candle.interval} via {resolved_strategy_name}"
             )
+            if self._is_live_candidate_symbol(symbol):
+                self.log_message.emit(
+                    f"[LIVE_CANDIDATE] {symbol} signal={signal_name} strategy={resolved_strategy_name} interval={candle.interval}"
+                )
             if signal_direction != 0 and self._setup_gate is not None:
                 is_approved, score, reason = self._setup_gate.evaluate_signal_at_index(
                     candles_dataframe,
@@ -3002,10 +5017,13 @@ class BotEngineThread(QThread):
                         f"Signal filtered by Setup Gate (Score: {score:.1f}%): {reason}"
                     )
                     return
+            leverage_scale, risk_multiplier = self._candidate_trade_controls(symbol)
             trade_id = self._paper_engine.process_signal(
                 symbol=symbol,
                 current_price=execution_price,
                 signal_direction=signal_direction,
+                leverage_scale=leverage_scale,
+                risk_multiplier=risk_multiplier,
             )
             if trade_id is None:
                 return
@@ -3023,6 +5041,21 @@ class BotEngineThread(QThread):
                 f"entry_price={trade.entry_price:.4f} signal_close={candle.close:.4f} "
                 f"qty={trade.qty:.6f} entry_fee={trade.total_fees:.4f} high_water_mark={trade.high_water_mark:.4f}"
             )
+            if self._is_live_candidate_symbol(symbol):
+                close_reference = max(float(candle.close), 1e-9)
+                entry_slippage_pct = abs(float(trade.entry_price) - float(candle.close)) / close_reference * 100.0
+                self._live_candidate_entry_slippage_pct.setdefault(symbol, deque(maxlen=20)).append(
+                    float(entry_slippage_pct)
+                )
+                candidate_metrics_post_entry = self._sync_live_candidate_state(
+                    symbol,
+                    context="post_entry",
+                )
+                self._log_live_candidate_snapshot(
+                    symbol,
+                    event_label="post_entry",
+                    metrics=candidate_metrics_post_entry,
+                )
         finally:
             self._last_closed_candle_times[(symbol, candle.interval)] = candle.open_time
 
@@ -3178,16 +5211,7 @@ class BotEngineThread(QThread):
             for symbol in self._symbols:
                 runtime_settings = self._paper_engine.get_runtime_settings(symbol)
                 resolved_strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
-                self.runtime_profile_update.emit(
-                    {
-                        "symbol": symbol,
-                        "resolved_strategy_name": resolved_strategy_name,
-                        "resolved_interval": runtime_settings.interval,
-                        "effective_leverage": int(runtime_settings.leverage),
-                        "configured_leverage": int(self._configured_leverage),
-                        "production_profile_loaded": bool(symbol in PRODUCTION_PROFILE_REGISTRY),
-                    }
-                )
+                self._emit_runtime_profile_for_symbol(symbol)
                 self.log_message.emit(
                     _format_leverage_log(
                         prefix="Runtime leverage",
@@ -3214,6 +5238,16 @@ class BotEngineThread(QThread):
                         tight_trailing_distance_pct=runtime_settings.tight_trailing_distance_pct,
                     )
                 )
+                if self._is_live_candidate_symbol(symbol):
+                    candidate_metrics = self._sync_live_candidate_state(
+                        symbol,
+                        context="leverage_update",
+                    )
+                    self._log_live_candidate_snapshot(
+                        symbol,
+                        event_label="leverage_update",
+                        metrics=candidate_metrics,
+                    )
 
     @staticmethod
     def _trade_to_payload(trade: PaperTrade) -> dict:
@@ -3351,6 +5385,323 @@ class BotEngineThread(QThread):
             resolve_interval_for_symbol(symbol, settings.live.default_interval),
         )
 
+    def _is_live_candidate_symbol(self, symbol: str) -> bool:
+        return str(symbol).strip().upper() in self._live_candidate_policies
+
+    def _resolve_live_strategy_profile(
+        self,
+        symbol: str,
+        strategy_name: str,
+    ) -> OptimizationProfile | None:
+        normalized_symbol = str(symbol).strip().upper()
+        strategy_params = settings.strategy.coin_strategy_params.get(normalized_symbol)
+        if not isinstance(strategy_params, Mapping) or not strategy_params:
+            return None
+        if _sanitize_backtest_strategy_name(strategy_name) == "ema_band_rejection":
+            return {
+                str(field_name): float(field_value)
+                for field_name, field_value in strategy_params.items()
+            }
+        return {
+            str(field_name): float(field_value)
+            for field_name, field_value in strategy_params.items()
+        }
+
+    def _candidate_trade_controls(self, symbol: str) -> tuple[float, float]:
+        normalized_symbol = str(symbol).strip().upper()
+        policy = self._live_candidate_policies.get(normalized_symbol)
+        if policy is None or self._paper_engine is None:
+            return 1.0, 1.0
+        runtime_settings = self._paper_engine.get_runtime_settings(normalized_symbol)
+        base_leverage = max(1, int(runtime_settings.leverage))
+        target_leverage = max(
+            1,
+            int(float(policy.get("target_leverage", base_leverage) or base_leverage)),
+        )
+        leverage_scale = float(target_leverage) / float(base_leverage)
+        risk_multiplier = float(policy.get("risk_multiplier", 1.0) or 1.0)
+        if not math.isfinite(leverage_scale) or leverage_scale <= 0.0:
+            leverage_scale = 1.0
+        if not math.isfinite(risk_multiplier) or risk_multiplier <= 0.0:
+            risk_multiplier = 1.0
+        return leverage_scale, risk_multiplier
+
+    def _fetch_recent_closed_trades(
+        self,
+        symbol: str,
+        *,
+        limit: int,
+    ) -> list[PaperTrade]:
+        if self._db is None:
+            return []
+        with suppress(Exception):
+            return self._db.fetch_recent_closed_trades(symbol, limit=limit)
+        return []
+
+    def _compute_live_candidate_metrics(
+        self,
+        symbol: str,
+    ) -> dict[str, float]:
+        normalized_symbol = str(symbol).strip().upper()
+        policy = self._live_candidate_policies.get(normalized_symbol)
+        if policy is None:
+            return {
+                "trade_count": 0.0,
+                "win_rate_pct": 0.0,
+                "profit_factor_window": 0.0,
+                "loss_streak": 0.0,
+                "max_drawdown_pct": 0.0,
+                "avg_fill_slippage_pct": 0.0,
+                "window_trades": 0.0,
+            }
+
+        pf_window_size = max(1, int(float(policy.get("pf_window_size", 20) or 20)))
+        closed_trades_desc = self._fetch_recent_closed_trades(
+            normalized_symbol,
+            limit=max(250, pf_window_size),
+        )
+        trade_count = int(len(closed_trades_desc))
+        win_count = 0
+        for trade in closed_trades_desc:
+            trade_pnl = float(trade.pnl or 0.0)
+            if trade_pnl > 0.0:
+                win_count += 1
+        win_rate_pct = (float(win_count) / float(trade_count) * 100.0) if trade_count > 0 else 0.0
+
+        window_trades = min(pf_window_size, trade_count)
+        window_slice = closed_trades_desc[:window_trades]
+        gross_profit_window = 0.0
+        gross_loss_window = 0.0
+        for trade in window_slice:
+            trade_pnl = float(trade.pnl or 0.0)
+            if trade_pnl > 0.0:
+                gross_profit_window += trade_pnl
+            elif trade_pnl < 0.0:
+                gross_loss_window += abs(trade_pnl)
+        if gross_loss_window <= 0.0:
+            profit_factor_window = float("inf") if gross_profit_window > 0.0 else 0.0
+        else:
+            profit_factor_window = gross_profit_window / gross_loss_window
+
+        loss_streak = 0
+        for trade in closed_trades_desc:
+            trade_pnl = float(trade.pnl or 0.0)
+            if trade_pnl < 0.0:
+                loss_streak += 1
+            else:
+                break
+
+        equity = float(settings.trading.start_capital)
+        peak_equity = float(equity)
+        max_drawdown_pct = 0.0
+        for trade in reversed(closed_trades_desc):
+            equity += float(trade.pnl or 0.0)
+            if equity > peak_equity:
+                peak_equity = float(equity)
+            elif peak_equity > 0.0:
+                drawdown_pct = ((peak_equity - equity) / peak_equity) * 100.0
+                if drawdown_pct > max_drawdown_pct:
+                    max_drawdown_pct = float(drawdown_pct)
+
+        slippage_values = list(
+            self._live_candidate_entry_slippage_pct.get(normalized_symbol, deque())
+        )
+        avg_fill_slippage_pct = (
+            float(sum(slippage_values) / len(slippage_values))
+            if slippage_values
+            else 0.0
+        )
+        return {
+            "trade_count": float(trade_count),
+            "win_rate_pct": float(win_rate_pct),
+            "profit_factor_window": float(profit_factor_window),
+            "loss_streak": float(loss_streak),
+            "max_drawdown_pct": float(max_drawdown_pct),
+            "avg_fill_slippage_pct": float(avg_fill_slippage_pct),
+            "window_trades": float(window_trades),
+        }
+
+    def _evaluate_live_candidate_status(
+        self,
+        symbol: str,
+    ) -> tuple[str, str, dict[str, float]]:
+        normalized_symbol = str(symbol).strip().upper()
+        policy = self._live_candidate_policies.get(normalized_symbol)
+        metrics = self._compute_live_candidate_metrics(normalized_symbol)
+        if policy is None:
+            return "ACTIVE", "", metrics
+
+        status = "ACTIVE"
+        reason = ""
+        max_loss_streak = int(float(policy.get("max_loss_streak", 4) or 4))
+        max_drawdown_pct = float(policy.get("max_drawdown_pct", 6.0) or 6.0)
+        pf_window_size = int(float(policy.get("pf_window_size", 20) or 20))
+        pf_minimum = float(policy.get("pf_minimum", 1.0) or 1.0)
+        max_avg_fill_slippage_pct = float(
+            policy.get("max_avg_fill_slippage_pct", 0.15) or 0.15
+        )
+        fill_slippage_window_size = int(
+            float(policy.get("fill_slippage_window_size", 20) or 20)
+        )
+
+        if int(metrics["loss_streak"]) >= max_loss_streak:
+            status = "PAUSED"
+            reason = (
+                f"loss_streak={int(metrics['loss_streak'])} reached limit {max_loss_streak}"
+            )
+        elif float(metrics["max_drawdown_pct"]) > max_drawdown_pct:
+            status = "PAUSED"
+            reason = (
+                f"profile_drawdown={float(metrics['max_drawdown_pct']):.2f}% exceeded {max_drawdown_pct:.2f}%"
+            )
+        elif (
+            int(metrics["window_trades"]) >= pf_window_size
+            and math.isfinite(float(metrics["profit_factor_window"]))
+            and float(metrics["profit_factor_window"]) < pf_minimum
+        ):
+            status = "KILL_SWITCHED"
+            reason = (
+                f"pf_window={float(metrics['profit_factor_window']):.2f} below {pf_minimum:.2f} "
+                f"for last {pf_window_size} trades"
+            )
+        elif (
+            len(self._live_candidate_entry_slippage_pct.get(normalized_symbol, deque()))
+            >= fill_slippage_window_size
+            and float(metrics["avg_fill_slippage_pct"]) > max_avg_fill_slippage_pct
+        ):
+            status = "KILL_SWITCHED"
+            reason = (
+                f"avg_fill_slippage={float(metrics['avg_fill_slippage_pct']):.3f}% exceeded "
+                f"{max_avg_fill_slippage_pct:.3f}%"
+            )
+
+        previous_status = self._live_candidate_status.get(normalized_symbol, "ACTIVE")
+        if previous_status == "KILL_SWITCHED":
+            status = "KILL_SWITCHED"
+            if not reason:
+                reason = self._live_candidate_reason.get(normalized_symbol, "")
+        return status, reason, metrics
+
+    def _emit_runtime_profile_for_symbol(self, symbol: str) -> None:
+        if self._paper_engine is None:
+            return
+        resolved_strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
+        runtime_settings = self._paper_engine.get_runtime_settings(symbol)
+        candidate_status = self._live_candidate_status.get(symbol)
+        is_candidate = bool(self._is_live_candidate_symbol(symbol))
+        candidate_policy = self._live_candidate_policies.get(symbol, {})
+        payload_effective_leverage = int(runtime_settings.leverage)
+        candidate_target_leverage = None
+        if is_candidate:
+            candidate_target_leverage = max(
+                1,
+                int(float(candidate_policy.get("target_leverage", payload_effective_leverage) or payload_effective_leverage)),
+            )
+            payload_effective_leverage = int(candidate_target_leverage)
+        payload = {
+            "symbol": symbol,
+            "resolved_strategy_name": resolved_strategy_name,
+            "resolved_interval": runtime_settings.interval,
+            "effective_leverage": int(payload_effective_leverage),
+            "configured_leverage": int(self._configured_leverage),
+            "production_profile_loaded": bool(symbol in PRODUCTION_PROFILE_REGISTRY),
+            "live_candidate": bool(is_candidate),
+            "live_candidate_status": (
+                str(candidate_status) if candidate_status else None
+            ),
+            "live_candidate_reason": (
+                str(self._live_candidate_reason.get(symbol, "") or "")
+            ),
+            "live_candidate_target_leverage": candidate_target_leverage,
+        }
+        self.runtime_profile_update.emit(payload)
+
+    def _sync_live_candidate_state(
+        self,
+        symbol: str,
+        *,
+        context: str,
+    ) -> dict[str, float]:
+        normalized_symbol = str(symbol).strip().upper()
+        if not self._is_live_candidate_symbol(normalized_symbol):
+            return {}
+        status, reason, metrics = self._evaluate_live_candidate_status(normalized_symbol)
+        previous_status = self._live_candidate_status.get(normalized_symbol, "ACTIVE")
+        previous_reason = self._live_candidate_reason.get(normalized_symbol, "")
+        self._live_candidate_status[normalized_symbol] = status
+        self._live_candidate_reason[normalized_symbol] = reason
+        if status != previous_status or reason != previous_reason:
+            if status in {"PAUSED", "KILL_SWITCHED"}:
+                self.log_message.emit(
+                    f"[LIVE_CANDIDATE] {normalized_symbol} {status}: {reason}"
+                )
+            else:
+                self.log_message.emit(
+                    f"[LIVE_CANDIDATE] {normalized_symbol} ACTIVE: constraints restored ({context})."
+                )
+        self._emit_runtime_profile_for_symbol(normalized_symbol)
+        return metrics
+
+    def _log_live_candidate_snapshot(
+        self,
+        symbol: str,
+        *,
+        event_label: str,
+        metrics: Mapping[str, float] | None = None,
+    ) -> None:
+        normalized_symbol = str(symbol).strip().upper()
+        if not self._is_live_candidate_symbol(normalized_symbol):
+            return
+        resolved_metrics = dict(metrics or self._compute_live_candidate_metrics(normalized_symbol))
+        status = self._live_candidate_status.get(normalized_symbol, "ACTIVE")
+        self.log_message.emit(
+            f"[LIVE_CANDIDATE] {normalized_symbol} {event_label} | "
+            f"status={status} | "
+            f"trades={int(resolved_metrics.get('trade_count', 0.0) or 0.0)} | "
+            f"win_rate={float(resolved_metrics.get('win_rate_pct', 0.0) or 0.0):.2f}% | "
+            f"pf20={self._format_profit_factor(float(resolved_metrics.get('profit_factor_window', 0.0) or 0.0))} | "
+            f"loss_streak={int(resolved_metrics.get('loss_streak', 0.0) or 0.0)} | "
+            f"drawdown={float(resolved_metrics.get('max_drawdown_pct', 0.0) or 0.0):.2f}% | "
+            f"avg_fill_slip={float(resolved_metrics.get('avg_fill_slippage_pct', 0.0) or 0.0):.3f}%"
+        )
+
+    @staticmethod
+    def _format_profit_factor(value: float) -> str:
+        if value == float("inf"):
+            return "inf"
+        return f"{float(value):.2f}"
+
+    def _evaluate_live_signal_direction(
+        self,
+        *,
+        strategy_name: str,
+        candles_dataframe: pd.DataFrame,
+        strategy_profile: OptimizationProfile | None,
+        required_candle_count: int,
+    ) -> int:
+        if strategy_name == "ema_band_rejection":
+            payload = _build_vectorized_strategy_cache_payload(
+                candles_dataframe,
+                strategy_name=strategy_name,
+                required_candles=required_candle_count,
+                setup_gate=None,
+                strategy_profile=strategy_profile,
+                regime_mask=None,
+            )
+            if isinstance(payload, Mapping):
+                signals_payload = payload.get("signals")
+                if isinstance(signals_payload, Sequence) and len(signals_payload) > 0:
+                    with suppress(Exception):
+                        return int(signals_payload[-1])
+            return 0
+        return int(
+            _evaluate_strategy_signal(
+                strategy_name,
+                candles_dataframe,
+                strategy_profile=strategy_profile,
+            )
+        )
+
     def _symbols_for_interval(self, interval: str) -> list[str]:
         return [
             symbol
@@ -3378,7 +5729,11 @@ class BacktestThread(QThread):
     progress_update = pyqtSignal(int, str)
     backtest_finished = pyqtSignal(dict)
     backtest_error = pyqtSignal(str)
+    _LOG_MODE_QUIET = "quiet"
+    _LOG_MODE_STANDARD = "standard"
+    _LOG_MODE_DEBUG = "debug"
     _HISTORY_PROGRESS_LOG_PREFIX = "[HISTORY_PROGRESS]"
+    _SIGNAL_CACHE_PROGRESS_LOG_PREFIX = "[SIGNAL_CACHE_PROGRESS]"
 
     def __init__(
         self,
@@ -3387,6 +5742,7 @@ class BacktestThread(QThread):
         interval: str,
         strategy_name: str,
         auto_from_config: bool = False,
+        allow_auto_interval_override: bool = True,
         leverage: int | None = None,
         min_confidence_pct: float | None = None,
         optimize_profile: bool = False,
@@ -3394,6 +5750,7 @@ class BacktestThread(QThread):
         db_path: str | Path = "data/paper_trading.duckdb",
         history_requested_start_utc: datetime | None = None,
         history_end_utc: datetime | None = None,
+        log_mode: str = _LOG_MODE_STANDARD,
     ) -> None:
         super().__init__()
         self._symbol = symbol
@@ -3405,6 +5762,7 @@ class BacktestThread(QThread):
             fallback_strategy_name="frama_cross",
         )
         self._auto_from_config = bool(auto_from_config)
+        self._allow_auto_interval_override = bool(allow_auto_interval_override)
         self._configured_leverage = (
             settings.trading.default_leverage
             if leverage is None
@@ -3452,6 +5810,20 @@ class BacktestThread(QThread):
         self._history_progress_last_emit_monotonic = 0.0
         self._history_progress_last_percent = -1
         self._history_progress_last_stage = ""
+        self._log_mode = self._normalize_log_mode(log_mode)
+
+    @classmethod
+    def _normalize_log_mode(cls, raw_mode: str | None) -> str:
+        normalized = str(raw_mode or "").strip().lower()
+        if normalized in {cls._LOG_MODE_QUIET, cls._LOG_MODE_STANDARD, cls._LOG_MODE_DEBUG}:
+            return normalized
+        return cls._LOG_MODE_STANDARD
+
+    def _is_quiet_mode(self) -> bool:
+        return self._log_mode == self._LOG_MODE_QUIET
+
+    def _is_debug_mode(self) -> bool:
+        return self._log_mode == self._LOG_MODE_DEBUG
 
     def _should_stop(self) -> bool:
         return self._stop_requested or self.isInterruptionRequested()
@@ -3476,6 +5848,8 @@ class BacktestThread(QThread):
     def _resolve_backtest_interval_for_symbol(self, symbol: str) -> tuple[str, str]:
         if not self._auto_from_config:
             return self._interval, "configured interval"
+        if not self._allow_auto_interval_override:
+            return self._interval, "batch-selected interval (auto interval override disabled)"
 
         normalized_symbol = str(symbol).strip().upper()
         production_profile = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol)
@@ -3495,6 +5869,8 @@ class BacktestThread(QThread):
         )
 
     def _emit_trace_event(self, event_name: str, payload: dict[str, object]) -> None:
+        if not self._is_debug_mode():
+            return
         self.log_message.emit(
             f"BACKTEST_TRACE|{event_name}|{_trace_json_payload(payload)}"
         )
@@ -3588,7 +5964,9 @@ class BacktestThread(QThread):
         strategy_profile: OptimizationProfile | None = None,
         diagnostics_source: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
-        _ = strategy_name, strategy_profile, diagnostics_source
+        _ = strategy_name, strategy_profile
+        if isinstance(diagnostics_source, dict):
+            return dict(diagnostics_source)
         return None
 
     def run_smart_multi_strategy_sweep(self, *, coins: Sequence[str]):
@@ -3779,6 +6157,34 @@ class BacktestThread(QThread):
                     ),
                     fallback_strategy_name=self._strategy_name,
                 )
+                selected_strategy_profile: OptimizationProfile | None = None
+                if (
+                    not self._optimize_profile
+                    and resolved_strategy_name == "ema_band_rejection"
+                ):
+                    resolved_winner_profile = resolve_ema_band_rejection_1h_winner_profile(
+                        self._symbol
+                    )
+                    if resolved_winner_profile is not None:
+                        winner_interval, winner_profile = resolved_winner_profile
+                        selected_strategy_profile = dict(winner_profile)
+                        if self._interval != winner_interval:
+                            self.log_message.emit(
+                                "EMA Band Rejection winner preset active: "
+                                f"{self._symbol} forced to {winner_interval} "
+                                "(1h winner default; non-optimization run)."
+                            )
+                        else:
+                            self.log_message.emit(
+                                "EMA Band Rejection winner preset active: "
+                                f"{self._symbol} using fixed {winner_interval} profile."
+                            )
+                        self._interval = winner_interval
+                    elif self._symbol in EMA_BAND_REJECTION_1H_EXCLUDED_COINS:
+                        self.log_message.emit(
+                            "EMA Band Rejection winner preset skipped: "
+                            f"{self._symbol} is excluded from the fixed 1h winner list."
+                        )
                 self._last_runtime_trace = None
                 self._last_strategy_diagnostics = None
                 shared_history_db: Database | None = None
@@ -3803,7 +6209,7 @@ class BacktestThread(QThread):
                 )
                 required_warmup_candles, required_candles = self._resolve_required_runtime_candles(
                     strategy_name=resolved_strategy_name,
-                    strategy_profile=None,
+                    strategy_profile=selected_strategy_profile,
                 )
                 effective_history_start_time = requested_history_start_time
                 effective_history_end_time = requested_history_end_time
@@ -4047,14 +6453,16 @@ class BacktestThread(QThread):
                     ) = self._generate_signals(
                         candles_df,
                         strategy_name=resolved_strategy_name,
+                        strategy_profile=selected_strategy_profile,
                         regime_mask=self._hmm_regime_mask,
                     )
                     if self._should_stop():
                         return
-                    self.log_message.emit(
-                        "Backtest summary: "
-                        f"Total Signals: {total_signals} | Approved by Gate: {approved_signals} | Blocked: {blocked_signals}"
-                    )
+                    if not self._is_quiet_mode():
+                        self.log_message.emit(
+                            "Backtest summary: "
+                            f"Total Signals: {total_signals} | Approved by Gate: {approved_signals} | Blocked: {blocked_signals}"
+                        )
                     self._emit_trace_event(
                         "signal_summary",
                         {
@@ -4072,7 +6480,7 @@ class BacktestThread(QThread):
                         candles_df,
                         signals,
                         strategy_name=resolved_strategy_name,
-                        strategy_profile=None,
+                        strategy_profile=selected_strategy_profile,
                         total_signals=total_signals,
                         approved_signals=approved_signals,
                         blocked_signals=blocked_signals,
@@ -4160,14 +6568,12 @@ class BacktestThread(QThread):
                         "total_trades": result.get("total_trades"),
                         "long_trades": result.get("long_trades"),
                         "short_trades": result.get("short_trades"),
-                        "reentry_trades_count": result.get("reentry_trades_count"),
-                        "soft_leverage_trades_count": result.get("soft_leverage_trades_count"),
-                        "partial_tp_hits": result.get("partial_tp_hits"),
                         "real_leverage_avg": result.get("real_leverage_avg"),
                         "average_win": result.get("average_win_usd"),
                         "average_loss": result.get("average_loss_usd"),
                         "real_rrr": result.get("real_rrr"),
                         "max_drawdown": result.get("max_drawdown_pct"),
+                        "optimizer_quality_status": result.get("optimizer_quality_status"),
                     },
                 )
                 if self._isolated_db:
@@ -4324,47 +6730,31 @@ class BacktestThread(QThread):
             dynamic_stop_loss_pcts=normalized_dynamic_stop_loss_pcts,
             dynamic_take_profit_pcts=normalized_dynamic_take_profit_pcts,
             enable_chandelier_exit=True,
-            chandelier_period=int(
-                float(
-                    strategy_profile.get("chandelier_period")
-                    if isinstance(strategy_profile, dict)
-                    and strategy_profile.get("chandelier_period") is not None
-                    else settings.trading.chandelier_period
-                )
-            ),
-            chandelier_multiplier=float(
-                strategy_profile.get("chandelier_multiplier")
-                if isinstance(strategy_profile, dict)
-                and strategy_profile.get("chandelier_multiplier") is not None
-                else strategy_profile.get("chandelier_mult")
-                if isinstance(strategy_profile, dict)
-                and strategy_profile.get("chandelier_mult") is not None
-                else settings.trading.chandelier_multiplier
-            ),
             strategy_exit_pre_take_profit=False,
             strategy_name=strategy_name,
         )
         trailing_level_1_hits = int(result.get("breakeven_level_hits", 0) or 0)
         trailing_level_2_hits = int(result.get("normal_trailing_level_hits", 0) or 0)
         trailing_level_3_hits = int(result.get("tight_trailing_level_hits", 0) or 0)
-        if trailing_level_1_hits > 0:
+        if not self._is_quiet_mode() and trailing_level_1_hits > 0:
             self.log_message.emit(
                 f"Trailing Level 1 (Breakeven) hit: {trailing_level_1_hits} trade(s)."
             )
-        if trailing_level_2_hits > 0:
+        if not self._is_quiet_mode() and trailing_level_2_hits > 0:
             self.log_message.emit(
                 f"Trailing Level 2 (Normal Trail) hit: {trailing_level_2_hits} trade(s)."
             )
-        if trailing_level_3_hits > 0:
+        if not self._is_quiet_mode() and trailing_level_3_hits > 0:
             self.log_message.emit(
                 f"Trailing Level 3 (Tight Trail) hit: {trailing_level_3_hits} trade(s)."
             )
-        self.log_message.emit(
-            "Tiered trailing summary: "
-            f"level1_breakeven={trailing_level_1_hits} "
-            f"level2_normal={trailing_level_2_hits} "
-            f"level3_tight={trailing_level_3_hits}"
-        )
+        if not self._is_quiet_mode():
+            self.log_message.emit(
+                "Tiered trailing summary: "
+                f"level1_breakeven={trailing_level_1_hits} "
+                f"level2_normal={trailing_level_2_hits} "
+                f"level3_tight={trailing_level_3_hits}"
+            )
         result.update(self._calculate_trade_metrics(result["closed_trades"]))
         long_trades_count, short_trades_count = _calculate_trade_direction_counts(result["closed_trades"])
         required_warmup_candles, required_candles = self._resolve_required_runtime_candles(
@@ -4647,6 +7037,388 @@ class BacktestThread(QThread):
         _ = candles_df, strategy_name, strategy_profile, regime_mask
         return []
 
+    def _slice_optimizer_window(
+        self,
+        candles_df: pd.DataFrame,
+        *,
+        window_candles: int,
+        regime_mask: Sequence[int] | None,
+    ) -> tuple[pd.DataFrame, list[int] | None, bool]:
+        resolved_window = max(1, int(window_candles))
+        if 0 < resolved_window < len(candles_df):
+            sliced_candles_df = candles_df.iloc[-resolved_window:].copy(deep=True)
+            uses_full_history = False
+        else:
+            sliced_candles_df = candles_df
+            uses_full_history = True
+
+        sliced_regime_mask: list[int] | None = None
+        if regime_mask is not None:
+            if len(regime_mask) == len(candles_df):
+                sliced_regime_mask = list(regime_mask)[-len(sliced_candles_df):]
+            else:
+                self.log_message.emit(
+                    "Warning: regime mask length mismatch; disabling regime filter for optimizer window."
+                )
+        return sliced_candles_df, sliced_regime_mask, uses_full_history
+
+    def _analyze_optimization_phase_summaries(
+        self,
+        *,
+        strategy_name: str,
+        stage_label: str,
+        phase_summaries: Sequence[dict[str, float]],
+        min_required_trades: int,
+    ) -> tuple[list[dict[str, float]], list[dict[str, float]], dict[str, int]]:
+        fail_min_trades = 0
+        fail_breakeven = 0
+        fail_avg_profit = 0
+        fail_multi = 0
+        eligible_summaries: list[dict[str, float]] = []
+        diagnostics_rows: list[tuple[dict[str, float], bool, bool, bool, int]] = []
+
+        for raw_summary in phase_summaries:
+            profile_result = dict(raw_summary)
+            profile_result["avg_profit_per_trade_net_pct"] = float(
+                _resolve_avg_profit_per_trade_net_pct(profile_result)
+            )
+            passes_min_trades = (
+                float(profile_result.get("total_trades", 0.0) or 0.0)
+                >= float(min_required_trades)
+            )
+            passes_breakeven = _profile_meets_breakeven_constraint(
+                profile_result,
+                strategy_name=strategy_name,
+            )
+            passes_avg_profit = _profile_meets_avg_profit_per_trade_hurdle(profile_result)
+            fail_count = int((not passes_min_trades) + (not passes_breakeven) + (not passes_avg_profit))
+            if not passes_min_trades:
+                fail_min_trades += 1
+            if not passes_breakeven:
+                fail_breakeven += 1
+            if not passes_avg_profit:
+                fail_avg_profit += 1
+            if fail_count >= 2:
+                fail_multi += 1
+            diagnostics_rows.append(
+                (
+                    profile_result,
+                    passes_min_trades,
+                    passes_breakeven,
+                    passes_avg_profit,
+                    fail_count,
+                )
+            )
+            if fail_count == 0:
+                eligible_summaries.append(profile_result)
+
+        self.log_message.emit(
+            f"{stage_label} fail-reason summary: "
+            f"total={len(phase_summaries)} | "
+            f"fail_min_trades={fail_min_trades} | "
+            f"fail_breakeven={fail_breakeven} | "
+            f"fail_avg_profit={fail_avg_profit} | "
+            f"fail_multi={fail_multi} | "
+            f"eligible={len(eligible_summaries)}"
+        )
+
+        diagnostics_rows_sorted = sorted(
+            diagnostics_rows,
+            key=lambda row: _optimization_sort_key(row[0], strategy_name=strategy_name),
+            reverse=True,
+        )
+        if self._is_debug_mode():
+            top_diagnostics = diagnostics_rows_sorted[:10]
+            if top_diagnostics:
+                self.log_message.emit(
+                    f"{stage_label} top profile diagnostics (top 10 by optimization ranking):"
+                )
+            for rank, row in enumerate(top_diagnostics, start=1):
+                summary_row, passes_min_trades, passes_breakeven, passes_avg_profit, _fail_count = row
+                profile_preview = _format_profile_dict(_extract_profile_from_summary(summary_row))
+                self.log_message.emit(
+                    f"{stage_label} #{rank} profile={profile_preview} | "
+                    f"trades={int(float(summary_row.get('total_trades', 0.0) or 0.0))} | "
+                    f"pf={self._format_profit_factor(float(summary_row.get('profit_factor', 0.0) or 0.0))} | "
+                    f"pnl={float(summary_row.get('total_pnl_usd', 0.0) or 0.0):.2f} | "
+                    f"avg_net={float(summary_row.get('avg_profit_per_trade_net_pct', 0.0) or 0.0):.4f}% | "
+                    f"pass_min_trades={'yes' if passes_min_trades else 'no'} | "
+                    f"pass_breakeven={'yes' if passes_breakeven else 'no'} | "
+                    f"pass_avg_profit={'yes' if passes_avg_profit else 'no'}"
+                )
+
+        ranked_all = [
+            dict(row[0])
+            for row in diagnostics_rows_sorted
+        ]
+        ranked_eligible = sorted(
+            eligible_summaries,
+            key=lambda summary: _optimization_sort_key(summary, strategy_name=strategy_name),
+            reverse=True,
+        )
+        return ranked_eligible, ranked_all, {
+            "total": int(len(phase_summaries)),
+            "fail_min_trades": int(fail_min_trades),
+            "fail_breakeven": int(fail_breakeven),
+            "fail_avg_profit": int(fail_avg_profit),
+            "fail_multi": int(fail_multi),
+            "eligible": int(len(eligible_summaries)),
+        }
+
+    @staticmethod
+    def _audit_ema_band_dynamic_stop_alignment(
+        candles_df: pd.DataFrame,
+        *,
+        strategy_profile: OptimizationProfile,
+        aligned_signals: Sequence[int],
+        aligned_dynamic_stop_loss_pcts: Sequence[float] | None,
+    ) -> tuple[int, float, float]:
+        if aligned_dynamic_stop_loss_pcts is None:
+            return 0, 0.0, 0.0
+        if len(candles_df) <= 1:
+            return 0, 0.0, 0.0
+
+        def _profile_int(field_name: str, default_value: int) -> int:
+            with suppress(Exception):
+                return int(float(strategy_profile.get(field_name, default_value) or default_value))
+            return int(default_value)
+
+        def _profile_float(field_name: str, default_value: float) -> float:
+            with suppress(Exception):
+                return float(strategy_profile.get(field_name, default_value) or default_value)
+            return float(default_value)
+
+        def _profile_flag(field_name: str, default_value: bool = False) -> bool:
+            raw_value = strategy_profile.get(field_name, default_value)
+            if isinstance(raw_value, bool):
+                return bool(raw_value)
+            with suppress(Exception):
+                return bool(float(raw_value) >= 0.5)
+            return bool(default_value)
+
+        working_df = build_ema_band_rejection_signal_frame(
+            candles_df,
+            ema_fast=_profile_int("ema_fast", 5),
+            ema_mid=_profile_int("ema_mid", 10),
+            ema_slow=_profile_int("ema_slow", 20),
+            slope_lookback=_profile_int("slope_lookback", 5),
+            min_ema_spread_pct=_profile_float("min_ema_spread_pct", 0.05),
+            min_slow_slope_pct=_profile_float("min_slow_slope_pct", 0.0),
+            pullback_requires_outer_band_touch=_profile_flag(
+                "pullback_requires_outer_band_touch",
+                False,
+            ),
+            use_rejection_quality_filter=_profile_flag(
+                "use_rejection_quality_filter",
+                False,
+            ),
+            rejection_wick_min_ratio=_profile_float("rejection_wick_min_ratio", 0.35),
+            rejection_body_min_ratio=_profile_float("rejection_body_min_ratio", 0.20),
+            use_rsi_filter=_profile_flag("use_rsi_filter", False),
+            rsi_length=_profile_int("rsi_length", 14),
+            rsi_midline=_profile_float("rsi_midline", 50.0),
+            use_rsi_cross_filter=_profile_flag("use_rsi_cross_filter", False),
+            rsi_midline_margin=_profile_float("rsi_midline_margin", 0.0),
+            use_volume_filter=_profile_flag("use_volume_filter", False),
+            volume_ma_length=_profile_int("volume_ma_length", 20),
+            volume_multiplier=_profile_float("volume_multiplier", 1.0),
+            use_atr_stop_buffer=_profile_flag("use_atr_stop_buffer", False),
+            atr_length=_profile_int("atr_length", 14),
+            atr_stop_buffer_mult=_profile_float("atr_stop_buffer_mult", 0.5),
+            signal_cooldown_bars=_profile_int("signal_cooldown_bars", 0),
+        )
+
+        close_values = pd.to_numeric(working_df["close"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        high_values = pd.to_numeric(working_df["high"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        low_values = pd.to_numeric(working_df["low"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        atr_values = pd.to_numeric(working_df["ema_band_atr"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        use_atr_buffer = _profile_flag("use_atr_stop_buffer", False)
+        atr_buffer_mult = _profile_float("atr_stop_buffer_mult", 0.5)
+
+        diffs: list[float] = []
+        compare_count = min(
+            len(aligned_signals),
+            len(aligned_dynamic_stop_loss_pcts),
+            len(close_values),
+            len(high_values),
+            len(low_values),
+            len(atr_values),
+        )
+        for index in range(compare_count):
+            signal_value = int(aligned_signals[index] or 0)
+            if signal_value == 0 or index <= 0:
+                continue
+            with suppress(Exception):
+                observed_pct = float(aligned_dynamic_stop_loss_pcts[index])
+            if not math.isfinite(observed_pct) or observed_pct <= 0.0:
+                continue
+            entry_price = float(close_values[index])
+            if not math.isfinite(entry_price) or entry_price <= 0.0:
+                continue
+
+            atr_buffer = 0.0
+            if use_atr_buffer:
+                atr_value = float(atr_values[index - 1])
+                if math.isfinite(atr_value) and atr_value > 0.0:
+                    atr_buffer = atr_value * float(atr_buffer_mult)
+
+            if signal_value > 0:
+                stop_price = float(low_values[index - 1]) - atr_buffer
+                expected_pct = ((entry_price - stop_price) / entry_price) * 100.0
+            else:
+                stop_price = float(high_values[index - 1]) + atr_buffer
+                expected_pct = ((stop_price - entry_price) / entry_price) * 100.0
+            if not math.isfinite(expected_pct) or expected_pct <= 0.0:
+                continue
+            expected_pct = min(95.0, max(0.05, float(expected_pct)))
+            diffs.append(abs(float(observed_pct) - float(expected_pct)))
+
+        if not diffs:
+            return 0, 0.0, 0.0
+        return int(len(diffs)), float(sum(diffs) / len(diffs)), float(max(diffs))
+
+    def _log_ema_band_stage2_forensic_audit(
+        self,
+        *,
+        candles_df: pd.DataFrame,
+        stage2_ranked_all: Sequence[dict[str, float]],
+        regime_mask: Sequence[int] | None,
+    ) -> None:
+        if not stage2_ranked_all:
+            self.log_message.emit("EMA Band Rejection audit: no Stage-2 candidates available.")
+            return
+        resolved_leverage = (
+            int(self._leverage_override)
+            if self._leverage_override is not None
+            else int(settings.trading.default_leverage)
+        )
+
+        self.log_message.emit(
+            "EMA Band Rejection audit: evaluating top Stage-2 candidates for unit/formula consistency."
+        )
+        self.log_message.emit(
+            "EMA Band Rejection audit fix applied: dynamic_stop_loss_pct now uses entry close price (not open) "
+            "to match backtest execution."
+        )
+        self.log_message.emit(
+            "EMA Band Rejection spread unit check: spread_pct=(|EMAfast-EMAslow|/close)*100, "
+            "so threshold 0.03 equals 0.03% (not 3%)."
+        )
+
+        probe_min_confidence_pct = self._min_confidence_pct
+        if self._use_setup_gate:
+            probe_min_confidence_pct = _enforce_optimizer_min_confidence_floor(
+                probe_min_confidence_pct
+            )
+        required_candles_default = _required_candle_count_for_strategy(
+            "ema_band_rejection",
+            use_setup_gate=self._use_setup_gate,
+        )
+        setup_gate = (
+            SmartSetupGate(min_confidence_pct=probe_min_confidence_pct)
+            if self._use_setup_gate
+            else None
+        )
+
+        formula_or_unit_mismatch = False
+        for rank, summary in enumerate(stage2_ranked_all[:3], start=1):
+            summary_row = dict(summary)
+            profile = _extract_profile_from_summary(summary_row)
+            total_pnl_usd = float(summary_row.get("total_pnl_usd", 0.0) or 0.0)
+            start_capital_usd = float(
+                summary_row.get("start_capital_usd", settings.trading.start_capital)
+                or settings.trading.start_capital
+            )
+            total_trades = int(float(summary_row.get("total_trades", 0.0) or 0.0))
+            stored_avg_net_pct = float(summary_row.get("avg_profit_per_trade_net_pct", 0.0) or 0.0)
+            recalculated_avg_net_pct = float(
+                _resolve_avg_profit_per_trade_net_pct(summary_row)
+            )
+            avg_net_diff_pct = abs(stored_avg_net_pct - recalculated_avg_net_pct)
+            if avg_net_diff_pct > 1e-9:
+                formula_or_unit_mismatch = True
+
+            required_candles = max(
+                int(required_candles_default),
+                int(_required_candle_count_for_profile(
+                    "ema_band_rejection",
+                    profile,
+                    use_setup_gate=self._use_setup_gate,
+                )),
+            )
+            payload = _build_vectorized_strategy_cache_payload(
+                candles_df,
+                strategy_name="ema_band_rejection",
+                required_candles=required_candles,
+                setup_gate=setup_gate,
+                strategy_profile=profile,
+                regime_mask=regime_mask,
+            )
+            diagnostics = (
+                dict(payload.get("strategy_diagnostics", {}))
+                if isinstance(payload, Mapping)
+                and isinstance(payload.get("strategy_diagnostics"), Mapping)
+                else {}
+            )
+            aligned_signals = (
+                list(payload.get("signals", []))
+                if isinstance(payload, Mapping)
+                else []
+            )
+            aligned_dynamic_stop_loss_pcts = (
+                list(payload.get("precomputed_dynamic_stop_loss_pcts", []))
+                if isinstance(payload, Mapping)
+                else []
+            )
+            compare_count, dyn_sl_diff_mean, dyn_sl_diff_max = self._audit_ema_band_dynamic_stop_alignment(
+                candles_df,
+                strategy_profile=profile,
+                aligned_signals=aligned_signals,
+                aligned_dynamic_stop_loss_pcts=aligned_dynamic_stop_loss_pcts,
+            )
+            if compare_count > 0 and dyn_sl_diff_max > 1e-6:
+                formula_or_unit_mismatch = True
+
+            spread_threshold_pct = float(diagnostics.get("min_ema_spread_pct", 0.0) or 0.0)
+            spread_entry_mean = float(diagnostics.get("ema_spread_entry_pct_mean", 0.0) or 0.0)
+            spread_entry_min = float(diagnostics.get("ema_spread_entry_pct_min", 0.0) or 0.0)
+            spread_entry_max = float(diagnostics.get("ema_spread_entry_pct_max", 0.0) or 0.0)
+            if spread_threshold_pct > 2.0:
+                formula_or_unit_mismatch = True
+
+            self.log_message.emit(
+                f"EMA Band Rejection audit #{rank}: "
+                f"pnl={total_pnl_usd:.2f} | start_capital={start_capital_usd:.2f} | trades={total_trades} | "
+                f"avg_net_stored={stored_avg_net_pct:.6f}% | "
+                f"avg_net_calc=(( {total_pnl_usd:.6f} / {start_capital_usd:.2f} )*100)/{max(total_trades, 1)}={recalculated_avg_net_pct:.6f}% | "
+                f"avg_net_diff={avg_net_diff_pct:.9f} | "
+                f"leverage={resolved_leverage}x | "
+                f"avg_fees={float(summary_row.get('average_trade_fees_usd', 0.0) or 0.0):.4f} | "
+                f"avg_slippage={float(summary_row.get('average_trade_slippage_usd', 0.0) or 0.0):.4f} | "
+                f"avg_cost={float(summary_row.get('average_trade_cost_usd', 0.0) or 0.0):.4f} | "
+                f"avg_win_cost_ratio={self._format_profit_factor(float(summary_row.get('average_win_to_cost_ratio', 0.0) or 0.0))} | "
+                f"pf={self._format_profit_factor(float(summary_row.get('profit_factor', 0.0) or 0.0))} | "
+                f"win_rate={float(summary_row.get('win_rate_pct', 0.0) or 0.0):.2f}% | "
+                f"max_dd={float(summary_row.get('max_drawdown_pct', 0.0) or 0.0):.2f}%"
+            )
+            self.log_message.emit(
+                f"EMA Band Rejection audit #{rank} spread/dynSL: "
+                f"threshold={spread_threshold_pct:.4f}% | "
+                f"observed_spread_entry[min/mean/max]={spread_entry_min:.4f}/{spread_entry_mean:.4f}/{spread_entry_max:.4f}% | "
+                f"dyn_sl_alignment[n={compare_count},mean_abs_diff={dyn_sl_diff_mean:.6f},max_abs_diff={dyn_sl_diff_max:.6f}] | "
+                f"dyn_sl_clip_low={int(diagnostics.get('dynamic_stop_loss_clip_low_count', 0) or 0)} | "
+                f"dyn_sl_clip_high={int(diagnostics.get('dynamic_stop_loss_clip_high_count', 0) or 0)}"
+            )
+
+        if formula_or_unit_mismatch:
+            self.log_message.emit(
+                "EMA Band Rejection audit result: detected formula/unit mismatch; corrective patch applied and diagnostics printed."
+            )
+        else:
+            self.log_message.emit(
+                "EMA Band Rejection audit result: calculations verified, strategy currently fails due to insufficient net edge per trade."
+            )
+
     def _run_profile_optimization(
         self,
         db: Database,
@@ -4655,7 +7427,7 @@ class BacktestThread(QThread):
         strategy_name: str,
         regime_mask: Sequence[int] | None = None,
     ) -> dict:
-        if not self._use_setup_gate:
+        if not self._use_setup_gate and not self._is_quiet_mode():
             self.log_message.emit(
                 "Backtest scalper mode active: SmartSetupGate is disabled for optimizer workers."
             )
@@ -4667,7 +7439,7 @@ class BacktestThread(QThread):
             strategy_name=strategy_name,
             interval=self._interval,
         )
-        if len(full_grid_profiles) < len(raw_grid_profiles):
+        if len(full_grid_profiles) < len(raw_grid_profiles) and not self._is_quiet_mode():
             self.log_message.emit(
                 "Optimizer strategy/interval constraints active: "
                 f"{len(raw_grid_profiles)} -> {len(full_grid_profiles)} profiles "
@@ -4679,186 +7451,526 @@ class BacktestThread(QThread):
                 "Optimization grid is empty after strategy/interval constraints."
             )
 
-        configured_search_window = _resolve_optimizer_search_window_candles(self._interval)
-        if 0 < configured_search_window < len(candles_df):
-            optimization_candles_df = candles_df.iloc[-configured_search_window:].copy(deep=True)
-            optimization_uses_full_history = False
-        else:
-            optimization_candles_df = candles_df
-            optimization_uses_full_history = True
-
-        optimization_regime_mask: list[int] | None = None
-        if regime_mask is not None:
-            if len(regime_mask) == len(candles_df):
-                optimization_regime_mask = list(regime_mask)[-len(optimization_candles_df):]
-            else:
-                self.log_message.emit(
-                    "Warning: regime mask length mismatch; disabling regime filter for optimizer window."
-                )
-
-        sampling_full_scan_floor = 10_000
-        sampling_target_profiles = 12_500
-        sampling_cap_ceiling = 15_000
-        configured_sample_cap = int(
-            getattr(
-                settings.trading,
-                "random_search_samples",
-                sampling_target_profiles,
+        min_required_trades = _resolve_optimizer_min_total_trades_for_interval(self._interval)
+        breakeven_constraint_text = _describe_optimizer_breakeven_constraint(strategy_name)
+        if self._is_debug_mode():
+            self.log_message.emit(
+                f"Optimizer breakeven stability rule ({strategy_label}): {breakeven_constraint_text}."
             )
-            or sampling_target_profiles
-        )
-        if configured_sample_cap < sampling_full_scan_floor or configured_sample_cap > sampling_cap_ceiling:
-            configured_sample_cap = sampling_target_profiles
 
-        force_full_scan = (
-            theoretical_profiles < sampling_full_scan_floor
-            or theoretical_profiles <= configured_sample_cap
-        )
-        max_sample_profiles = (
-            int(theoretical_profiles)
-            if force_full_scan
-            else int(configured_sample_cap)
-        )
-        sampled_grid_profiles = _sample_optimization_profiles(
-            full_grid_profiles,
-            max_profiles=max_sample_profiles,
-            symbol=self._symbol,
+        optimizer_policy = _resolve_optimizer_two_stage_policy(
             strategy_name=strategy_name,
             interval=self._interval,
-            random_seed=OPTIMIZER_SAMPLE_RANDOM_SEED,
+            theoretical_profiles=theoretical_profiles,
         )
-        scan_profile_count = len(sampled_grid_profiles)
-        is_sample_scan = scan_profile_count < theoretical_profiles
-        coverage_ratio = scan_profile_count / float(theoretical_profiles)
-        initial_worker_count = _memory_safe_worker_count(scan_profile_count)
+        two_stage_enabled = bool(optimizer_policy.get("two_stage_enabled", False))
+        force_full_verification_for_winner = bool(
+            optimizer_policy.get("force_full_verification_for_winner", True)
+        )
+        configured_sample_cap = optimizer_policy.get("sample_cap")
+        worker_cap = optimizer_policy.get("worker_cap")
+        worker_cap_value = (
+            int(worker_cap)
+            if isinstance(worker_cap, int) and worker_cap > 0
+            else None
+        )
+        configured_search_window = int(_resolve_optimizer_search_window_candles(self._interval))
+        stage1_evaluated_profiles = 0
+        stage2_evaluated_profiles = 0
+        stage1_worker_count = 0
+        stage2_worker_count = 0
+        stage1_search_window_candles = int(configured_search_window)
+        stage2_search_window_candles = int(configured_search_window)
+        optimizer_mode_label = "single_stage"
+        optimizer_quality_status = "STRICT_PASS"
+        optimizer_low_edge_fallback_used = False
+        optimizer_low_edge_reason = ""
 
-        self.log_message.emit(
-            f"Optimizer worker lock active: forcing {MAX_OPTIMIZATION_WORKERS} isolated worker processes."
-        )
-        if FORCE_MAX_OPTIMIZATION_WORKERS:
+        if worker_cap_value is not None and not self._is_quiet_mode():
             self.log_message.emit(
                 "Optimizer worker policy active: "
-                f"forced exactly {MAX_OPTIMIZATION_WORKERS} worker process(es); "
-                f"{initial_worker_count} selected for this run."
+                f"strategy cap={worker_cap_value}, global max={MAX_OPTIMIZATION_WORKERS}."
             )
-        else:
+        elif not self._is_quiet_mode():
             self.log_message.emit(
-                "Optimizer RAM guard active: "
-                f"{initial_worker_count} worker process(es) selected "
-                f"(reserve={OPTIMIZER_MEMORY_RESERVE_GB:.1f}GB, est/worker={OPTIMIZER_MEMORY_PER_WORKER_GB:.1f}GB)."
+                f"Optimizer worker lock active: forcing {MAX_OPTIMIZATION_WORKERS} isolated worker processes."
             )
-        if is_sample_scan:
-            self.log_message.emit(
-                "Sampling mode active: "
-                f"evaluating {scan_profile_count} of {theoretical_profiles} profiles "
-                f"(~{coverage_ratio * 100.0:.1f}% coverage)."
-            )
-        else:
-            self.log_message.emit(
-                f"Full Scan active for {self._symbol} {strategy_label}: "
-                f"{theoretical_profiles}/{theoretical_profiles} profiles "
-                f"(100.00% coverage), random_seed={OPTIMIZER_SAMPLE_RANDOM_SEED}."
-            )
-        profiles_per_worker = (
-            scan_profile_count / float(initial_worker_count)
-            if initial_worker_count > 0
-            else float(scan_profile_count)
-        )
-        self.log_message.emit(
-            "Optimizer workload split: "
-            f"~{profiles_per_worker:.0f} profiles per worker "
-            f"across {initial_worker_count} worker processes."
-        )
-        self.log_message.emit(
-            f"Optimization mode active for {self._symbol}: evaluating {scan_profile_count} profiles "
-            f"(grid_total={theoretical_profiles}) on {initial_worker_count} worker processes."
-        )
-        if self._use_setup_gate:
+
+        if self._use_setup_gate and not self._is_quiet_mode():
             self.log_message.emit(
                 "Phase 19 optimizer guarantee active: every worker instantiates its own SmartSetupGate "
                 f"and validates signals only after {SETUP_GATE_SETTLED_WARMUP_CANDLES} settled candles."
             )
-        if optimization_uses_full_history:
+
+        if two_stage_enabled:
+            optimizer_mode_label = "two_stage"
             self.log_message.emit(
-                f"Full-history optimizer window: evaluating all {len(optimization_candles_df)} candles per profile."
+                f"{strategy_label} optimizer mode: 2-stage"
             )
-        else:
-            self.log_message.emit(
-                "Search-window optimizer active: "
-                f"evaluating last {len(optimization_candles_df)}/{len(candles_df)} candles per profile."
+            if self._is_debug_mode():
+                self.log_message.emit(
+                    "Stage 2 winner policy: "
+                    + (
+                        "force full final verification enabled."
+                        if force_full_verification_for_winner
+                        else "force full final verification disabled."
+                    )
+                )
+            stage1_target_profiles = max(
+                1,
+                int(optimizer_policy.get("stage1_target_profiles", 1) or 1),
+            )
+            stage2_top_n = max(
+                1,
+                int(optimizer_policy.get("stage2_top_n", 1) or 1),
+            )
+            stage1_search_window_candles = max(
+                1,
+                int(optimizer_policy.get("stage1_search_window_candles", configured_search_window) or configured_search_window),
+            )
+            stage2_search_window_candles = max(
+                1,
+                int(optimizer_policy.get("stage2_search_window_candles", configured_search_window) or configured_search_window),
+            )
+            configured_search_window = int(stage2_search_window_candles)
+
+            stage1_candles_df, stage1_regime_mask, stage1_uses_full_history = self._slice_optimizer_window(
+                candles_df,
+                window_candles=stage1_search_window_candles,
+                regime_mask=regime_mask,
+            )
+            optimization_candles_df, optimization_regime_mask, optimization_uses_full_history = self._slice_optimizer_window(
+                candles_df,
+                window_candles=stage2_search_window_candles,
+                regime_mask=regime_mask,
             )
 
-        try:
-            optimization_phase_summaries = self._evaluate_optimization_phase(
-                optimization_candles_df,
+            max_sample_profiles = min(theoretical_profiles, stage1_target_profiles)
+            force_full_scan = max_sample_profiles >= theoretical_profiles
+            sampled_grid_profiles = _sample_optimization_profiles(
+                full_grid_profiles,
+                max_profiles=max_sample_profiles,
+                symbol=self._symbol,
                 strategy_name=strategy_name,
-                profiles=sampled_grid_profiles,
-                phase_label=f"Optimizing {strategy_label} profiles",
-                cache_progress_start=20,
-                cache_progress_span=25,
-                optimization_progress_start=46,
-                optimization_progress_end=99,
-                regime_mask=optimization_regime_mask,
+                interval=self._interval,
+                random_seed=OPTIMIZER_SAMPLE_RANDOM_SEED,
             )
-        except Exception as exc:
-            # Do not allow one strategy optimization error to abort the entire run
-            self.log_message.emit(f"Optimization for {strategy_label} failed: {exc}")
-            # Clear caches and return empty result so higher-level orchestrator can continue
-            self._clear_signal_caches_and_gc()
-            return {}
-        if self._should_stop():
-            return {}
-        if not optimization_phase_summaries:
-            raise RuntimeError("Optimization did not produce any result.")
+            stage1_evaluated_profiles = len(sampled_grid_profiles)
+            scan_profile_count = int(stage1_evaluated_profiles)
+            is_sample_scan = stage1_evaluated_profiles < theoretical_profiles
+            coverage_ratio = stage1_evaluated_profiles / float(theoretical_profiles)
+            stage1_worker_count = _memory_safe_worker_count(
+                stage1_evaluated_profiles,
+                worker_cap_override=worker_cap_value,
+            )
+            stage2_worker_count = _memory_safe_worker_count(
+                min(stage2_top_n, max(1, stage1_evaluated_profiles)),
+                worker_cap_override=worker_cap_value,
+            )
+            initial_worker_count = int(stage2_worker_count)
 
-        min_required_trades = int(OPTIMIZER_MIN_TOTAL_TRADES)
-        for profile_result in optimization_phase_summaries:
-            profile_result["avg_profit_per_trade_net_pct"] = float(
-                _resolve_avg_profit_per_trade_net_pct(profile_result)
+            self.log_message.emit(
+                f"Stage 1: evaluating {stage1_evaluated_profiles} profiles on {stage1_worker_count} workers "
+                f"over {len(stage1_candles_df)} candles."
             )
-            if float(profile_result.get("total_trades", 0.0)) < float(min_required_trades):
-                profile_result["stability_score"] = 0.0
-                profile_result["profit_factor"] = 0.0
-                profile_result["real_rrr"] = 0.0
-                profile_result["total_pnl_usd"] = 0.0
-                profile_result["average_win_to_cost_ratio"] = 0.0
-                profile_result["avg_profit_per_trade_net_pct"] = 0.0
+            if stage1_uses_full_history and not self._is_quiet_mode():
+                self.log_message.emit(
+                    "Stage 1 window mode: full history."
+                )
+            elif not self._is_quiet_mode():
+                self.log_message.emit(
+                    f"Stage 1 window mode: last {len(stage1_candles_df)}/{len(candles_df)} candles."
+                )
+            try:
+                stage1_phase_summaries = self._evaluate_optimization_phase(
+                    stage1_candles_df,
+                    strategy_name=strategy_name,
+                    profiles=sampled_grid_profiles,
+                    phase_label=f"Stage 1 {strategy_label} exploration",
+                    cache_progress_start=20,
+                    cache_progress_span=15,
+                    optimization_progress_start=46,
+                    optimization_progress_end=74,
+                    regime_mask=stage1_regime_mask,
+                    worker_cap_override=worker_cap_value,
+                )
+            except Exception as exc:
+                self.log_message.emit(f"Optimization for {strategy_label} failed in Stage 1: {exc}")
+                self._clear_signal_caches_and_gc()
+                return {}
+            if self._should_stop():
+                return {}
+            if not stage1_phase_summaries:
+                raise RuntimeError("Stage 1 did not produce any optimization result.")
 
-        eligible_optimization_summaries = [
-            summary
-            for summary in optimization_phase_summaries
-            if (
-                float(summary.get("total_trades", 0.0)) >= float(min_required_trades)
-                and _profile_meets_breakeven_constraint(summary, strategy_name=strategy_name)
-                and _profile_meets_avg_profit_per_trade_hurdle(summary)
+            stage1_ranked_eligible, stage1_ranked_all, _stage1_stats = self._analyze_optimization_phase_summaries(
+                strategy_name=strategy_name,
+                stage_label="Stage 1",
+                phase_summaries=stage1_phase_summaries,
+                min_required_trades=min_required_trades,
             )
-        ]
-        if not eligible_optimization_summaries:
-            self._clear_signal_caches_and_gc()
-            raise RuntimeError(
-                "No optimization profile passed stability constraints: "
-                f"need >= {min_required_trades} trades and breakeven_activation_pct >= "
-                f"{OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT:.1f}% and "
-                f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%."
+            stage1_candidate_source = stage1_ranked_eligible
+            if not stage1_candidate_source:
+                self.log_message.emit(
+                    "Stage 1 produced no eligible profiles; forwarding top raw candidates into Stage 2 verification."
+                )
+                stage1_candidate_source = stage1_ranked_all
+            if not stage1_candidate_source:
+                raise RuntimeError("Stage 1 produced no candidates for Stage 2 verification.")
+            stage1_best_candidate = dict(stage1_candidate_source[0])
+            if not self._is_quiet_mode():
+                self.log_message.emit(
+                    "Stage 1 Best Candidate: "
+                    f"profile={_format_profile_dict(_extract_profile_from_summary(stage1_best_candidate))} | "
+                    f"pf={self._format_profit_factor(float(stage1_best_candidate.get('profit_factor', 0.0) or 0.0))} | "
+                    f"pnl={float(stage1_best_candidate.get('total_pnl_usd', 0.0) or 0.0):.2f} | "
+                    f"win_rate={float(stage1_best_candidate.get('win_rate_pct', 0.0) or 0.0):.2f}%"
+                )
+
+            stage2_candidate_profiles: list[OptimizationProfile] = []
+            stage2_seen_keys: set[object] = set()
+            for summary in stage1_candidate_source[:stage2_top_n]:
+                candidate_profile = _extract_profile_from_summary(summary)
+                if not candidate_profile:
+                    continue
+                candidate_key = _strategy_cache_key(strategy_name, candidate_profile)
+                if candidate_key in stage2_seen_keys:
+                    continue
+                stage2_seen_keys.add(candidate_key)
+                stage2_candidate_profiles.append(candidate_profile)
+            if not stage2_candidate_profiles:
+                raise RuntimeError("Stage 2 candidate set is empty after Stage 1 ranking.")
+
+            stage2_evaluated_profiles = len(stage2_candidate_profiles)
+            scan_profile_count = int(stage1_evaluated_profiles + stage2_evaluated_profiles)
+            stage2_worker_count = _memory_safe_worker_count(
+                stage2_evaluated_profiles,
+                worker_cap_override=worker_cap_value,
             )
-        ranked_optimization_summaries = sorted(
-            eligible_optimization_summaries,
-            key=lambda summary: _optimization_sort_key(summary, strategy_name=strategy_name),
-            reverse=True,
-        )
+            initial_worker_count = int(stage2_worker_count)
+            self.log_message.emit(
+                f"Stage 2: verifying top {stage2_evaluated_profiles} profiles on {stage2_worker_count} workers "
+                f"over {len(optimization_candles_df)} candles."
+            )
+            if optimization_uses_full_history and not self._is_quiet_mode():
+                self.log_message.emit(
+                    "Stage 2 window mode: full history."
+                )
+            elif not self._is_quiet_mode():
+                self.log_message.emit(
+                    f"Stage 2 window mode: last {len(optimization_candles_df)}/{len(candles_df)} candles."
+                )
+            try:
+                stage2_phase_summaries = self._evaluate_optimization_phase(
+                    optimization_candles_df,
+                    strategy_name=strategy_name,
+                    profiles=stage2_candidate_profiles,
+                    phase_label=f"Stage 2 {strategy_label} verification",
+                    cache_progress_start=35,
+                    cache_progress_span=15,
+                    optimization_progress_start=75,
+                    optimization_progress_end=99,
+                    regime_mask=optimization_regime_mask,
+                    worker_cap_override=worker_cap_value,
+                )
+            except Exception as exc:
+                self.log_message.emit(f"Optimization for {strategy_label} failed in Stage 2: {exc}")
+                self._clear_signal_caches_and_gc()
+                return {}
+            if self._should_stop():
+                return {}
+            if not stage2_phase_summaries:
+                raise RuntimeError("Stage 2 did not produce any optimization result.")
+
+            stage2_ranked_eligible, stage2_ranked_all, _stage2_stats = self._analyze_optimization_phase_summaries(
+                strategy_name=strategy_name,
+                stage_label="Stage 2",
+                phase_summaries=stage2_phase_summaries,
+                min_required_trades=min_required_trades,
+            )
+            if strategy_name == "ema_band_rejection":
+                self._log_ema_band_stage2_forensic_audit(
+                    candles_df=optimization_candles_df,
+                    stage2_ranked_all=stage2_ranked_all,
+                    regime_mask=optimization_regime_mask,
+            )
+            if not stage2_ranked_eligible:
+                if strategy_name == "ema_band_rejection":
+                    low_edge_candidates = [
+                        dict(summary)
+                        for summary in stage2_ranked_all
+                        if float(summary.get("total_trades", 0.0) or 0.0) > 0.0
+                    ]
+                    if low_edge_candidates:
+                        optimizer_quality_status = "LOW_EDGE"
+                        optimizer_low_edge_fallback_used = True
+                        optimizer_low_edge_reason = (
+                            "avg_profit_per_trade_net_pct below strict gate"
+                        )
+                        self.log_message.emit(
+                            "No eligible profile under strict avg_profit gate; returning best verified low-edge candidate for inspection."
+                        )
+                        ranked_optimization_summaries = low_edge_candidates
+                        self.log_message.emit(
+                            "Stage 2 Low-Edge Candidate: "
+                            f"profile={_format_profile_dict(_extract_profile_from_summary(ranked_optimization_summaries[0]))} | "
+                            f"pf={self._format_profit_factor(float(ranked_optimization_summaries[0].get('profit_factor', 0.0) or 0.0))} | "
+                            f"pnl={float(ranked_optimization_summaries[0].get('total_pnl_usd', 0.0) or 0.0):.2f} | "
+                            f"win_rate={float(ranked_optimization_summaries[0].get('win_rate_pct', 0.0) or 0.0):.2f}%"
+                        )
+                    else:
+                        self._clear_signal_caches_and_gc()
+                        constraint_parts = [
+                            f">= {min_required_trades} trades",
+                            breakeven_constraint_text,
+                            f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                        ]
+                        raise RuntimeError(
+                            "FAIL: Stage 2 verification produced no executable low-edge candidate: "
+                            + " | ".join(constraint_parts)
+                            + "."
+                        )
+                else:
+                    self._clear_signal_caches_and_gc()
+                    constraint_parts = [
+                        f">= {min_required_trades} trades",
+                        breakeven_constraint_text,
+                        f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                    ]
+                    raise RuntimeError(
+                        "Stage 2 verification produced no eligible profile: "
+                        + " | ".join(constraint_parts)
+                        + "."
+                    )
+            else:
+                ranked_optimization_summaries = stage2_ranked_eligible
+                self.log_message.emit(
+                    "Stage 2 Verified Candidate: "
+                    f"profile={_format_profile_dict(_extract_profile_from_summary(ranked_optimization_summaries[0]))} | "
+                    f"pf={self._format_profit_factor(float(ranked_optimization_summaries[0].get('profit_factor', 0.0) or 0.0))} | "
+                    f"pnl={float(ranked_optimization_summaries[0].get('total_pnl_usd', 0.0) or 0.0):.2f} | "
+                    f"win_rate={float(ranked_optimization_summaries[0].get('win_rate_pct', 0.0) or 0.0):.2f}%"
+                )
+        else:
+            optimizer_mode_label = "single_stage"
+            self.log_message.emit(
+                f"{strategy_label} optimizer mode: 1-stage"
+            )
+            optimization_candles_df, optimization_regime_mask, optimization_uses_full_history = self._slice_optimizer_window(
+                candles_df,
+                window_candles=configured_search_window,
+                regime_mask=regime_mask,
+            )
+            if configured_sample_cap is None:
+                max_sample_profiles = int(theoretical_profiles)
+            else:
+                max_sample_profiles = min(int(theoretical_profiles), int(configured_sample_cap))
+            max_sample_profiles = max(1, int(max_sample_profiles))
+            force_full_scan = max_sample_profiles >= theoretical_profiles
+            sampled_grid_profiles = _sample_optimization_profiles(
+                full_grid_profiles,
+                max_profiles=max_sample_profiles,
+                symbol=self._symbol,
+                strategy_name=strategy_name,
+                interval=self._interval,
+                random_seed=OPTIMIZER_SAMPLE_RANDOM_SEED,
+            )
+            scan_profile_count = len(sampled_grid_profiles)
+            is_sample_scan = scan_profile_count < theoretical_profiles
+            coverage_ratio = scan_profile_count / float(theoretical_profiles)
+            initial_worker_count = _memory_safe_worker_count(
+                scan_profile_count,
+                worker_cap_override=worker_cap_value,
+            )
+            stage1_evaluated_profiles = int(scan_profile_count)
+            stage1_worker_count = int(initial_worker_count)
+
+            if is_sample_scan:
+                self.log_message.emit(
+                    "Sampling mode active: "
+                    f"evaluating {scan_profile_count} of {theoretical_profiles} profiles "
+                    f"(~{coverage_ratio * 100.0:.1f}% coverage)."
+                )
+            else:
+                self.log_message.emit(
+                    f"Full Scan active for {self._symbol} {strategy_label}: "
+                    f"{theoretical_profiles}/{theoretical_profiles} profiles "
+                    f"(100.00% coverage), random_seed={OPTIMIZER_SAMPLE_RANDOM_SEED}."
+                )
+            profiles_per_worker = (
+                scan_profile_count / float(initial_worker_count)
+                if initial_worker_count > 0
+                else float(scan_profile_count)
+            )
+            if not self._is_quiet_mode():
+                self.log_message.emit(
+                    "Optimizer workload split: "
+                    f"~{profiles_per_worker:.0f} profiles per worker "
+                    f"across {initial_worker_count} worker processes."
+                )
+                self.log_message.emit(
+                    f"Optimization mode active for {self._symbol}: evaluating {scan_profile_count} profiles "
+                    f"(grid_total={theoretical_profiles}) on {initial_worker_count} worker processes."
+                )
+                if optimization_uses_full_history:
+                    self.log_message.emit(
+                        f"Full-history optimizer window: evaluating all {len(optimization_candles_df)} candles per profile."
+                    )
+                else:
+                    self.log_message.emit(
+                        "Search-window optimizer active: "
+                        f"evaluating last {len(optimization_candles_df)}/{len(candles_df)} candles per profile."
+                    )
+            try:
+                optimization_phase_summaries = self._evaluate_optimization_phase(
+                    optimization_candles_df,
+                    strategy_name=strategy_name,
+                    profiles=sampled_grid_profiles,
+                    phase_label=f"Optimizing {strategy_label} profiles",
+                    cache_progress_start=20,
+                    cache_progress_span=25,
+                    optimization_progress_start=46,
+                    optimization_progress_end=99,
+                    regime_mask=optimization_regime_mask,
+                    worker_cap_override=worker_cap_value,
+                )
+            except Exception as exc:
+                self.log_message.emit(f"Optimization for {strategy_label} failed: {exc}")
+                self._clear_signal_caches_and_gc()
+                return {}
+            if self._should_stop():
+                return {}
+            if not optimization_phase_summaries:
+                raise RuntimeError("Optimization did not produce any result.")
+            ranked_eligible, _ranked_all, _stage_stats = self._analyze_optimization_phase_summaries(
+                strategy_name=strategy_name,
+                stage_label="Stage 1",
+                phase_summaries=optimization_phase_summaries,
+                min_required_trades=min_required_trades,
+            )
+            if not ranked_eligible:
+                if strategy_name == "ema_band_rejection":
+                    low_edge_candidates = [
+                        dict(summary)
+                        for summary in _ranked_all
+                        if float(summary.get("total_trades", 0.0) or 0.0) > 0.0
+                    ]
+                    if low_edge_candidates:
+                        optimizer_quality_status = "LOW_EDGE"
+                        optimizer_low_edge_fallback_used = True
+                        optimizer_low_edge_reason = (
+                            "avg_profit_per_trade_net_pct below strict gate"
+                        )
+                        self.log_message.emit(
+                            "No eligible profile under strict avg_profit gate; returning best verified low-edge candidate for inspection."
+                        )
+                        ranked_optimization_summaries = low_edge_candidates
+                    else:
+                        self._clear_signal_caches_and_gc()
+                        constraint_parts = [
+                            f">= {min_required_trades} trades",
+                            breakeven_constraint_text,
+                            f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                        ]
+                        raise RuntimeError(
+                            "FAIL: No optimization profile passed stability constraints and no low-edge candidate had executable trades: "
+                            + " | ".join(constraint_parts)
+                            + "."
+                        )
+                else:
+                    self._clear_signal_caches_and_gc()
+                    constraint_parts = [
+                        f">= {min_required_trades} trades",
+                        breakeven_constraint_text,
+                        f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                    ]
+                    raise RuntimeError(
+                        "No optimization profile passed stability constraints: "
+                        + " | ".join(constraint_parts)
+                        + "."
+                    )
+            else:
+                ranked_optimization_summaries = ranked_eligible
+
         best_summary = dict(ranked_optimization_summaries[0])
         best_profile = _extract_profile_from_summary(best_summary)
-        (
-            best_signals,
-            best_total_signals,
-            best_approved_signals,
-            best_blocked_signals,
-        ) = self._generate_signals(
-            optimization_candles_df,
-            strategy_name=strategy_name,
-            strategy_profile=best_profile,
-            regime_mask=optimization_regime_mask,
-        )
+        if strategy_name in OPTIMIZER_JIT_STRATEGY_CONSISTENT_BACKTEST:
+            try:
+                probe_min_confidence_pct = self._min_confidence_pct
+                if self._use_setup_gate:
+                    probe_min_confidence_pct = _enforce_optimizer_min_confidence_floor(
+                        probe_min_confidence_pct
+                    )
+                (
+                    best_open_arr,
+                    best_high_arr,
+                    best_low_arr,
+                    best_close_arr,
+                    best_volume_arr,
+                ) = _extract_ohlcv_numpy_arrays(optimization_candles_df)
+                consistent_payload = _build_strategy_jit_precomputed_payload(
+                    optimization_candles_df,
+                    best_open_arr,
+                    best_high_arr,
+                    best_low_arr,
+                    best_close_arr,
+                    best_volume_arr,
+                    strategy_name=strategy_name,
+                    strategy_profile=best_profile,
+                    use_setup_gate=self._use_setup_gate,
+                    min_confidence_pct=probe_min_confidence_pct,
+                    regime_mask=optimization_regime_mask,
+                )
+            except Exception:
+                consistent_payload = None
+            if isinstance(consistent_payload, Mapping):
+                best_signals = _align_signal_series_to_candle_count(
+                    consistent_payload.get("signals", []),
+                    candle_count=len(optimization_candles_df),
+                )
+                best_total_signals = int(consistent_payload.get("total_signals", 0) or 0)
+                best_approved_signals = int(consistent_payload.get("approved_signals", 0) or 0)
+                best_blocked_signals = int(consistent_payload.get("blocked_signals", 0) or 0)
+                self._last_precomputed_exit_cache = {
+                    key: value
+                    for key, value in consistent_payload.items()
+                    if key in {
+                        "precomputed_long_exit_flags",
+                        "precomputed_short_exit_flags",
+                        "precomputed_dynamic_stop_loss_pcts",
+                        "precomputed_dynamic_take_profit_pcts",
+                    }
+                }
+                diagnostics_payload = consistent_payload.get("strategy_diagnostics")
+                self._last_strategy_diagnostics = (
+                    dict(diagnostics_payload)
+                    if isinstance(diagnostics_payload, Mapping)
+                    else None
+                )
+            else:
+                (
+                    best_signals,
+                    best_total_signals,
+                    best_approved_signals,
+                    best_blocked_signals,
+                ) = self._generate_signals(
+                    optimization_candles_df,
+                    strategy_name=strategy_name,
+                    strategy_profile=best_profile,
+                    regime_mask=optimization_regime_mask,
+                )
+        else:
+            (
+                best_signals,
+                best_total_signals,
+                best_approved_signals,
+                best_blocked_signals,
+            ) = self._generate_signals(
+                optimization_candles_df,
+                strategy_name=strategy_name,
+                strategy_profile=best_profile,
+                regime_mask=optimization_regime_mask,
+            )
         best_result = self._run_single_backtest(
             db,
             optimization_candles_df,
@@ -4869,15 +7981,223 @@ class BacktestThread(QThread):
             approved_signals=best_approved_signals,
             blocked_signals=best_blocked_signals,
         )
-        self._log_backtest_metrics(best_result, prefix="Optimization metrics")
+        candidate_log_label = (
+            "Stage 2 Verified Candidate"
+            if two_stage_enabled
+            else "Best Optimizer Candidate"
+        )
+        if optimizer_low_edge_fallback_used:
+            candidate_log_label = (
+                "Stage 2 Low-Edge Candidate"
+                if two_stage_enabled
+                else "Low-Edge Optimizer Candidate"
+            )
         self.log_message.emit(
-            f"Best Profile for {self._symbol}: "
+            f"{candidate_log_label} for {self._symbol}: "
             f"{_format_profile_dict(best_profile)} "
             f"| profit_factor={self._format_profit_factor(float(best_summary['profit_factor']))} "
             f"| real_rrr={self._format_profit_factor(float(best_summary['real_rrr']))} "
             f"| pnl={float(best_summary['total_pnl_usd']):.2f} "
             f"| win_rate={float(best_summary['win_rate_pct']):.2f}% "
             f"| max_dd={float(best_summary.get('max_drawdown_pct', 0.0)):.2f}%"
+        )
+        self._log_backtest_metrics(best_result, prefix="Final verified optimization metrics")
+        self.log_message.emit(
+            f"Final Verified Result for {self._symbol}: "
+            f"{_format_profile_dict(best_profile)} "
+            f"| profit_factor={self._format_profit_factor(float(best_result.get('profit_factor', 0.0) or 0.0))} "
+            f"| real_rrr={self._format_profit_factor(float(best_result.get('real_rrr', 0.0) or 0.0))} "
+            f"| pnl={float(best_result.get('total_pnl_usd', 0.0) or 0.0):.2f} "
+            f"| win_rate={float(best_result.get('win_rate_pct', 0.0) or 0.0):.2f}% "
+            f"| max_dd={float(best_result.get('max_drawdown_pct', 0.0) or 0.0):.2f}%"
+        )
+        if strategy_name == "frama_cross":
+            optimizer_min_confidence_pct = self._min_confidence_pct
+            if self._use_setup_gate:
+                optimizer_min_confidence_pct = _enforce_optimizer_min_confidence_floor(
+                    optimizer_min_confidence_pct
+                )
+            optimizer_required_warmup, optimizer_required_candles = (
+                self._resolve_required_runtime_candles(
+                    strategy_name=strategy_name,
+                    strategy_profile=best_profile,
+                )
+            )
+            optimizer_window_start = TRACE_VALUE_UNAVAILABLE
+            optimizer_window_end = TRACE_VALUE_UNAVAILABLE
+            if len(optimization_candles_df) > 0 and "open_time" in optimization_candles_df.columns:
+                with suppress(Exception):
+                    optimizer_window_start = str(
+                        pd.to_datetime(
+                            optimization_candles_df["open_time"].iloc[0],
+                            utc=False,
+                            errors="coerce",
+                        )
+                    )
+                    optimizer_window_end = str(
+                        pd.to_datetime(
+                            optimization_candles_df["open_time"].iloc[-1],
+                            utc=False,
+                            errors="coerce",
+                        )
+                    )
+            regime_total = int(len(optimization_regime_mask)) if optimization_regime_mask is not None else 0
+            regime_allowed = (
+                int(sum(int(value) > 0 for value in optimization_regime_mask))
+                if optimization_regime_mask is not None
+                else 0
+            )
+            optimizer_input_snapshot = {
+                "path": (
+                    "compiled signal path + full strategy-consistent backtest engine"
+                    if strategy_name in OPTIMIZER_JIT_STRATEGY_CONSISTENT_BACKTEST
+                    else (
+                        "compiled signal path + compiled core path"
+                        if _jit_strategy_code(strategy_name) != 0
+                        else "python signal path + full strategy-consistent backtest engine"
+                    )
+                ),
+                "symbol": str(self._symbol),
+                "interval": str(self._interval),
+                "candles": int(len(optimization_candles_df)),
+                "window_start": str(optimizer_window_start),
+                "window_end": str(optimizer_window_end),
+                "profile": str(_format_profile_dict(best_profile)),
+                "use_setup_gate": bool(self._use_setup_gate),
+                "min_confidence_pct": (
+                    None
+                    if optimizer_min_confidence_pct is None
+                    else float(optimizer_min_confidence_pct)
+                ),
+                "required_warmup_candles": int(optimizer_required_warmup),
+                "required_candles": int(optimizer_required_candles),
+                "fee_pct": float(_resolve_backtest_fee_pct()),
+                "slippage_pct_per_side": float(BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE),
+                "stop_loss_pct": float(best_profile.get("stop_loss_pct", 0.0) or 0.0),
+                "take_profit_pct": float(best_profile.get("take_profit_pct", 0.0) or 0.0),
+                "trailing_activation_pct": float(best_profile.get("trailing_activation_pct", 0.0) or 0.0),
+                "trailing_distance_pct": float(best_profile.get("trailing_distance_pct", 0.0) or 0.0),
+                "breakeven_activation_pct": float(best_profile.get("breakeven_activation_pct", 0.0) or 0.0),
+                "breakeven_buffer_pct": float(best_profile.get("breakeven_buffer_pct", 0.0) or 0.0),
+                "regime_filter_active": bool(optimization_regime_mask is not None),
+                "regime_allowed_candles": int(regime_allowed),
+                "regime_total_candles": int(regime_total),
+                "optimizer_early_stop_enabled": False,
+            }
+            final_input_snapshot = {
+                "path": "final verification full backtest engine",
+                "symbol": str(self._symbol),
+                "interval": str(self._interval),
+                "candles": int(len(optimization_candles_df)),
+                "window_start": str(optimizer_window_start),
+                "window_end": str(optimizer_window_end),
+                "profile": str(_format_profile_dict(best_profile)),
+                "use_setup_gate": bool(self._use_setup_gate),
+                "min_confidence_pct": (
+                    None
+                    if self._min_confidence_pct is None
+                    else float(self._min_confidence_pct)
+                ),
+                "required_warmup_candles": int(best_result.get("required_warmup_candles", 0) or 0),
+                "required_candles": int(best_result.get("required_candles", 0) or 0),
+                "fee_pct": float(best_result.get("effective_taker_fee_pct", 0.0) or 0.0),
+                "slippage_pct_per_side": float(best_result.get("slippage_penalty_pct_per_side", 0.0) or 0.0),
+                "stop_loss_pct": float(best_result.get("stop_loss_pct", 0.0) or 0.0),
+                "take_profit_pct": float(best_result.get("take_profit_pct", 0.0) or 0.0),
+                "trailing_activation_pct": float(best_result.get("trailing_activation_pct", 0.0) or 0.0),
+                "trailing_distance_pct": float(best_result.get("trailing_distance_pct", 0.0) or 0.0),
+                "breakeven_activation_pct": float(best_result.get("breakeven_activation_pct", 0.0) or 0.0),
+                "breakeven_buffer_pct": float(best_result.get("breakeven_buffer_pct", 0.0) or 0.0),
+                "regime_filter_active": bool(optimization_regime_mask is not None),
+                "regime_allowed_candles": int(regime_allowed),
+                "regime_total_candles": int(regime_total),
+                "optimizer_early_stop_enabled": False,
+            }
+            self.log_message.emit(
+                "FRAMA consistency inputs | optimizer: "
+                f"path={optimizer_input_snapshot['path']} | candles={optimizer_input_snapshot['candles']} | "
+                f"window={optimizer_input_snapshot['window_start']} -> {optimizer_input_snapshot['window_end']} | "
+                f"profile={optimizer_input_snapshot['profile']} | gate={int(bool(optimizer_input_snapshot['use_setup_gate']))} | "
+                f"min_conf={optimizer_input_snapshot['min_confidence_pct']} | req={optimizer_input_snapshot['required_warmup_candles']}/{optimizer_input_snapshot['required_candles']} | "
+                f"fee={optimizer_input_snapshot['fee_pct']:.4f}% | slippage={optimizer_input_snapshot['slippage_pct_per_side']:.4f}%"
+            )
+            self.log_message.emit(
+                "FRAMA consistency inputs | final: "
+                f"path={final_input_snapshot['path']} | candles={final_input_snapshot['candles']} | "
+                f"window={final_input_snapshot['window_start']} -> {final_input_snapshot['window_end']} | "
+                f"profile={final_input_snapshot['profile']} | gate={int(bool(final_input_snapshot['use_setup_gate']))} | "
+                f"min_conf={final_input_snapshot['min_confidence_pct']} | req={final_input_snapshot['required_warmup_candles']}/{final_input_snapshot['required_candles']} | "
+                f"fee={final_input_snapshot['fee_pct']:.4f}% | slippage={final_input_snapshot['slippage_pct_per_side']:.4f}%"
+            )
+            input_diff_fields = (
+                "symbol",
+                "interval",
+                "candles",
+                "window_start",
+                "window_end",
+                "profile",
+                "use_setup_gate",
+                "required_warmup_candles",
+                "required_candles",
+                "fee_pct",
+                "slippage_pct_per_side",
+                "stop_loss_pct",
+                "take_profit_pct",
+                "trailing_activation_pct",
+                "trailing_distance_pct",
+                "breakeven_activation_pct",
+                "breakeven_buffer_pct",
+                "regime_filter_active",
+                "regime_allowed_candles",
+                "regime_total_candles",
+                "optimizer_early_stop_enabled",
+            )
+            input_differences: list[str] = []
+            for field_name in input_diff_fields:
+                optimizer_value = optimizer_input_snapshot.get(field_name)
+                final_value = final_input_snapshot.get(field_name)
+                if isinstance(optimizer_value, float) or isinstance(final_value, float):
+                    with suppress(Exception):
+                        if math.isclose(float(optimizer_value), float(final_value), rel_tol=1e-9, abs_tol=1e-9):
+                            continue
+                if optimizer_value != final_value:
+                    input_differences.append(
+                        f"{field_name}: optimizer={optimizer_value} final={final_value}"
+                    )
+            if input_differences:
+                self.log_message.emit(
+                    "FRAMA input consistency warning: "
+                    + "; ".join(input_differences[:6])
+                )
+
+        if strategy_name in {"ema_band_rejection", "frama_cross"}:
+            consistency_ok, consistency_mismatches = _compare_optimizer_final_summary_metrics(
+                best_summary,
+                best_result,
+            )
+            best_result["optimizer_final_consistency_ok"] = bool(consistency_ok)
+            best_result["optimizer_final_consistency_mismatches"] = list(consistency_mismatches)
+            consistency_label = (
+                "EMA Band Rejection"
+                if strategy_name == "ema_band_rejection"
+                else "FRAMA Cross"
+            )
+            if consistency_ok:
+                if self._is_debug_mode():
+                    self.log_message.emit(
+                        f"{consistency_label} optimizer/final consistency check passed."
+                    )
+            else:
+                self.log_message.emit(
+                    f"{consistency_label} consistency mismatch between optimizer summary and final rerun: "
+                    + "; ".join(consistency_mismatches[:4])
+                )
+                if optimizer_quality_status == "STRICT_PASS":
+                    optimizer_quality_status = "WARN_CONSISTENCY"
+        if optimizer_quality_status not in {"STRICT_PASS", "LOW_EDGE", "WARN_CONSISTENCY"}:
+            optimizer_quality_status = "STRICT_PASS"
+        self.log_message.emit(
+            f"Optimizer verdict for {self._symbol}: {optimizer_quality_status}"
         )
 
         keep_top_count = min(
@@ -4891,24 +8211,43 @@ class BacktestThread(QThread):
         best_result.update(
             {
                 "optimization_mode": True,
+                "optimizer_mode": str(optimizer_mode_label),
+                "optimizer_two_stage_enabled": bool(two_stage_enabled),
+                "optimizer_force_full_verification_for_winner": bool(force_full_verification_for_winner),
                 "best_profile": best_profile,
+                "best_optimizer_candidate_summary": dict(best_summary),
                 "optimization_results": optimization_summaries_compact,
                 "decision_matrix_summaries": optimization_summaries_compact,
-                "evaluated_profiles": scan_profile_count,
-                "sampled_profiles": scan_profile_count,
+                "evaluated_profiles": int(scan_profile_count),
+                "sampled_profiles": int(stage1_evaluated_profiles),
                 "theoretical_profiles": theoretical_profiles,
                 "search_window_candles": len(optimization_candles_df),
                 "validated_profiles": keep_top_count,
                 "full_history_optimization": optimization_uses_full_history,
-                "sampling_mode": "sample" if is_sample_scan else "full",
+                "sampling_mode": (
+                    "two_stage"
+                    if two_stage_enabled
+                    else ("sample" if is_sample_scan else "full")
+                ),
                 "sampling_coverage_pct": coverage_ratio * 100.0,
                 "sampling_random_seed": int(OPTIMIZER_SAMPLE_RANDOM_SEED),
                 "optimizer_worker_processes": int(initial_worker_count),
                 "optimizer_max_sample_profiles": int(max_sample_profiles),
                 "optimizer_force_full_scan": bool(force_full_scan),
                 "optimizer_configured_search_window_candles": int(configured_search_window),
+                "optimizer_stage1_profiles": int(stage1_evaluated_profiles),
+                "optimizer_stage2_profiles": int(stage2_evaluated_profiles),
+                "optimizer_stage1_worker_processes": int(stage1_worker_count),
+                "optimizer_stage2_worker_processes": int(stage2_worker_count),
+                "optimizer_stage1_search_window_candles": int(stage1_search_window_candles),
+                "optimizer_stage2_search_window_candles": int(stage2_search_window_candles),
                 "session_leaderboard": [],
                 "session_day_breakdown": [],
+                "optimizer_quality_status": str(optimizer_quality_status),
+                "optimizer_strict_pass": bool(optimizer_quality_status == "STRICT_PASS"),
+                "optimizer_low_edge": bool(optimizer_quality_status == "LOW_EDGE"),
+                "optimizer_low_edge_fallback_used": bool(optimizer_low_edge_fallback_used),
+                "optimizer_low_edge_reason": str(optimizer_low_edge_reason),
             }
         )
         # Persist winner immediately (batch-saving) so each strategy/coin result is durable
@@ -4935,86 +8274,223 @@ class BacktestThread(QThread):
         optimization_progress_start: int,
         optimization_progress_end: int,
         regime_mask: Sequence[int] | None = None,
+        worker_cap_override: int | None = None,
     ) -> list[dict[str, float]]:
         total_profiles = len(profiles)
         if total_profiles == 0:
             return []
 
-        worker_count = _memory_safe_worker_count(total_profiles)
+        worker_count = _memory_safe_worker_count(
+            total_profiles,
+            worker_cap_override=worker_cap_override,
+        )
+        if worker_cap_override is not None and not self._is_quiet_mode():
+            self.log_message.emit(
+                f"{phase_label}: strategy worker cap active ({worker_cap_override}); using {worker_count} workers."
+            )
         strategy_signal_cache: dict[object, dict[str, object]] | None = None
         precomputed_signals: list[int] | None = None
         total_signals = 0
         approved_signals = 0
         blocked_signals = 0
-        strategy_variant_profiles: list[OptimizationProfile] = []
+        use_jit_strategy = _jit_strategy_code(strategy_name) != 0
+        force_python_path = False
 
-        if strategy_name in {
-            "ema_cross_volume",
-            "frama_cross",
-            "dual_thrust",
-        }:
-            strategy_variant_profiles = _collect_strategy_variant_profiles(strategy_name, profiles)
-            if strategy_variant_profiles:
-                variant_count = len(strategy_variant_profiles)
-                quotient, remainder = divmod(total_profiles, variant_count)
-                if remainder == 0:
-                    profile_breakdown_text = (
-                        f"{variant_count} signal variants x {quotient} risk profiles = {total_profiles}"
+        if use_jit_strategy and strategy_name == "ema_band_rejection":
+            try:
+                reference_profile = (
+                    dict(profiles[0])
+                    if profiles
+                    else {
+                        "ema_fast": 5.0,
+                        "ema_mid": 10.0,
+                        "ema_slow": 20.0,
+                        "slope_lookback": 5.0,
+                        "min_ema_spread_pct": 0.05,
+                        "min_slow_slope_pct": 0.0,
+                        "pullback_requires_outer_band_touch": 0.0,
+                        "use_rejection_quality_filter": 0.0,
+                        "rejection_wick_min_ratio": 0.35,
+                        "rejection_body_min_ratio": 0.20,
+                        "use_rsi_filter": 0.0,
+                        "rsi_length": 14.0,
+                        "rsi_midline": 50.0,
+                        "use_rsi_cross_filter": 0.0,
+                        "rsi_midline_margin": 0.0,
+                        "use_volume_filter": 0.0,
+                        "volume_ma_length": 20.0,
+                        "volume_multiplier": 1.0,
+                        "use_atr_stop_buffer": 0.0,
+                        "atr_length": 14.0,
+                        "atr_stop_buffer_mult": 0.5,
+                        "signal_cooldown_bars": 0.0,
+                    }
+                )
+                open_arr, high_arr, low_arr, close_arr, volume_arr = _extract_ohlcv_numpy_arrays(candles_df)
+                (
+                    alignment_ok,
+                    mismatch_count,
+                    compare_count,
+                    mismatch_pct,
+                ) = _validate_ema_band_jit_alignment(
+                    candles_df,
+                    open_arr,
+                    high_arr,
+                    low_arr,
+                    close_arr,
+                    volume_arr,
+                    reference_profile,
+                )
+                if alignment_ok:
+                    if self._is_debug_mode():
+                        self.log_message.emit(
+                            "EMA Band Rejection JIT alignment check passed: "
+                            f"{mismatch_count}/{compare_count} mismatches ({mismatch_pct:.2f}%)."
+                        )
+                    try:
+                        probe_candle_count = max(1, min(len(candles_df), 12_000))
+                        probe_candles_df = candles_df.iloc[-probe_candle_count:].copy(deep=False)
+                        probe_regime_mask = (
+                            None
+                            if regime_mask is None
+                            else list(regime_mask)[-probe_candle_count:]
+                        )
+                        probe_min_confidence_pct = self._min_confidence_pct
+                        if self._use_setup_gate:
+                            probe_min_confidence_pct = _enforce_optimizer_min_confidence_floor(
+                                probe_min_confidence_pct
+                            )
+                        (
+                            probe_open_arr,
+                            probe_high_arr,
+                            probe_low_arr,
+                            probe_close_arr,
+                            probe_volume_arr,
+                        ) = _extract_ohlcv_numpy_arrays(probe_candles_df)
+                        optimized_probe = _run_ema_band_rejection_consistent_profile_evaluation(
+                            probe_candles_df,
+                            probe_open_arr,
+                            probe_high_arr,
+                            probe_low_arr,
+                            probe_close_arr,
+                            probe_volume_arr,
+                            strategy_profile=reference_profile,
+                            use_setup_gate=self._use_setup_gate,
+                            min_confidence_pct=probe_min_confidence_pct,
+                            regime_mask=probe_regime_mask,
+                            leverage_override=self._leverage_override,
+                            symbol=str(self._symbol),
+                            interval=str(self._interval),
+                        )
+                        python_probe = _run_python_profile_evaluation(
+                            probe_candles_df,
+                            strategy_name="ema_band_rejection",
+                            strategy_profile=reference_profile,
+                            use_setup_gate=self._use_setup_gate,
+                            min_confidence_pct=probe_min_confidence_pct,
+                            regime_mask=probe_regime_mask,
+                            leverage_override=self._leverage_override,
+                            symbol=str(self._symbol),
+                            interval=str(self._interval),
+                            precomputed_payload=None,
+                            apply_optimizer_early_stop=False,
+                        )
+                        if optimized_probe is None and python_probe is None:
+                            if self._is_debug_mode():
+                                self.log_message.emit(
+                                    "EMA Band Rejection end-to-end consistency probe skipped: "
+                                    "no executable trades on probe sample."
+                                )
+                        elif optimized_probe is None or python_probe is None:
+                            use_jit_strategy = False
+                            force_python_path = True
+                            self.log_message.emit(
+                                "EMA Band Rejection end-to-end consistency probe failed: "
+                                "one path returned no result. fallback to strategy-consistent python path."
+                            )
+                        else:
+                            probe_ok, probe_mismatches = _compare_optimizer_final_summary_metrics(
+                                optimized_probe[0],
+                                python_probe[0],
+                            )
+                            if probe_ok:
+                                if self._is_debug_mode():
+                                    self.log_message.emit(
+                                        "EMA Band Rejection end-to-end consistency probe passed: "
+                                        "optimizer path matches full strategy-consistent engine."
+                                    )
+                            else:
+                                use_jit_strategy = False
+                                force_python_path = True
+                                self.log_message.emit(
+                                    "EMA Band Rejection end-to-end consistency probe failed: "
+                                    + "; ".join(probe_mismatches[:3])
+                                    + ". fallback to strategy-consistent python path."
+                                )
+                    except Exception as exc:
+                        use_jit_strategy = False
+                        force_python_path = True
+                        self.log_message.emit(
+                            "EMA Band Rejection end-to-end consistency probe error: "
+                            f"{exc}. fallback to strategy-consistent python path."
+                        )
+                else:
+                    use_jit_strategy = False
+                    force_python_path = True
+                    self.log_message.emit(
+                        "EMA Band Rejection JIT alignment check failed: "
+                        f"{mismatch_count}/{compare_count} mismatches ({mismatch_pct:.2f}%). "
+                        "fallback to python path."
+                    )
+            except Exception as exc:
+                use_jit_strategy = False
+                force_python_path = True
+                self.log_message.emit(
+                    "EMA Band Rejection JIT alignment check error: "
+                    f"{exc}. fallback to python path."
+                )
+
+        if use_jit_strategy:
+            if self._is_debug_mode():
+                if strategy_name in OPTIMIZER_JIT_STRATEGY_CONSISTENT_BACKTEST:
+                    self.log_message.emit(
+                        f"Numba JIT path active for {strategy_name}: "
+                        "compiled signal path + full strategy-consistent backtest engine."
                     )
                 else:
-                    profile_breakdown_text = (
-                        f"{variant_count} signal variants x ~{(total_profiles / float(variant_count)):.2f} "
-                        f"risk profiles = {total_profiles}"
+                    self.log_message.emit(
+                        f"Numba JIT path active for {strategy_name}: compiled signal path + compiled core path."
                     )
-                self.log_message.emit(
-                    "Optimizer profile breakdown: "
-                    f"{profile_breakdown_text}. "
-                    "Signal variants are cache keys, not total profile count."
-                )
-            enable_in_memory_signal_cache = True
-            if enable_in_memory_signal_cache:
-                strategy_signal_cache = self._build_parallel_strategy_signal_cache(
-                    candles_df,
-                    strategy_name=strategy_name,
-                    worker_count=worker_count,
-                    variant_profiles=strategy_variant_profiles,
-                    progress_start=cache_progress_start,
-                    progress_span=cache_progress_span,
-                    regime_mask=regime_mask,
-                )
-            if self._should_stop():
-                return []
-            self.progress_update.emit(
-                optimization_progress_start,
-                f"{phase_label} 0/{total_profiles}",
-            )
         else:
-            self.progress_update.emit(
-                optimization_progress_start,
-                f"{phase_label} 0/{total_profiles}",
-            )
-            (
-                precomputed_signals,
-                total_signals,
-                approved_signals,
-                blocked_signals,
-            ) = self._generate_signals(
+            if self._is_debug_mode():
+                self.log_message.emit(
+                    f"Python vector path active for {strategy_name}: worker evaluation uses signal payload + backtest engine."
+                )
+            variant_profiles = _collect_strategy_variant_profiles(strategy_name, profiles)
+            strategy_signal_cache = self._build_parallel_strategy_signal_cache(
                 candles_df,
                 strategy_name=strategy_name,
+                worker_count=worker_count,
+                variant_profiles=variant_profiles,
+                progress_start=cache_progress_start,
+                progress_span=cache_progress_span,
                 regime_mask=regime_mask,
             )
-            self.log_message.emit(
-                "Backtest summary: "
-                f"Total Signals: {total_signals} | Approved by Gate: {approved_signals} | Blocked: {blocked_signals}"
-            )
 
-        candles_records = candles_df.to_dict("records")
+        self.progress_update.emit(
+            optimization_progress_start,
+            f"{phase_label} 0/{total_profiles}",
+        )
+
+        if use_jit_strategy:
+            _warmup_numba_runtime(self.log_message.emit if self._is_debug_mode() else None)
+        candles_payload = _candles_dataframe_to_worker_payload(candles_df)
         first_summary_logged = strategy_signal_cache is None
         completed_profiles = 0
         batch_size = worker_count
         pool = _create_optimizer_pool(
             worker_count,
-            candles_records,
+            candles_payload,
             regime_mask=regime_mask,
             strategy_signal_cache=strategy_signal_cache,
         )
@@ -5067,6 +8543,7 @@ class BacktestThread(QThread):
                         {
                             "strategy_name": strategy_name,
                             "strategy_profile": profile,
+                            "force_python_path": bool(force_python_path),
                             "symbol": self._symbol,
                             "interval": self._interval,
                             "leverage_override": self._leverage_override,
@@ -5122,6 +8599,8 @@ class BacktestThread(QThread):
                         continue
 
                 for batch_result in batch_results:
+                    if batch_result is None:
+                        continue
                     summary = dict(batch_result["summary"])
                     if phase_cache_handle is not None:
                         phase_cache_handle.write(
@@ -5129,7 +8608,11 @@ class BacktestThread(QThread):
                         )
                     else:
                         phase_results.append(summary)
-                    if not first_summary_logged and strategy_signal_cache is not None:
+                    if (
+                        not first_summary_logged
+                        and strategy_signal_cache is not None
+                        and not self._is_quiet_mode()
+                    ):
                         self.log_message.emit(
                             "Backtest summary: "
                             f"Total Signals: {int(batch_result['total_signals'])} | "
@@ -5159,7 +8642,7 @@ class BacktestThread(QThread):
                     )
                 except Exception:
                     should_log = True
-                if should_log:
+                if should_log and (self._is_debug_mode() or not self._is_quiet_mode() or completed_profiles >= total_profiles):
                     self.log_message.emit(
                         f"{phase_label} {completed_profiles}/{total_profiles}: "
                         f"current_best={best_profile_text} "
@@ -5190,10 +8673,11 @@ class BacktestThread(QThread):
                         for line in cache_reader
                         if line.strip()
                     ]
-                self.log_message.emit(
-                    "Intermediate optimizer checkpoint cache restored: "
-                    f"{len(phase_results)} summaries loaded from disk."
-                )
+                if self._is_debug_mode():
+                    self.log_message.emit(
+                        "Intermediate optimizer checkpoint cache restored: "
+                        f"{len(phase_results)} summaries loaded from disk."
+                    )
             gc.collect()
         except Exception:
             if self._should_stop():
@@ -5240,10 +8724,11 @@ class BacktestThread(QThread):
             return {}
 
         strategy_label = strategy_name.replace("_", " ").title()
-        self.log_message.emit(
-            f"Precomputing {strategy_label} signal cache for {len(variant_profiles)} strategy variants "
-            "on main thread (single-process vectorized pass, indicator-only cache keys)."
-        )
+        if not self._is_quiet_mode():
+            self.log_message.emit(
+                f"Precomputing {strategy_label} signal cache for {len(variant_profiles)} strategy variants "
+                "on main thread (single-process vectorized pass, indicator-only cache keys)."
+            )
         self.progress_update.emit(
             progress_start,
             f"Precomputing {strategy_label} signals... 0/{len(variant_profiles)}",
@@ -5305,18 +8790,23 @@ class BacktestThread(QThread):
                 progress_span=progress_span,
             )
             progress_percent = int((completed_variants / len(variant_profiles)) * 100)
-            if completed_variants == len(variant_profiles) or progress_percent >= next_log_percent:
+            if (
+                self._is_debug_mode()
+                and (completed_variants == len(variant_profiles) or progress_percent >= next_log_percent)
+            ):
                 self.log_message.emit(
+                    f"{self._SIGNAL_CACHE_PROGRESS_LOG_PREFIX} "
                     f"{strategy_label} signal cache progress: "
                     f"{completed_variants}/{len(variant_profiles)} ({progress_percent}%)"
                 )
                 while next_log_percent <= progress_percent:
                     next_log_percent += 5
 
-        self.log_message.emit(
-            f"{strategy_label} signal cache prepared: {len(strategy_signal_cache)} strategy variants in RAM "
-            "using compact packed payloads."
-        )
+        if self._is_debug_mode():
+            self.log_message.emit(
+                f"{strategy_label} signal cache prepared: {len(strategy_signal_cache)} strategy variants in RAM "
+                "using compact packed payloads."
+            )
         return strategy_signal_cache
 
     def _clear_signal_caches_and_gc(self) -> None:
@@ -5362,46 +8852,48 @@ class BacktestThread(QThread):
         prefix: str,
     ) -> dict[str, object]:
         runtime_settings = engine.get_runtime_settings(self._symbol)
-        self.log_message.emit(
-            _format_leverage_log(
-                prefix=prefix,
-                symbol=self._symbol,
-                effective_leverage=runtime_settings.leverage,
-                configured_leverage=self._configured_leverage,
-                leverage_override=self._leverage_override,
-                manual_override_forced=self._manual_leverage_override,
+        if self._is_debug_mode():
+            self.log_message.emit(
+                _format_leverage_log(
+                    prefix=prefix,
+                    symbol=self._symbol,
+                    effective_leverage=runtime_settings.leverage,
+                    configured_leverage=self._configured_leverage,
+                    leverage_override=self._leverage_override,
+                    manual_override_forced=self._manual_leverage_override,
+                )
             )
-        )
-        self.log_message.emit(
-            _format_runtime_settings_log(
-                symbol=self._symbol,
-                interval=runtime_settings.interval,
-                runtime_leverage=runtime_settings.leverage,
-                configured_leverage=self._configured_leverage,
-                leverage_override=self._leverage_override,
-                manual_override_forced=self._manual_leverage_override,
-                stop_loss_pct=runtime_settings.stop_loss_pct,
-                take_profit_pct=runtime_settings.take_profit_pct,
-                trailing_activation_pct=runtime_settings.trailing_activation_pct,
-                trailing_distance_pct=runtime_settings.trailing_distance_pct,
-                breakeven_activation_pct=runtime_settings.breakeven_activation_pct,
-                breakeven_buffer_pct=runtime_settings.breakeven_buffer_pct,
-                tight_trailing_activation_pct=runtime_settings.tight_trailing_activation_pct,
-                tight_trailing_distance_pct=runtime_settings.tight_trailing_distance_pct,
+            self.log_message.emit(
+                _format_runtime_settings_log(
+                    symbol=self._symbol,
+                    interval=runtime_settings.interval,
+                    runtime_leverage=runtime_settings.leverage,
+                    configured_leverage=self._configured_leverage,
+                    leverage_override=self._leverage_override,
+                    manual_override_forced=self._manual_leverage_override,
+                    stop_loss_pct=runtime_settings.stop_loss_pct,
+                    take_profit_pct=runtime_settings.take_profit_pct,
+                    trailing_activation_pct=runtime_settings.trailing_activation_pct,
+                    trailing_distance_pct=runtime_settings.trailing_distance_pct,
+                    breakeven_activation_pct=runtime_settings.breakeven_activation_pct,
+                    breakeven_buffer_pct=runtime_settings.breakeven_buffer_pct,
+                    tight_trailing_activation_pct=runtime_settings.tight_trailing_activation_pct,
+                    tight_trailing_distance_pct=runtime_settings.tight_trailing_distance_pct,
+                )
             )
-        )
         effective_fee_pct = engine.get_effective_taker_fee_pct()
-        self.log_message.emit(
-            "Backtest fee stress active: "
-            f"taker_fee={effective_fee_pct:.4f}% per side "
-            f"(base={float(settings.trading.taker_fee_pct):.4f}%, "
-            f"multiplier={BACKTEST_FEE_STRESS_MULTIPLIER:.2f}x)."
-        )
-        self.log_message.emit(
-            "Backtest slippage penalty active: "
-            f"slippage={BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE:.4f}% per side "
-            f"({BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE:.4f}% round-trip)."
-        )
+        if self._is_debug_mode():
+            self.log_message.emit(
+                "Backtest fee stress active: "
+                f"taker_fee={effective_fee_pct:.4f}% per side "
+                f"(base={float(settings.trading.taker_fee_pct):.4f}%, "
+                f"multiplier={BACKTEST_FEE_STRESS_MULTIPLIER:.2f}x)."
+            )
+            self.log_message.emit(
+                "Backtest slippage penalty active: "
+                f"slippage={BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE:.4f}% per side "
+                f"({BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE:.4f}% round-trip)."
+            )
         runtime_trace = {
             "symbol": self._symbol,
             "resolved_interval": runtime_settings.interval,
@@ -5427,6 +8919,8 @@ class BacktestThread(QThread):
         return runtime_trace
 
     def _log_backtest_metrics(self, result: dict, *, prefix: str = "Backtest metrics") -> None:
+        if self._is_quiet_mode():
+            return
         avg_win_to_cost_ratio = float(result.get("average_win_to_cost_ratio", 0.0) or 0.0)
         total_slippage_penalty = float(result.get("total_slippage_penalty_usd", 0.0) or 0.0)
         dynamic_stop_loss_overrides = int(result.get("dynamic_stop_loss_overrides_applied", 0) or 0)
@@ -5466,6 +8960,8 @@ class BacktestThread(QThread):
         self.progress_update.emit(scaled_value, message)
         # Throttle terminal printing to avoid I/O blocking worker processes.
         try:
+            if self._is_quiet_mode():
+                return
             if sys.stdout is None or not sys.stdout.isatty():
                 return
             now = time.time()
@@ -5510,6 +9006,8 @@ class BacktestThread(QThread):
         self.progress_update.emit(scaled_value, message)
         # Throttle terminal printing to avoid I/O blocking worker processes.
         try:
+            if self._is_quiet_mode():
+                return
             if sys.stdout is None or not sys.stdout.isatty():
                 return
             now = time.time()
@@ -5578,37 +9076,39 @@ class BacktestThread(QThread):
             diagnostics_payload = vectorized_payload.get("strategy_diagnostics")
             if isinstance(diagnostics_payload, dict):
                 self._last_strategy_diagnostics = dict(diagnostics_payload)
+                if strategy_name == "ema_band_rejection":
+                    trend_ok = bool(int(diagnostics_payload.get("latest_trend_ok", 0) or 0))
+                    pullback_ok = bool(int(diagnostics_payload.get("latest_pullback_ok", 0) or 0))
+                    rejection_ok = bool(int(diagnostics_payload.get("latest_rejection_ok", 0) or 0))
+                    latest_signal = int(diagnostics_payload.get("latest_signal_direction", 0) or 0)
+                    latest_signal_text = "Long" if latest_signal > 0 else ("Short" if latest_signal < 0 else "None")
+                    yes_no = lambda value: "ja" if value else "nein"
+                    self.log_message.emit(
+                        "EMA Band Rejection status: "
+                        f"Trend OK={yes_no(trend_ok)} | "
+                        f"Pullback OK={yes_no(pullback_ok)} | "
+                        f"Rejection OK={yes_no(rejection_ok)} | "
+                        f"Signal={latest_signal_text} | "
+                        f"params={{ema:{int(diagnostics_payload.get('ema_fast', 5) or 5)}/"
+                        f"{int(diagnostics_payload.get('ema_mid', 10) or 10)}/"
+                        f"{int(diagnostics_payload.get('ema_slow', 20) or 20)}, "
+                        f"slope_lb:{int(diagnostics_payload.get('slope_lookback', 5) or 5)}, "
+                        f"spread%:{float(diagnostics_payload.get('min_ema_spread_pct', 0.05) or 0.05):.3f}, "
+                        f"rsi_filter:{int(diagnostics_payload.get('use_rsi_filter', 0) or 0)}, "
+                        f"vol_filter:{int(diagnostics_payload.get('use_volume_filter', 0) or 0)}, "
+                        f"atr_buffer:{int(diagnostics_payload.get('use_atr_stop_buffer', 0) or 0)}}}"
+                    )
             return (
                 list(vectorized_payload["signals"]),
                 int(vectorized_payload["total_signals"]),
                 int(vectorized_payload["approved_signals"]),
                 int(vectorized_payload["blocked_signals"]),
             )
-        effective_signal_profile = _resolve_soft_signal_profile(
-            strategy_name,
-            strategy_profile,
-        )
+        effective_signal_profile = strategy_profile
         signals: list[int] = []
         total_signals = 0
         approved_signals = 0
         blocked_signals = 0
-        volume_ratio_array: np.ndarray | None = None
-        if self._setup_gate is not None:
-            with suppress(Exception):
-                volume_period = max(2, int(getattr(settings.strategy, "volume_sma_period", 20)))
-                volume_series = pd.to_numeric(candles_df["volume"], errors="coerce")
-                volume_sma_series = volume_series.rolling(
-                    window=volume_period,
-                    min_periods=volume_period,
-                ).mean()
-                volume_values = volume_series.to_numpy(dtype=np.float64, copy=False)
-                volume_sma_values = volume_sma_series.to_numpy(dtype=np.float64, copy=False)
-                volume_ratio_array = np.divide(
-                    volume_values,
-                    volume_sma_values,
-                    out=np.full_like(volume_values, np.nan, dtype=np.float64),
-                    where=np.isfinite(volume_sma_values) & (volume_sma_values > 0.0),
-                )
         for index in range(len(candles_df)):
             if self._should_stop():
                 return signals, total_signals, approved_signals, blocked_signals
@@ -5637,25 +9137,11 @@ class BacktestThread(QThread):
                     normalized_direction,
                     strategy_name,
                 )
-                volume_ratio = float("nan")
-                if volume_ratio_array is not None and 0 <= index < int(volume_ratio_array.size):
-                    volume_ratio = float(volume_ratio_array[index])
-                has_soft_volume_approval = (
-                    math.isfinite(volume_ratio)
-                    and volume_ratio >= float(SOFT_APPROVAL_VOLUME_RATIO_MIN)
-                )
-                if not has_soft_volume_approval:
+                if not is_approved:
                     blocked_signals += 1
                     signal_direction = 0
                 else:
-                    if not is_approved:
-                        is_approved = True
-                    is_soft_leverage_band = volume_ratio < float(SOFT_APPROVAL_VOLUME_RATIO_FULL)
-                    signal_direction = (
-                        normalized_direction * int(SOFT_APPROVAL_SIGNAL_MULTIPLIER)
-                        if is_soft_leverage_band
-                        else normalized_direction
-                    )
+                    signal_direction = normalized_direction
                     approved_signals += 1
             elif signal_direction != 0:
                 total_signals += 1
@@ -5742,13 +9228,14 @@ class BacktestThread(QThread):
                 self._hmm_regime_labels = list(detection.regime_labels)
             allowed_candles = int(sum(regime_mask))
             total_candles = max(len(regime_mask), 1)
-            self.log_message.emit(
-                "HMM regime filter active: "
-                f"{allowed_candles}/{len(regime_mask)} candles allowed "
-                f"({(allowed_candles / total_candles) * 100:.1f}%), "
-                f"walk-forward windows={detection.window_count}, "
-                f"allowed_regimes={', '.join(allowed_regimes)}."
-            )
+            if not self._is_quiet_mode():
+                self.log_message.emit(
+                    "HMM regime filter active: "
+                    f"{allowed_candles}/{len(regime_mask)} candles allowed "
+                    f"({(allowed_candles / total_candles) * 100:.1f}%), "
+                    f"walk-forward windows={detection.window_count}, "
+                    f"allowed_regimes={', '.join(allowed_regimes)}."
+                )
             return regime_mask
         except Exception as exc:
             self.log_message.emit(
@@ -5788,6 +9275,11 @@ class BacktestThread(QThread):
             or (now_monotonic - self._history_progress_last_emit_monotonic) >= 1.5
         )
         if not should_emit:
+            return
+        if self._is_quiet_mode() and normalized_progress < 100:
+            self._history_progress_last_percent = normalized_progress
+            self._history_progress_last_stage = stage_key
+            self._history_progress_last_emit_monotonic = now_monotonic
             return
         self._history_progress_last_percent = normalized_progress
         self._history_progress_last_stage = stage_key

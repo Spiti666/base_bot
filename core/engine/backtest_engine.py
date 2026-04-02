@@ -105,9 +105,6 @@ def generate_compact_summary(result: Mapping[str, Any] | None) -> dict[str, Any]
             for trade in closed_trade_rows
         )
         average_trade_cost_usd = max(0.0, total_cost_usd / float(max(trade_count, 1)))
-    reentry_trades_count = _as_int(result.get("reentry_trades_count"), 0)
-    soft_leverage_trades_count = _as_int(result.get("soft_leverage_trades_count"), 0)
-    partial_tp_hits = _as_int(result.get("partial_tp_hits"), 0)
     real_leverage_avg = _as_float(result.get("real_leverage_avg"), 0.0)
     if not math.isfinite(real_leverage_avg):
         real_leverage_avg = 0.0
@@ -158,6 +155,7 @@ def generate_compact_summary(result: Mapping[str, Any] | None) -> dict[str, Any]
         "symbol": str(result.get("symbol", "") or "").strip().upper(),
         "strategy_name": str(result.get("strategy_name", "") or "").strip(),
         "interval": str(result.get("interval", "") or "").strip(),
+        "optimizer_quality_status": str(result.get("optimizer_quality_status", "") or "").strip().upper(),
         "net_pnl_usd": float(net_pnl_usd),
         "win_rate_pct": float(win_rate_pct),
         "robust_profit_factor": float(robust_profit_factor),
@@ -168,9 +166,6 @@ def generate_compact_summary(result: Mapping[str, Any] | None) -> dict[str, Any]
         "avg_win_fee_ratio_display": _ratio_display_text(avg_win_fee_ratio),
         "max_drawdown_pct": float(max_drawdown_pct),
         "average_trade_cost_usd": float(average_trade_cost_usd),
-        "reentry_trades_count": int(max(reentry_trades_count, 0)),
-        "soft_leverage_trades_count": int(max(soft_leverage_trades_count, 0)),
-        "partial_tp_hits": int(max(partial_tp_hits, 0)),
         "real_leverage_avg": float(max(real_leverage_avg, 0.0)),
         "slippage_penalty_pct_per_trade": _as_float(
             result.get("slippage_penalty_pct_per_trade"),

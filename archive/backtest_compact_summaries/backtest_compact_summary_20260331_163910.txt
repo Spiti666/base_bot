@@ -1,0 +1,73 @@
+Backtest Compact Summary
+Mode: Batch
+Status: stopped
+Started (UTC): 2026-03-31 16:24:37
+Finished (UTC): 2026-03-31 16:39:10
+Duration (s): 873
+Runs: 5
+Profitable Runs: 5
+Negative Runs: 0
+Verdict Exclusions: 0 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 1
+Infinite PF Runs: 0
+Total PnL USD: 969.46
+Average Profit Factor (finite runs): 7.18
+Median Profit Factor (finite runs): 7.62
+Average Profit Factor ex Low-Sample (finite runs): 6.00
+
+Run Environment
+Requested History Start UTC: 2025-01-01 00:00:00
+History Loader Mode: date_range_window
+Required Warmup Candles: 500
+Required Candles: 500
+Min Confidence %: 52.00
+Fee Stress Side %: 0.0625
+Leverage Mode: configured=effective
+Optimization Mode: yes
+Optimizer Workers: 16
+Sampling Mode: sample
+Search Window Candles: mixed(10912, 43648, 43649)
+Full-History Optimization: yes
+
+Run Details
+symbol | strategy | interval | leverage | real_leverage_avg | reentry_trades | soft_leverage_trades | partial_tp_hits | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top
+ETHUSDT | Dual Thrust | 15m | 25x | 25.00x | 0 | 0 | 17 | 2025-01-01 00:15:00 -> 2026-03-31 16:00:00 | 43648 | 22 | 21 | 1 | 95.45 | 4.00 | 10.00 | 6.00 | 0.15 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 155.80 | 8.68 | 47.37 | 38 | 0.42 | 12.10 | 9.78 | 9.65 | false | medium | yes | 12500 | 8 | 12500 | 60480 | sample | 20.67 | 43648 | 16 | yes | no | -
+  best_profile={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "chandelier_multiplier": 2.5, "chandelier_period": 30.0, "dual_thrust_k1": 1.8, "dual_thrust_k2": 0.8, "dual_thrust_period": 34.0, "stop_loss_pct": 4.0, "take_profit_pct": 10.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.15}
+ETHUSDT | Dual Thrust | 1h | 25x | 23.80x | 0 | 7 | 15 | 2025-01-01 00:00:00 -> 2026-03-31 15:00:00 | 10912 | 87 | 84 | 3 | 96.55 | 3.00 | 10.00 | 8.00 | 0.15 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 333.60 | 2.21 | 45.05 | 91 | 3.38 | 12.38 | 14.88 | 2.69 | false | medium | yes | 12500 | 8 | 12500 | 60480 | sample | 20.67 | 10912 | 16 | yes | no | -
+  best_profile={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "chandelier_multiplier": 1.5, "chandelier_period": 30.0, "dual_thrust_k1": 1.0, "dual_thrust_k2": 0.2, "dual_thrust_period": 55.0, "stop_loss_pct": 3.0, "take_profit_pct": 10.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 8.0, "trailing_distance_pct": 0.15}
+SOLUSDT | Dual Thrust | 15m | 25x | 24.43x | 0 | 1 | 16 | 2025-01-01 00:15:00 -> 2026-03-31 16:00:00 | 43648 | 23 | 23 | 0 | 100.00 | 1.50 | 10.00 | 6.00 | 0.15 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 159.56 | 7.62 | 38.46 | 39 | 0.48 | 14.95 | 12.24 | 12.19 | false | medium | yes | 12500 | 8 | 12500 | 60480 | sample | 20.67 | 43648 | 16 | yes | no | -
+  best_profile={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "chandelier_multiplier": 2.5, "chandelier_period": 30.0, "dual_thrust_k1": 1.0, "dual_thrust_k2": 0.3, "dual_thrust_period": 144.0, "stop_loss_pct": 1.5, "take_profit_pct": 10.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.15}
+SOLUSDT | Dual Thrust | 1h | 25x | 25.00x | 0 | 0 | 17 | 2025-01-01 00:00:00 -> 2026-03-31 15:00:00 | 10912 | 26 | 26 | 0 | 100.00 | 4.00 | 10.00 | 6.00 | 0.15 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 174.61 | 5.48 | 26.19 | 42 | 0.89 | 22.68 | 19.42 | 15.45 | false | medium | yes | 12500 | 8 | 12500 | 60480 | sample | 20.67 | 10912 | 16 | yes | no | -
+  best_profile={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "chandelier_multiplier": 2.5, "chandelier_period": 30.0, "dual_thrust_k1": 0.5, "dual_thrust_k2": 0.2, "dual_thrust_period": 144.0, "stop_loss_pct": 4.0, "take_profit_pct": 10.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.15}
+XRPUSDT | Dual Thrust | 15m | 25x | 25.00x | 0 | 0 | 8 | 2025-01-01 00:15:00 -> 2026-03-31 16:15:00 | 43649 | 13 | 13 | 0 | 100.00 | 2.00 | 15.00 | 8.00 | 0.15 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 145.89 | 11.91 | 14.29 | 21 | 0.29 | 59.03 | 53.09 | 71.47 | true | weak | yes | 12500 | 8 | 12500 | 60480 | sample | 20.67 | 43649 | 16 | yes | no | -
+  best_profile={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "chandelier_multiplier": 4.0, "chandelier_period": 30.0, "dual_thrust_k1": 0.5, "dual_thrust_k2": 0.8, "dual_thrust_period": 89.0, "stop_loss_pct": 2.0, "take_profit_pct": 15.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 8.0, "trailing_distance_pct": 0.15}
+
+Strategy Aggregates (All Coins)
+strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals | avg_reentry_trades | avg_soft_leverage_trades | avg_partial_tp_hits | avg_real_leverage
+Dual Thrust | 5 | 5 | 969.46 | 231 | 1 | 7.62 | 6.00 | 34.27 | 98.40 | 100.00 | 1.09 | 34.20 | 33.40 | 0.80 | 0.00 | 1.60 | 14.60 | 24.65
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     969.46 USD
+Profit-Faktor:       6.00 (Ziel: >= 1.2)
+Trefferquote:        38.10% (HAUPTFOKUS)
+Win-Rate Minimum:    > 55.00%
+Anzahl Trades:       231 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   3.38% (Warnung ab 15%)
+Ø Gewinn pro Trade:  0.1679% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 12 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    20.67% (Stichproben-Größe)
+Evaluated Profiles:  62500
+Validated Profiles:  40
+Force Full Scan:     0/5 run(s)
+Top Session Votes:   n/a
+Zufalls-Seed:        20260321
+--------------------------------------------------------------------------------
+URTEIL: WARNUNG
+GRUND: Durchschnittliche Trefferquote oder Profit-Faktor unterhalb der Robustheits-Grenze.
+================================================================================

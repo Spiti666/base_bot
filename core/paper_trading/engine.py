@@ -35,15 +35,6 @@ class PaperTradingEngine:
     TIGHT_TRAILING_DISTANCE_PCT = 0.0
     BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE = 0.05
     BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE = BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE * 2.0
-    SOFT_SIGNAL_LEVERAGE_SCALE = 0.5
-    SIGNAL_REENTRY_MAX_ATTEMPTS_PER_CYCLE = 3
-    SIGNAL_REENTRY_SOFT_VOLUME_RATIO_MIN = 1.1
-    SIGNAL_REENTRY_SOFT_VOLUME_RATIO_FULL = 1.5
-    SIGNAL_REENTRY_STOPLOSS_COOLDOWN_CANDLES = 5
-    SIGNAL_REENTRY_STOPLOSS_STREAK_TRIGGER = 2
-    PARTIAL_TAKE_PROFIT_CLOSE_RATIO = 0.40
-    PARTIAL_TAKE_PROFIT_TRIGGER_RATIO = 0.50
-    PARTIAL_REMAINDER_BREAKEVEN_BUFFER_PCT = 0.10
 
     def __init__(
         self,
@@ -123,6 +114,9 @@ class PaperTradingEngine:
         symbol: str,
         current_price: float,
         signal_direction: int,
+        *,
+        leverage_scale: float = 1.0,
+        risk_multiplier: float = 1.0,
     ) -> int | None:
         self._validate_signal_direction(signal_direction)
         self._validate_price(current_price)
@@ -146,12 +140,30 @@ class PaperTradingEngine:
             return None
 
         trade_settings = self._resolve_trade_settings(symbol)
-        margin_amount = current_equity * (self._trading_settings.risk_per_trade_pct / 100.0)
+        resolved_risk_multiplier = (
+            float(risk_multiplier)
+            if math.isfinite(float(risk_multiplier)) and float(risk_multiplier) > 0.0
+            else 1.0
+        )
+        resolved_leverage_scale = (
+            float(leverage_scale)
+            if math.isfinite(float(leverage_scale)) and float(leverage_scale) > 0.0
+            else 1.0
+        )
+        margin_amount = (
+            current_equity
+            * (self._trading_settings.risk_per_trade_pct / 100.0)
+            * resolved_risk_multiplier
+        )
         if margin_amount <= 0:
             return None
         if margin_amount > free_balance:
             return None
-        position_size_usd = margin_amount * trade_settings.leverage
+        effective_leverage = max(
+            1,
+            int(round(float(trade_settings.leverage) * resolved_leverage_scale)),
+        )
+        position_size_usd = margin_amount * effective_leverage
         quantity = position_size_usd / current_price
         entry_fee = self._calculate_fee(position_size_usd)
         side = "LONG" if signal_direction > 0 else "SHORT"
@@ -162,7 +174,7 @@ class PaperTradingEngine:
             entry_time=self._now(),
             entry_price=current_price,
             qty=quantity,
-            leverage=trade_settings.leverage,
+            leverage=effective_leverage,
             status="OPEN",
             total_fees=entry_fee,
             high_water_mark=current_price,
@@ -258,6 +270,8 @@ class PaperTradingEngine:
         chandelier_multiplier: float | None = None,
         strategy_exit_pre_take_profit: bool = False,
         max_bars_in_trade: int | None = None,
+        early_stop_max_trades: int | None = None,
+        early_stop_max_drawdown_pct: float | None = None,
         strategy_name: str | None = None,
     ) -> dict[str, Any]:
         if candle_rows is None:
@@ -279,9 +293,6 @@ class PaperTradingEngine:
                 "total_trades": 0,
                 "profit_factor": 0.0,
                 "closed_trades": [],
-                "reentry_trades_count": 0,
-                "soft_leverage_trades_count": 0,
-                "partial_tp_hits": 0,
                 "real_leverage_avg": 0.0,
                 "total_slippage_penalty_usd": 0.0,
                 "slippage_penalty_pct_per_side": float(self.BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE),
@@ -296,6 +307,18 @@ class PaperTradingEngine:
                 candidate_max_bars = int(max_bars_in_trade)
                 if 0 < candidate_max_bars < 10_000:
                     resolved_max_bars_in_trade = candidate_max_bars
+        resolved_early_stop_max_trades = None
+        if early_stop_max_trades is not None:
+            with suppress(Exception):
+                candidate_early_stop_trades = int(early_stop_max_trades)
+                if candidate_early_stop_trades > 0:
+                    resolved_early_stop_max_trades = candidate_early_stop_trades
+        resolved_early_stop_max_drawdown_pct = None
+        if early_stop_max_drawdown_pct is not None:
+            with suppress(Exception):
+                candidate_early_stop_drawdown_pct = float(early_stop_max_drawdown_pct)
+                if math.isfinite(candidate_early_stop_drawdown_pct) and candidate_early_stop_drawdown_pct > 0.0:
+                    resolved_early_stop_max_drawdown_pct = candidate_early_stop_drawdown_pct
         resolved_chandelier_period = (
             int(chandelier_period)
             if chandelier_period is not None
@@ -321,41 +344,20 @@ class PaperTradingEngine:
         else:
             chandelier_long_levels = [None] * len(candle_rows)
             chandelier_short_levels = [None] * len(candle_rows)
-
-        current_capital = self._trading_settings.start_capital
+        start_capital = float(self._trading_settings.start_capital)
+        current_capital = float(start_capital)
+        running_peak_capital = float(start_capital)
+        running_max_drawdown_pct = 0.0
         closed_trades: list[dict[str, Any]] = []
         open_trade: PaperTrade | None = None
         open_trade_entry_candle_index: int | None = None
         dynamic_risk_by_trade_id: dict[int, tuple[float | None, float | None]] = {}
-        partial_take_profit_taken_by_trade_id: dict[int, bool] = {}
-        breakeven_override_by_trade_id: dict[int, float] = {}
         dynamic_stop_loss_overrides_applied = 0
         dynamic_take_profit_overrides_applied = 0
         time_stop_exits = 0
         next_trade_id = 1
-        signal_cycle_direction = 0
-        signal_cycle_attempts = 0
-        pending_reentry_direction = 0
-        pending_reentry_after_index = -1
-        previous_signal_direction = 0
-        reentry_trades_count = 0
-        soft_leverage_trades_count = 0
-        partial_tp_hits = 0
         opened_trades_count = 0
         opened_trade_leverage_sum = 0.0
-        reentry_trade_flags_by_id: dict[int, bool] = {}
-        reentry_stoploss_streak_by_scope: dict[tuple[str, str, str], int] = {}
-        reentry_cooldown_until_by_scope: dict[tuple[str, str, str], int] = {}
-        resolved_interval = str(self._resolve_trade_settings(self._symbol).interval).strip().lower()
-        reentry_scope_key = (
-            str(self._symbol or "").strip().upper(),
-            str(strategy_name or "").strip().lower() or "unknown",
-            resolved_interval or "unknown",
-        )
-        volume_ratio_by_index = self._build_backtest_volume_ratio_series(
-            candle_rows,
-            volume_period=int(getattr(settings.strategy, "volume_sma_period", 20)),
-        )
         # Determine first approved signal index so warmup candles (e.g., Setup Gate) are excluded
         first_signal_index: int | None = None
         try:
@@ -366,25 +368,10 @@ class PaperTradingEngine:
         except Exception:
             first_signal_index = None
 
-        equity_series: list[float] = []
-
         for candle_index, (candle_row, signal_direction) in enumerate(zip(candle_rows, signals)):
             raw_signal_direction = int(signal_direction)
             self._validate_signal_direction(raw_signal_direction)
             normalized_signal_direction = self._normalize_signal_direction(raw_signal_direction)
-            if normalized_signal_direction == 0:
-                if (
-                    pending_reentry_direction != 0
-                    and candle_index > (pending_reentry_after_index + 1)
-                ):
-                    pending_reentry_direction = 0
-                    pending_reentry_after_index = -1
-            elif normalized_signal_direction != previous_signal_direction:
-                signal_cycle_direction = normalized_signal_direction
-                signal_cycle_attempts = 0
-                pending_reentry_direction = 0
-                pending_reentry_after_index = -1
-            previous_signal_direction = normalized_signal_direction
 
             if open_trade is not None:
                 trade_dynamic_stop_loss_pct = None
@@ -394,33 +381,11 @@ class PaperTradingEngine:
                         open_trade.id
                     ]
                 open_trade = self._apply_backtest_high_water_mark(open_trade, candle_row)
-                custom_breakeven_stop = breakeven_override_by_trade_id.get(open_trade.id)
                 exit_status, exit_price = self._resolve_backtest_stop_only(
                     open_trade,
                     candle_row,
                     dynamic_stop_loss_pct=trade_dynamic_stop_loss_pct,
                 )
-                if custom_breakeven_stop is not None:
-                    candle_high = float(candle_row["high"])
-                    candle_low = float(candle_row["low"])
-                    custom_triggered = (
-                        candle_low <= custom_breakeven_stop
-                        if open_trade.side == "LONG"
-                        else candle_high >= custom_breakeven_stop
-                    )
-                    if custom_triggered:
-                        if exit_status is None or exit_price is None:
-                            exit_status = "BREAKEVEN_STOP"
-                            exit_price = float(custom_breakeven_stop)
-                        else:
-                            if open_trade.side == "LONG":
-                                if float(custom_breakeven_stop) > float(exit_price):
-                                    exit_status = "BREAKEVEN_STOP"
-                                    exit_price = float(custom_breakeven_stop)
-                            else:
-                                if float(custom_breakeven_stop) < float(exit_price):
-                                    exit_status = "BREAKEVEN_STOP"
-                                    exit_price = float(custom_breakeven_stop)
                 if (
                     exit_status is None
                     and exit_price is None
@@ -442,77 +407,6 @@ class PaperTradingEngine:
                     if strategy_exit_status is not None:
                         exit_status = strategy_exit_status
                         exit_price = float(candle_row["close"])
-                if (
-                    exit_status is None
-                    and exit_price is None
-                    and not partial_take_profit_taken_by_trade_id.get(open_trade.id, False)
-                ):
-                    partial_tp_price = self._resolve_partial_take_profit_price(
-                        open_trade,
-                        candle_row,
-                        dynamic_take_profit_pct=trade_dynamic_take_profit_pct,
-                    )
-                    if partial_tp_price is not None:
-                        partial_close_qty = float(open_trade.qty) * float(
-                            self.PARTIAL_TAKE_PROFIT_CLOSE_RATIO
-                        )
-                        remaining_qty = float(open_trade.qty) - partial_close_qty
-                        if partial_close_qty > 0.0 and remaining_qty > 0.0:
-                            entry_fee_closed = float(open_trade.total_fees) * (
-                                partial_close_qty / float(open_trade.qty)
-                            )
-                            entry_fee_remaining = float(open_trade.total_fees) - entry_fee_closed
-                            partial_trade = PaperTrade(
-                                id=open_trade.id,
-                                symbol=open_trade.symbol,
-                                side=open_trade.side,
-                                entry_time=open_trade.entry_time,
-                                entry_price=open_trade.entry_price,
-                                qty=float(partial_close_qty),
-                                leverage=open_trade.leverage,
-                                status=open_trade.status,
-                                exit_time=open_trade.exit_time,
-                                exit_price=open_trade.exit_price,
-                                pnl=open_trade.pnl,
-                                total_fees=float(entry_fee_closed),
-                                high_water_mark=open_trade.high_water_mark,
-                            )
-                            partial_closed_trade = self._close_backtest_trade(
-                                partial_trade,
-                                exit_price=float(partial_tp_price),
-                                exit_time=self._resolve_backtest_time(candle_row),
-                                status="PARTIAL_TP",
-                            )
-                            current_capital += float(partial_closed_trade["pnl"])
-                            closed_trades.append(partial_closed_trade)
-                            open_trade = PaperTrade(
-                                id=open_trade.id,
-                                symbol=open_trade.symbol,
-                                side=open_trade.side,
-                                entry_time=open_trade.entry_time,
-                                entry_price=open_trade.entry_price,
-                                qty=float(remaining_qty),
-                                leverage=open_trade.leverage,
-                                status=open_trade.status,
-                                exit_time=open_trade.exit_time,
-                                exit_price=open_trade.exit_price,
-                                pnl=open_trade.pnl,
-                                total_fees=float(entry_fee_remaining),
-                                high_water_mark=open_trade.high_water_mark,
-                            )
-                            partial_tp_hits += 1
-                            partial_take_profit_taken_by_trade_id[open_trade.id] = True
-                            breakeven_buffer_ratio = (
-                                float(self.PARTIAL_REMAINDER_BREAKEVEN_BUFFER_PCT) / 100.0
-                            )
-                            if open_trade.side == "LONG":
-                                breakeven_override_by_trade_id[open_trade.id] = (
-                                    open_trade.entry_price * (1.0 + breakeven_buffer_ratio)
-                                )
-                            else:
-                                breakeven_override_by_trade_id[open_trade.id] = (
-                                    open_trade.entry_price * (1.0 - breakeven_buffer_ratio)
-                                )
                 if (
                     exit_status is None
                     and exit_price is None
@@ -544,7 +438,6 @@ class PaperTradingEngine:
                         exit_price = float(candle_row["close"])
                         time_stop_exits += 1
                 if exit_status is not None and exit_price is not None:
-                    exited_trade_side = str(open_trade.side).upper()
                     closed_trade = self._close_backtest_trade(
                         open_trade,
                         exit_price=exit_price,
@@ -554,103 +447,41 @@ class PaperTradingEngine:
                     current_capital += float(closed_trade["pnl"])
                     closed_trades.append(closed_trade)
                     dynamic_risk_by_trade_id.pop(open_trade.id, None)
-                    partial_take_profit_taken_by_trade_id.pop(open_trade.id, None)
-                    breakeven_override_by_trade_id.pop(open_trade.id, None)
-                    was_reentry_trade = bool(reentry_trade_flags_by_id.pop(open_trade.id, False))
-                    exited_trade_direction = 1 if exited_trade_side == "LONG" else -1
-                    if was_reentry_trade:
-                        stop_loss_statuses = {"CLOSED_SL", "STOP_LOSS", "SL", "STOP"}
-                        exit_status_text = str(exit_status).strip().upper()
-                        if exit_status_text in stop_loss_statuses:
-                            updated_streak = (
-                                int(reentry_stoploss_streak_by_scope.get(reentry_scope_key, 0))
-                                + 1
-                            )
-                            reentry_stoploss_streak_by_scope[reentry_scope_key] = updated_streak
-                            if updated_streak >= int(self.SIGNAL_REENTRY_STOPLOSS_STREAK_TRIGGER):
-                                reentry_cooldown_until_by_scope[reentry_scope_key] = (
-                                    candle_index + int(self.SIGNAL_REENTRY_STOPLOSS_COOLDOWN_CANDLES)
-                                )
-                                reentry_stoploss_streak_by_scope[reentry_scope_key] = 0
-                        else:
-                            reentry_stoploss_streak_by_scope[reentry_scope_key] = 0
-                    else:
-                        reentry_stoploss_streak_by_scope[reentry_scope_key] = 0
-                    if (
-                        exit_status in {"CLOSED_SL", "BREAKEVEN_STOP"}
-                        and exited_trade_direction == signal_cycle_direction
-                        and signal_cycle_attempts < int(self.SIGNAL_REENTRY_MAX_ATTEMPTS_PER_CYCLE)
-                    ):
-                        pending_reentry_direction = exited_trade_direction
-                        pending_reentry_after_index = candle_index
                     open_trade = None
                     open_trade_entry_candle_index = None
+                    if current_capital > running_peak_capital:
+                        running_peak_capital = float(current_capital)
+                    elif running_peak_capital > 0.0:
+                        running_max_drawdown_pct = max(
+                            running_max_drawdown_pct,
+                            ((running_peak_capital - current_capital) / running_peak_capital) * 100.0,
+                        )
+                    if (
+                        resolved_early_stop_max_trades is not None
+                        and resolved_early_stop_max_drawdown_pct is not None
+                        and len(closed_trades) >= resolved_early_stop_max_trades
+                        and start_capital > 0.0
+                    ):
+                        capital_drop_from_start_pct = max(
+                            0.0,
+                            ((start_capital - current_capital) / start_capital) * 100.0,
+                        )
+                        if (
+                            running_max_drawdown_pct > resolved_early_stop_max_drawdown_pct
+                            or capital_drop_from_start_pct > resolved_early_stop_max_drawdown_pct
+                        ):
+                            break
 
             if open_trade is not None:
                 continue
             if current_capital <= 0:
                 break
 
-            if (
-                pending_reentry_direction != 0
-                and candle_index > (pending_reentry_after_index + 1)
-            ):
-                pending_reentry_direction = 0
-                pending_reentry_after_index = -1
-            reentry_cooldown_until = int(
-                reentry_cooldown_until_by_scope.get(reentry_scope_key, -1)
-            )
-            reentry_cooldown_active = (
-                reentry_cooldown_until >= 0
-                and candle_index <= reentry_cooldown_until
-            )
-            if reentry_cooldown_active and pending_reentry_direction != 0:
-                pending_reentry_direction = 0
-                pending_reentry_after_index = -1
-
-            entry_signal_direction = raw_signal_direction
-            is_reentry_entry = False
-            if (
-                pending_reentry_direction != 0
-                and candle_index == (pending_reentry_after_index + 1)
-                and normalized_signal_direction == pending_reentry_direction
-                and pending_reentry_direction == signal_cycle_direction
-                and not reentry_cooldown_active
-            ):
-                if entry_signal_direction == 0:
-                    entry_signal_direction = int(pending_reentry_direction)
-                is_reentry_entry = True
-                pending_reentry_direction = 0
-                pending_reentry_after_index = -1
-            if entry_signal_direction == 0:
+            if raw_signal_direction == 0:
                 continue
 
-            normalized_entry_direction = self._normalize_signal_direction(entry_signal_direction)
-            if (
-                pending_reentry_direction != 0
-                and normalized_entry_direction == pending_reentry_direction
-                and candle_index >= (pending_reentry_after_index + 1)
-            ):
-                pending_reentry_direction = 0
-                pending_reentry_after_index = -1
-            if (
-                normalized_entry_direction == signal_cycle_direction
-                and signal_cycle_attempts >= int(self.SIGNAL_REENTRY_MAX_ATTEMPTS_PER_CYCLE)
-            ):
-                continue
-
+            normalized_entry_direction = normalized_signal_direction
             leverage_scale = 1.0
-            if self._is_soft_signal_direction(entry_signal_direction):
-                leverage_scale = float(self.SOFT_SIGNAL_LEVERAGE_SCALE)
-            elif candle_index < len(volume_ratio_by_index):
-                volume_ratio = float(volume_ratio_by_index[candle_index])
-                if (
-                    math.isfinite(volume_ratio)
-                    and float(self.SIGNAL_REENTRY_SOFT_VOLUME_RATIO_MIN)
-                    <= volume_ratio
-                    < float(self.SIGNAL_REENTRY_SOFT_VOLUME_RATIO_FULL)
-                ):
-                    leverage_scale = float(self.SOFT_SIGNAL_LEVERAGE_SCALE)
 
             dynamic_stop_loss_pct = self._resolve_dynamic_backtest_pct(
                 dynamic_stop_loss_pcts,
@@ -673,15 +504,8 @@ class PaperTradingEngine:
             if opened_trade is None:
                 continue
             open_trade = opened_trade
-            reentry_trade_flags_by_id[open_trade.id] = bool(is_reentry_entry)
             opened_trades_count += 1
             opened_trade_leverage_sum += float(open_trade.leverage)
-            if is_reentry_entry:
-                reentry_trades_count += 1
-            if leverage_scale < 1.0:
-                soft_leverage_trades_count += 1
-            if normalized_entry_direction == signal_cycle_direction:
-                signal_cycle_attempts += 1
             if dynamic_stop_loss_pct is not None:
                 dynamic_stop_loss_overrides_applied += 1
             if dynamic_take_profit_pct is not None:
@@ -705,9 +529,6 @@ class PaperTradingEngine:
             current_capital += float(closed_trade["pnl"])
             closed_trades.append(closed_trade)
             dynamic_risk_by_trade_id.pop(open_trade.id, None)
-            partial_take_profit_taken_by_trade_id.pop(open_trade.id, None)
-            breakeven_override_by_trade_id.pop(open_trade.id, None)
-            reentry_trade_flags_by_id.pop(open_trade.id, None)
             open_trade_entry_candle_index = None
 
         total_trades = len(closed_trades)
@@ -786,9 +607,6 @@ class PaperTradingEngine:
             "total_trades": total_trades,
             "profit_factor": profit_factor,
             "closed_trades": closed_trades,
-            "reentry_trades_count": int(reentry_trades_count),
-            "soft_leverage_trades_count": int(soft_leverage_trades_count),
-            "partial_tp_hits": int(partial_tp_hits),
             "real_leverage_avg": float(real_leverage_avg),
             "max_drawdown_pct": max_drawdown_pct,
             "longest_consecutive_losses": longest_consecutive_losses,
@@ -1430,74 +1248,6 @@ class PaperTradingEngine:
         if signal_direction < 0:
             return -1
         return 0
-
-    @classmethod
-    def _is_soft_signal_direction(cls, signal_direction: int) -> bool:
-        return abs(int(signal_direction)) >= 2
-
-    @classmethod
-    def _build_backtest_volume_ratio_series(
-        cls,
-        candle_rows: Sequence[dict[str, Any]],
-        *,
-        volume_period: int,
-    ) -> list[float]:
-        if not candle_rows:
-            return []
-        normalized_period = max(2, int(volume_period))
-        rolling_volumes: deque[float] = deque()
-        rolling_sum = 0.0
-        ratios: list[float] = [float("nan")] * len(candle_rows)
-        for index, candle_row in enumerate(candle_rows):
-            volume_value = float(candle_row.get("volume", 0.0) or 0.0)
-            if not math.isfinite(volume_value) or volume_value <= 0.0:
-                volume_value = 0.0
-            rolling_volumes.append(volume_value)
-            rolling_sum += volume_value
-            if len(rolling_volumes) > normalized_period:
-                rolling_sum -= rolling_volumes.popleft()
-            if len(rolling_volumes) < normalized_period:
-                continue
-            volume_sma = rolling_sum / float(normalized_period)
-            if not math.isfinite(volume_sma) or volume_sma <= 0.0:
-                continue
-            ratios[index] = volume_value / volume_sma
-        return ratios
-
-    def _resolve_partial_take_profit_price(
-        self,
-        trade: PaperTrade,
-        candle_row: dict[str, Any],
-        *,
-        dynamic_take_profit_pct: float | None = None,
-    ) -> float | None:
-        trade_settings = self._resolve_trade_settings(trade.symbol)
-        resolved_take_profit_pct = (
-            float(dynamic_take_profit_pct)
-            if (
-                dynamic_take_profit_pct is not None
-                and math.isfinite(float(dynamic_take_profit_pct))
-                and float(dynamic_take_profit_pct) > 0.0
-            )
-            else float(trade_settings.take_profit_pct)
-        )
-        partial_take_profit_ratio = (
-            (resolved_take_profit_pct / 100.0)
-            * float(self.PARTIAL_TAKE_PROFIT_TRIGGER_RATIO)
-        )
-        if not math.isfinite(partial_take_profit_ratio) or partial_take_profit_ratio <= 0.0:
-            return None
-        candle_high = float(candle_row["high"])
-        candle_low = float(candle_row["low"])
-        if trade.side == "LONG":
-            partial_tp_price = trade.entry_price * (1.0 + partial_take_profit_ratio)
-            if candle_high >= partial_tp_price:
-                return float(partial_tp_price)
-            return None
-        partial_tp_price = trade.entry_price * (1.0 - partial_take_profit_ratio)
-        if candle_low <= partial_tp_price:
-            return float(partial_tp_price)
-        return None
 
     @staticmethod
     def _extract_backtest_rows(candles_df: Any) -> list[dict[str, Any]]:

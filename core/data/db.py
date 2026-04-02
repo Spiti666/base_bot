@@ -675,6 +675,39 @@ class Database:
             return None
         return PaperTrade(*self._normalize_trade_row(row))
 
+    def fetch_recent_closed_trades(
+        self,
+        symbol: str,
+        *,
+        limit: int = 20,
+    ) -> list[PaperTrade]:
+        if limit <= 0:
+            raise ValueError("limit must be positive.")
+        rows = self._connection.execute(
+            """
+            SELECT
+                id,
+                symbol,
+                side,
+                entry_time,
+                entry_price,
+                qty,
+                leverage,
+                status,
+                exit_time,
+                exit_price,
+                pnl,
+                total_fees,
+                high_water_mark
+            FROM paper_trades
+            WHERE symbol = ? AND status <> 'OPEN' AND exit_time IS NOT NULL
+            ORDER BY exit_time DESC
+            LIMIT ?
+            """,
+            [symbol, int(limit)],
+        ).fetchall()
+        return [PaperTrade(*self._normalize_trade_row(row)) for row in rows]
+
     def insert_backtest_run(
         self,
         *,

@@ -29,7 +29,7 @@ FRAMA_VOLUME_CONFIRM_RATIO = 0.8
 FRAMA_VOLUME_SMA_WINDOW = 20
 
 
-@njit(nopython=True, cache=True)
+@njit(cache=True)
 def _frama_numba(
     close_values: np.ndarray,
     high_values: np.ndarray,
@@ -325,7 +325,7 @@ def _frama_numpy(
     return result
 
 
-@njit(nopython=True, cache=True)
+@njit(cache=True)
 def _build_crossover_masks_numba(
     fast_values: np.ndarray,
     slow_values: np.ndarray,

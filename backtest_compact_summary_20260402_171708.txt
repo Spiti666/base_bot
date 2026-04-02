@@ -1,0 +1,65 @@
+Backtest Compact Summary
+Mode: Batch
+Status: completed
+Started (UTC): 2026-04-02 17:14:34
+Finished (UTC): 2026-04-02 17:17:08
+Duration (s): 154
+Runs: 1
+Profitable Runs: 1
+Negative Runs: 0
+Verdict Exclusions: 0 run(s) (DOT/DOGE 15m ignored for final verdict)
+Low-Sample Runs (<= 25 trades): 0
+Infinite PF Runs: 0
+Total PnL USD: 5.77
+Average Profit Factor (finite runs): 1.01
+Median Profit Factor (finite runs): 1.01
+Average Profit Factor ex Low-Sample (finite runs): 1.01
+
+Run Environment
+Requested History Start UTC: 2024-01-01 00:00:00
+History Loader Mode: latest_tail_window
+Required Warmup Candles: 500
+Required Candles: 500
+Min Confidence %: 52.00
+Fee Stress Side %: 0.0625
+Leverage Mode: configured=effective
+Optimization Mode: yes
+Optimizer Workers: 28
+Sampling Mode: sample
+Search Window Candles: 34693
+Full-History Optimization: yes
+
+Run Details
+symbol | strategy | interval | leverage | real_leverage_avg | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top
+BTCUSDT | FRAMA Cross | 1h | 25x | 25.00x | 2022-04-17 16:00:00 -> 2026-04-02 16:00:00 | 34693 | 545 | 269 | 276 | 49.36 | 1.00 | 1.50 | 3.00 | 0.30 | 0.0625 | 500 | 52.00 | 0 | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | 5.77 | 1.01 | 41.73 | 266 | 6.84 | 6.78 | 9.84 | 1.40 | false | strong | yes | 12500 | 8 | 12500 | 56160 | sample | 22.26 | 34693 | 28 | yes | no | -
+  best_profile={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "frama_fast_period": 21.0, "frama_slow_period": 400.0, "stop_loss_pct": 1.0, "take_profit_pct": 1.5, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.3, "volume_multiplier": 1.0}
+
+Strategy Aggregates (All Coins)
+strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals | avg_real_leverage
+FRAMA Cross | 1 | 1 | 5.77 | 266 | 0 | 1.01 | 1.01 | 41.73 | 49.36 | 49.36 | 6.84 | 545.00 | 269.00 | 276.00 | 25.00
+
+================================================================================
+=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===
+================================================================================
+Gesamt-Ergebnis:     5.77 USD
+Profit-Faktor:       1.01 (Ziel: >= 1.2)
+Trefferquote:        41.73% (HAUPTFOKUS)
+Win-Rate Minimum:    > 55.00%
+Anzahl Trades:       266 (Wichtig: Aussagekräftig erst ab ~25 Trades)
+--------------------------------------------------------------------------------
+RISIKO- & GEBÜHREN-CHECK:
+Max. Kontoverlust:   6.84% (Warnung ab 15%)
+Ø Gewinn pro Trade:  0.0009% (Wichtig für Gebühren-Puffer)
+Längste Pechsträhne: 10 Trades in Folge verloren
+--------------------------------------------------------------------------------
+OPTIMIERER-INFO:
+Abdeckung (Grid):    22.26% (Stichproben-Größe)
+Evaluated Profiles:  12500
+Validated Profiles:  8
+Force Full Scan:     0/1 run(s)
+Top Session Votes:   n/a
+Zufalls-Seed:        20260321
+--------------------------------------------------------------------------------
+URTEIL: WARNUNG
+GRUND: Durchschnittliche Trefferquote oder Profit-Faktor unterhalb der Robustheits-Grenze.
+================================================================================

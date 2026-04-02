@@ -2,6 +2,7 @@ from __future__ import annotations
 
 AVAILABLE_STRATEGIES: tuple[str, ...] = (
     "ema_cross_volume",
+    "ema_band_rejection",
     "frama_cross",
     "dual_thrust",
     "supertrend_ema",
