@@ -3,32 +3,28 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import suppress
 import atexit
-import importlib
 import faulthandler
 import html
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import math
-import os
 import re
 import statistics
 import sys
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from traceback import format_exception
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
-from PyQt6.QtCore import QDate, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPalette, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDateEdit,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -51,13 +47,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-import config as config_module
-from config import BACKTEST_ONLY_COINS, settings
+from config import BACKTEST_BATCH_SYMBOLS, settings
 from core.data.db import Database
-from core.engine.backtest_engine import (
-    BacktestThread,
-    generate_compact_summary,
-)
+from core.engine.backtest_engine import BacktestThread
 from core.engine.live_engine import BotEngineThread
 from core.paper_trading.engine import PaperTradingEngine
 from main_engine import (
@@ -67,59 +59,41 @@ from main_engine import (
     resolve_interval_for_symbol,
     resolve_strategy_for_symbol,
 )
-from strategies.python.ema_band_rejection import build_ema_band_rejection_signal_frame
 from strategies.python.frama_cross import _calculate_frama_series as calculate_frama_series
 
 
 STRATEGY_LABELS = {
     "__auto__": "Auto (from Config)",
     "ema_cross_volume": "EMA Cross + Volume",
-    "ema_band_rejection": "EMA Band Rejection",
     "frama_cross": "FRAMA Cross",
     "dual_thrust": "Dual Thrust",
+    "rsi_extreme_cluster": "RSI Extreme Cluster",
 }
 BACKTEST_AUTO_STRATEGY = "__auto__"
-BACKTEST_MODE_STANDARD = "standard"
-BACKTEST_MODE_LIVE_VS_CHALLENGER = "live_vs_challenger"
 BACKTEST_STRATEGY_NAMES = (
     BACKTEST_AUTO_STRATEGY,
     "ema_cross_volume",
-    "ema_band_rejection",
     "frama_cross",
     "dual_thrust",
-)
-LIVE_VS_CHALLENGER_STRATEGIES: tuple[str, ...] = (
-    "frama_cross",
-    "dual_thrust",
-    "ema_band_rejection",
-    "ema_cross_volume",
-)
-BACKTEST_EXECUTION_MODES: tuple[tuple[str, str], ...] = (
-    (BACKTEST_MODE_STANDARD, "Standard"),
-    (BACKTEST_MODE_LIVE_VS_CHALLENGER, "Live vs Challenger"),
+    "rsi_extreme_cluster",
 )
 BACKTEST_INTERVAL_OPTIONS = tuple(
     interval
-    for interval in dict.fromkeys(("1m", "5m", "15m", "1h", "4h", str(settings.trading.interval)))
+    for interval in dict.fromkeys((settings.trading.interval, "1m", "15m", "1h", "4h"))
     if interval in settings.api.timeframes
 )
-BACKTEST_SYMBOL_GRID_COLUMNS = 5
-BACKTEST_INTERVAL_GRID_COLUMNS = 4
-BACKTEST_TRADE_WARNING_THRESHOLD = 20
-BACKTEST_DEPLOY_MIN_TRADE_COUNT = 25
-BACKTEST_DEPLOY_MIN_WIN_RATE_PCT = 55.0
-BACKTEST_DEPLOY_MIN_ROBUST_PF = 1.2
+BACKTEST_INTERVAL_SWEEP_SEQUENCE = tuple(
+    interval for interval in ("15m", "1h") if interval in BACKTEST_INTERVAL_OPTIONS
+)
 BACKTEST_REPORT_LOW_SAMPLE_TRADES_THRESHOLD = 25
 BACKTEST_REPORT_STRONG_SAMPLE_TRADES_THRESHOLD = 100
 GUI_LOG_DIRECTORY = Path("logs")
 GUI_RUNTIME_LOG_PATH = GUI_LOG_DIRECTORY / "gui_runtime.log"
 GUI_CRASH_LOG_PATH = GUI_LOG_DIRECTORY / "gui_crash.log"
 GUI_FAULTHANDLER_LOG_PATH = GUI_LOG_DIRECTORY / "gui_faulthandler.log"
-GUI_BACKTEST_DEBUG_LOG_PATH = GUI_LOG_DIRECTORY / "backtest_debug.log"
 _GUI_LOGGING_INITIALIZED = False
 _FAULTHANDLER_FILE_HANDLE = None
 BacktestBatchItem = tuple[str, str, str | None]
-BacktestRunContext = dict[str, object]
 
 
 def _configured_backtest_symbols() -> tuple[str, ...]:
@@ -127,80 +101,13 @@ def _configured_backtest_symbols() -> tuple[str, ...]:
         symbol
         for symbol in dict.fromkeys(
             str(raw_symbol).strip().upper()
-            for raw_symbol in (*settings.live.available_symbols, *BACKTEST_ONLY_COINS)
+            for raw_symbol in BACKTEST_BATCH_SYMBOLS
         )
         if symbol
     )
     if configured:
         return configured
     return tuple(settings.live.available_symbols)
-
-
-def _safe_numeric(value: object, default: float = 0.0) -> float:
-    if isinstance(value, (int, float)):
-        numeric = float(value)
-        if math.isnan(numeric):
-            return float(default)
-        return numeric
-    text = str(value).strip().upper() if value is not None else ""
-    if not text:
-        return float(default)
-    if text == "MAX":
-        return float("inf")
-    if text in {"INF", "+INF", "INFINITY", "+INFINITY"}:
-        return float("inf")
-    if text in {"-INF", "-INFINITY"}:
-        return float("-inf")
-    try:
-        numeric = float(text)
-    except (TypeError, ValueError):
-        return float(default)
-    if math.isnan(numeric):
-        return float(default)
-    return numeric
-
-
-def calculate_fitness_score(summary_data: object) -> float:
-    if not isinstance(summary_data, dict):
-        return float("-inf")
-
-    net_pnl_usd = _safe_numeric(
-        summary_data.get("net_pnl_usd", summary_data.get("total_pnl_usd", 0.0)),
-        0.0,
-    )
-    trade_count = int(max(0.0, _safe_numeric(
-        summary_data.get("trade_count", summary_data.get("total_trades", 0)),
-        0.0,
-    )))
-    win_rate_pct = _safe_numeric(summary_data.get("win_rate_pct", 0.0), 0.0)
-    # Parse robust PF defensively ("MAX"/"inf") to avoid edge-case crashes.
-    _ = _safe_numeric(
-        summary_data.get(
-            "robust_profit_factor",
-            summary_data.get(
-                "robust_profit_factor_display",
-                summary_data.get("profit_factor", 0.0),
-            ),
-        ),
-        0.0,
-    )
-
-    deploy_ready = (
-        trade_count >= int(BACKTEST_DEPLOY_MIN_TRADE_COUNT)
-        and win_rate_pct >= float(BACKTEST_DEPLOY_MIN_WIN_RATE_PCT)
-        and net_pnl_usd > 0.0
-    )
-    if not deploy_ready:
-        return float(net_pnl_usd - 10000.0)
-
-    score = float(net_pnl_usd * (win_rate_pct / 100.0))
-    if math.isnan(score):
-        return float("-inf")
-    if score == float("inf"):
-        return 1e18
-    if score == float("-inf"):
-        return -1e18
-    return score
 
 
 def _close_faulthandler_file() -> None:
@@ -389,19 +296,11 @@ class MetricCard(QFrame):
 
 class LiveSymbolCard(QFrame):
     clicked = pyqtSignal(str)
-    deploy_requested = pyqtSignal(str)
 
-    def __init__(
-        self,
-        symbol: str,
-        *,
-        compact: bool = False,
-        show_deploy_button: bool = False,
-    ) -> None:
+    def __init__(self, symbol: str, *, compact: bool = False) -> None:
         super().__init__()
         self.symbol = symbol
         self._compact = compact
-        self._show_deploy_button = show_deploy_button
         self._is_selected = False
         self._strategy_badge_text = "TREND"
         self._strategy_name_text = "-"
@@ -410,27 +309,15 @@ class LiveSymbolCard(QFrame):
         self._profit_factor: float | None = None
         self._win_rate: float | None = None
         self._trade_count: int | None = None
-        self._compact_summary: dict[str, object] | None = None
         self.setObjectName("LiveSymbolCard")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        if compact and show_deploy_button:
-            self.setMinimumHeight(102)
-            self.setMaximumHeight(126)
-        else:
-            self.setMinimumHeight(86 if compact else 102)
+        self.setMinimumHeight(86 if compact else 102)
 
         root_layout = QVBoxLayout(self)
-        if compact and show_deploy_button:
-            root_layout.setContentsMargins(8, 6, 8, 6)
-            root_layout.setSpacing(2)
-        elif compact:
-            root_layout.setContentsMargins(10, 8, 10, 8)
-            root_layout.setSpacing(4)
-        else:
-            root_layout.setContentsMargins(14, 12, 14, 12)
-            root_layout.setSpacing(6)
+        root_layout.setContentsMargins(10, 8, 10, 8) if compact else root_layout.setContentsMargins(14, 12, 14, 12)
+        root_layout.setSpacing(4 if compact else 6)
 
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
@@ -463,36 +350,11 @@ class LiveSymbolCard(QFrame):
         self.metrics_label.hide()
         root_layout.addWidget(self.metrics_label)
 
-        self.summary_row_1 = QLabel()
-        self.summary_row_1.setObjectName("BacktestSummaryRow")
-        self.summary_row_1.hide()
-        root_layout.addWidget(self.summary_row_1)
-        self.summary_row_2 = QLabel()
-        self.summary_row_2.setObjectName("BacktestSummaryRow")
-        self.summary_row_2.hide()
-        root_layout.addWidget(self.summary_row_2)
-        self.summary_row_3 = QLabel()
-        self.summary_row_3.setObjectName("BacktestSummaryRow")
-        self.summary_row_3.hide()
-        root_layout.addWidget(self.summary_row_3)
-
-        self.btn_deploy_live = QPushButton("Pending Optimization")
-        self.btn_deploy_live.setVisible(self._show_deploy_button)
-        if self._show_deploy_button:
-            self.btn_deploy_live.setMaximumHeight(22)
-        self.btn_deploy_live.clicked.connect(
-            lambda _checked=False, current_symbol=self.symbol: self.deploy_requested.emit(current_symbol)
-        )
-        if self._show_deploy_button:
-            root_layout.addWidget(self.btn_deploy_live)
-
         self.set_profit_factor(None)
         self.set_win_rate(None)
         self.set_trade_count(None)
-        self.set_compact_summary(None)
         self.set_strategy_badge("TREND")
         self.set_status("IDLE", TEXT_MUTED)
-        self.set_deploy_state("pending")
         self.set_selected(False)
 
     def set_profit_factor(self, value: float | None) -> None:
@@ -508,40 +370,6 @@ class LiveSymbolCard(QFrame):
         self._update_metric_label()
 
     def _update_metric_label(self) -> None:
-        if self._show_deploy_button:
-            self.metrics_label.hide()
-            summary = self._compact_summary or {}
-            if not summary:
-                for row_label in (self.summary_row_1, self.summary_row_2, self.summary_row_3):
-                    row_label.hide()
-                return
-
-            net_pnl_usd = float(summary.get("net_pnl_usd", 0.0) or 0.0)
-            win_rate_pct = float(summary.get("win_rate_pct", 0.0) or 0.0)
-            robust_pf_display = str(summary.get("robust_profit_factor_display", "0.00") or "0.00")
-            trade_count = int(summary.get("trade_count", 0) or 0)
-            max_drawdown_pct = float(summary.get("max_drawdown_pct", 0.0) or 0.0)
-            avg_win_usd = float(summary.get("avg_win_usd", 0.0) or 0.0)
-
-            pnl_color = ACCENT_PROFIT if net_pnl_usd > 0.0 else ACCENT_DANGER if net_pnl_usd < 0.0 else TEXT_MUTED
-            trades_color = ACCENT_WARNING if trade_count < BACKTEST_TRADE_WARNING_THRESHOLD else TEXT_PRIMARY
-
-            self.summary_row_1.setText(
-                f"PnL: <span style='color:{pnl_color};'>${net_pnl_usd:,.2f}</span> | "
-                f"Win-Rate: {win_rate_pct:.2f}%"
-            )
-            self.summary_row_2.setText(
-                f"PF: {robust_pf_display} | "
-                f"Trades: <span style='color:{trades_color};'>{trade_count}</span>"
-            )
-            self.summary_row_3.setText(
-                f"Max DD: {max_drawdown_pct:.2f}% | "
-                f"Avg Win: ${avg_win_usd:,.2f}"
-            )
-            for row_label in (self.summary_row_1, self.summary_row_2, self.summary_row_3):
-                row_label.show()
-            return
-
         if self._profit_factor is None and self._win_rate is None and self._trade_count is None:
             self.metrics_label.hide()
             return
@@ -563,16 +391,7 @@ class LiveSymbolCard(QFrame):
         self.metrics_label.setStyleSheet(f"color: {color}; font-weight: 600;")
         self.metrics_label.show()
 
-    def set_compact_summary(self, summary: dict[str, object] | None) -> None:
-        self._compact_summary = None if summary is None else dict(summary)
-        self._update_metric_label()
-
-    def set_strategy_badge(
-        self,
-        badge_text: str,
-        strategy_name: str | None = None,
-        interval: str | None = None,
-    ) -> None:
+    def set_strategy_badge(self, badge_text: str, strategy_name: str | None = None) -> None:
         self._strategy_badge_text = badge_text
         self.strategy_badge_label.setText(badge_text)
         if strategy_name:
@@ -581,17 +400,11 @@ class LiveSymbolCard(QFrame):
                 resolved_strategy_name,
                 resolved_strategy_name.replace("_", " ").title(),
             )
-            resolved_interval = str(interval).strip() if interval is not None else ""
-            if resolved_interval:
-                display_name = f"{display_name} ({resolved_interval})"
             self._set_strategy_name_text(display_name)
         else:
             self._set_strategy_name_text("-")
         if strategy_name:
-            if interval:
-                self.strategy_badge_label.setToolTip(f"{strategy_name} @ {interval}")
-            else:
-                self.strategy_badge_label.setToolTip(strategy_name)
+            self.strategy_badge_label.setToolTip(strategy_name)
         self._apply_card_style()
 
     def _set_strategy_name_text(self, strategy_name_text: str) -> None:
@@ -603,10 +416,7 @@ class LiveSymbolCard(QFrame):
             Qt.TextElideMode.ElideRight,
             max_width,
         )
-        if self._show_deploy_button and strategy_name_text.strip() and strategy_name_text.strip() != "-":
-            self.strategy_name_label.setText(f"[Winner: {elided_text}]")
-        else:
-            self.strategy_name_label.setText(elided_text)
+        self.strategy_name_label.setText(elided_text)
         if elided_text != strategy_name_text:
             self.strategy_name_label.setToolTip(strategy_name_text)
         else:
@@ -621,66 +431,6 @@ class LiveSymbolCard(QFrame):
     def set_selected(self, selected: bool) -> None:
         self._is_selected = selected
         self._apply_card_style()
-
-    def set_deploy_state(self, state: str) -> None:
-        if not self._show_deploy_button:
-            return
-        normalized_state = str(state).strip().lower()
-        if normalized_state == "ready":
-            self.btn_deploy_live.setEnabled(True)
-            self.btn_deploy_live.setText("🚀 Deploy to Live")
-            self.btn_deploy_live.setStyleSheet(
-                "QPushButton {"
-                "background-color: #1f5f2e;"
-                "color: #ecfff0;"
-                "border: 1px solid #2e7d42;"
-                "border-radius: 6px;"
-                "padding: 4px 10px;"
-                "font-weight: 700;"
-                "}"
-                "QPushButton:hover { background-color: #287b3b; }"
-            )
-            return
-        if normalized_state == "deployed":
-            self.btn_deploy_live.setEnabled(False)
-            self.btn_deploy_live.setText("LIVE ✅")
-            self.btn_deploy_live.setStyleSheet(
-                "QPushButton {"
-                "background-color: #205d33;"
-                "color: #e6ffe9;"
-                "border: 1px solid #2c7a46;"
-                "border-radius: 6px;"
-                "padding: 4px 10px;"
-                "font-weight: 700;"
-                "}"
-            )
-            return
-        if normalized_state == "blocked":
-            self.btn_deploy_live.setEnabled(False)
-            self.btn_deploy_live.setText("Needs Robustness")
-            self.btn_deploy_live.setStyleSheet(
-                "QPushButton {"
-                "background-color: #3a2b18;"
-                "color: #ffcc80;"
-                "border: 1px solid #7a5a2e;"
-                "border-radius: 6px;"
-                "padding: 4px 10px;"
-                "font-weight: 700;"
-                "}"
-            )
-            return
-        self.btn_deploy_live.setEnabled(False)
-        self.btn_deploy_live.setText("Pending Optimization")
-        self.btn_deploy_live.setStyleSheet(
-            "QPushButton {"
-            "background-color: #2a2a2a;"
-            "color: #8a8a8a;"
-            "border: 1px solid #3a3a3a;"
-            "border-radius: 6px;"
-            "padding: 4px 10px;"
-            "font-weight: 600;"
-            "}"
-        )
 
     def _apply_card_style(self) -> None:
         border_color = ACCENT_PRIMARY if self._is_selected else BORDER_COLOR
@@ -712,7 +462,7 @@ class LiveSymbolCard(QFrame):
                 background-color: transparent;
                 color: {ACCENT_WARNING};
                 font-size: {badge_font_size};
-                font-weight: 700;
+                font-weight: 600;
             }}
             QLabel#CoinStatusBadge {{
                 background-color: rgba(255, 255, 255, 0.04);
@@ -727,11 +477,6 @@ class LiveSymbolCard(QFrame):
                 color: {TEXT_MUTED};
                 font-size: {metrics_font_size};
             }}
-            QLabel#BacktestSummaryRow {{
-                color: {TEXT_MUTED};
-                font-size: {metrics_font_size};
-                font-weight: 600;
-            }}
             """
         )
 
@@ -745,12 +490,8 @@ class TradeReadinessBars(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self._items: list[dict[str, object]] = []
-        self.setMinimumHeight(126)
+        self.setMinimumHeight(110)
         self.setObjectName("TradeReadinessBars")
-        self._blink_timer = QTimer(self)
-        self._blink_timer.setInterval(450)
-        self._blink_timer.timeout.connect(self._on_blink_tick)
-        self._blink_timer.start()
         self.setStyleSheet(
             f"""
             QFrame#TradeReadinessBars {{
@@ -769,10 +510,6 @@ class TradeReadinessBars(QFrame):
         self._items = []
         self.update()
 
-    def _on_blink_tick(self) -> None:
-        if any(bool(item.get("eta_blink", False)) for item in self._items):
-            self.update()
-
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
         painter = QPainter(self)
@@ -786,10 +523,9 @@ class TradeReadinessBars(QFrame):
             return
 
         item_count = max(len(self._items), 1)
-        eta_height = 12
         label_height = 16
         value_height = 12
-        bar_area = draw_rect.adjusted(0, value_height, 0, -(label_height + eta_height))
+        bar_area = draw_rect.adjusted(0, value_height, 0, -label_height)
         if bar_area.height() <= 0:
             painter.end()
             return
@@ -801,9 +537,6 @@ class TradeReadinessBars(QFrame):
             symbol = str(item.get("symbol", "-"))
             score = max(0.0, min(100.0, float(item.get("score", 0.0) or 0.0)))
             color_hex = str(item.get("color", ACCENT_PRIMARY))
-            eta_text = str(item.get("eta_text", "--"))
-            eta_color_hex = str(item.get("eta_color", TEXT_MUTED))
-            eta_blink = bool(item.get("eta_blink", False))
             value_text = f"{int(round(score)):d}%"
 
             center_x = bar_area.left() + (index + 0.5) * slot_width
@@ -841,12 +574,6 @@ class TradeReadinessBars(QFrame):
                 -(draw_rect.right() - slot_right),
                 -(draw_rect.height() - value_height),
             )
-            text_rect_eta = draw_rect.adjusted(
-                slot_left - draw_rect.left(),
-                draw_rect.height() - (label_height + eta_height),
-                -(draw_rect.right() - slot_right),
-                -label_height,
-            )
             text_rect_bottom = draw_rect.adjusted(
                 slot_left - draw_rect.left(),
                 draw_rect.height() - label_height,
@@ -860,18 +587,6 @@ class TradeReadinessBars(QFrame):
                 int(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter),
                 value_text,
             )
-
-            eta_pen_color = eta_color_hex
-            if eta_blink:
-                blink_on = int(time.monotonic() * 2.0) % 2 == 0
-                eta_pen_color = "#39ff88" if blink_on else "#1f5d3a"
-            painter.setPen(QColor(eta_pen_color))
-            painter.drawText(
-                text_rect_eta,
-                int(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter),
-                eta_text,
-            )
-
             painter.setPen(QColor(TEXT_MUTED))
             painter.drawText(
                 text_rect_bottom,
@@ -884,10 +599,6 @@ class TradeReadinessBars(QFrame):
 
 class TradingTerminalWindow(QMainWindow):
     _HISTORY_PROGRESS_PREFIX = "[HISTORY_PROGRESS]"
-    _SIGNAL_CACHE_PROGRESS_PREFIX = "[SIGNAL_CACHE_PROGRESS]"
-    _BACKTEST_LOG_MODE_QUIET = "quiet"
-    _BACKTEST_LOG_MODE_STANDARD = "standard"
-    _BACKTEST_LOG_MODE_DEBUG = "debug"
     _MAX_LOG_LINES = 4000
     _BACKTEST_LOG_WRAP_COLUMNS = 120
     _MAX_BACKTEST_RESULT_TRADES = 5000
@@ -906,49 +617,32 @@ class TradingTerminalWindow(QMainWindow):
         self._live_profit_factors: dict[str, float] = {}
         self._live_win_rates: dict[str, float] = {}
         self._live_trade_counts: dict[str, int] = {}
-        self._live_runtime_profiles: dict[str, dict[str, object]] = {}
         self._backtest_profit_factors: dict[str, float] = {}
         self._backtest_win_rates: dict[str, float] = {}
         self._backtest_trade_counts: dict[str, int] = {}
-        self._backtest_compact_summaries: dict[str, dict[str, object]] = {}
-        self._backtest_best_profiles: dict[str, dict[str, float]] = {}
-        self._backtest_deployed_symbols: set[str] = set()
         self._coin_cards: dict[str, LiveSymbolCard] = {}
         self._selected_live_symbols: set[str] = set()
         self._backtest_coin_cards: dict[str, LiveSymbolCard] = {}
         self._selected_backtest_symbols: set[str] = set()
         self._backtest_strategy_buttons: dict[str, QPushButton] = {}
         self._selected_backtest_strategies: set[str] = set()
-        self._backtest_interval_buttons: dict[str, QPushButton] = {}
-        self._selected_backtest_intervals: set[str] = set()
         self._heartbeat_snapshot: dict[str, dict[str, object]] = {}
         self._realized_pnl_total = 0.0
         self._realized_pnl_today = 0.0
         self._equity_history: list[float] = []
         self._readiness_last_refresh_ts = 0.0
         self._readiness_refresh_interval_seconds = 2.0
-        self._readiness_runtime_settings = settings
-        self._readiness_config_file = Path(getattr(config_module, "__file__", "config.py")).resolve()
-        self._readiness_config_mtime_ns = 0
-        self._readiness_config_reload_error_mtime_ns: int | None = None
-        with suppress(OSError):
-            self._readiness_config_mtime_ns = self._readiness_config_file.stat().st_mtime_ns
         self._heartbeat_generation = 0
         self._bot_stop_requested = False
         self._backtest_stop_requested = False
         self._progress_generation = 0
         self._batch_queue: list[BacktestBatchItem] = []
-        self._batch_auto_strategy_flags: list[bool] = []
-        self._batch_run_context_queue: list[BacktestRunContext] = []
-        self._active_backtest_run_context: BacktestRunContext | None = None
         self._batch_active = False
-        self._batch_mode = BACKTEST_MODE_STANDARD
+        self._batch_mode = "standard"
         self._batch_total_symbols = 0
         self._batch_started_symbols: set[str] = set()
         self._batch_completed_symbols: set[str] = set()
         self._batch_symbol_remaining_runs: dict[str, int] = {}
-        self._live_vs_challenger_coin_results: dict[str, dict[str, object]] = {}
-        self._live_vs_challenger_last_export_path: Path | None = None
         self._backtest_report_started_at: datetime | None = None
         self._backtest_report_entries: list[dict[str, object]] = []
         self._backtest_report_errors: list[str] = []
@@ -957,11 +651,6 @@ class TradingTerminalWindow(QMainWindow):
         self._last_backtest_result: dict[str, object] | None = None
         self._analytics_splitter: QSplitter | None = None
         self._backtest_progress_log_active = False
-        self._active_backtest_log_mode = self._BACKTEST_LOG_MODE_STANDARD
-        self._active_backtest_log_context: dict[str, int] = {"coins": 1, "strategies": 1, "timeframes": 1}
-        self.backtest_table = None
-        self._backtest_period_user_modified = False
-        self._pending_close_request = False
 
         self.setWindowTitle("Bitunix Quant Station")
         self.resize(2048, 1152)
@@ -977,30 +666,12 @@ class TradingTerminalWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
-        backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
-
-        if bot_running:
-            self._stop_bot()
-        if backtest_running or self._batch_active:
-            self._stop_backtest()
-
-        bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
-        backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
-        if bot_running or backtest_running:
-            self._pending_close_request = True
-            self.statusBar().showMessage(
-                "Waiting for running threads to stop before closing...",
-                5000,
-            )
-            self._append_backtest_log(
-                "Close requested while a worker thread is still running. "
-                "Waiting for graceful shutdown to prevent thread destruction."
-            )
-            event.ignore()
-            return
-
-        self._pending_close_request = False
+        self._stop_bot()
+        if self._bot_thread is not None:
+            self._bot_thread.wait(5000)
+        if self._backtest_thread is not None:
+            self._backtest_thread.stop()
+            self._backtest_thread.wait(5000)
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -1220,21 +891,11 @@ class TradingTerminalWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(6)
-        self.coin_radar_title_label = QLabel("Coin Radar")
-        self.coin_radar_title_label.setStyleSheet("font-size: 15px; font-weight: 700;")
-        self.coin_radar_count_label = QLabel("(0)")
-        self.coin_radar_count_label.setStyleSheet(
-            f"font-size: 13px; font-weight: 700; color: {ACCENT_PRIMARY};"
-        )
-        title_row.addWidget(self.coin_radar_title_label)
-        title_row.addWidget(self.coin_radar_count_label)
-        title_row.addStretch(1)
+        title = QLabel("Coin Radar")
+        title.setStyleSheet("font-size: 15px; font-weight: 700;")
         subtitle = QLabel("Strategy-aware live universe")
         subtitle.setStyleSheet(f"color: {TEXT_MUTED};")
-        layout.addLayout(title_row)
+        layout.addWidget(title)
         layout.addWidget(subtitle)
 
         actions_row = QHBoxLayout()
@@ -1255,8 +916,6 @@ class TradingTerminalWindow(QMainWindow):
         self.live_symbols_scroll = QScrollArea()
         self.live_symbols_scroll.setWidgetResizable(True)
         self.live_symbols_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.live_symbols_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.live_symbols_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.live_symbols_scroll.setObjectName("CoinCardScroll")
 
         self.live_symbols_container = QWidget()
@@ -1272,7 +931,6 @@ class TradingTerminalWindow(QMainWindow):
         self.live_symbols_scroll.setWidget(self.live_symbols_container)
         layout.addWidget(self.live_symbols_scroll, 1)
 
-        self._update_coin_radar_count()
         self._select_default_live_symbols()
         return panel
 
@@ -1362,13 +1020,10 @@ class TradingTerminalWindow(QMainWindow):
         action_layout = QHBoxLayout()
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(8)
-        self.backtest_period_bar = self._build_backtest_period_bar()
-        button_layout.addWidget(self.backtest_period_bar)
         button_layout.addLayout(filter_layout)
         button_layout.addLayout(action_layout)
 
-        # Hidden compatibility controls: keep internal state wiring for existing
-        # backtest flows, but remove the visible header fields.
+        backtest_coin_label = QLabel("Backtest Coin")
         self.backtest_coin_combo = QComboBox()
         backtest_symbols = list(_configured_backtest_symbols())
         self.backtest_coin_combo.addItems(backtest_symbols)
@@ -1377,6 +1032,7 @@ class TradingTerminalWindow(QMainWindow):
             self.backtest_coin_combo.setCurrentText(backtest_symbols[0])
         self.backtest_coin_combo.currentTextChanged.connect(self._on_backtest_coin_changed)
 
+        backtest_strategy_label = QLabel("Backtest Strategy")
         self.backtest_strategy_combo = QComboBox()
         self._populate_strategy_combo(
             self.backtest_strategy_combo,
@@ -1386,17 +1042,11 @@ class TradingTerminalWindow(QMainWindow):
         self.backtest_strategy_combo.currentIndexChanged.connect(self._on_backtest_strategy_changed)
         self.backtest_strategy_combo.currentIndexChanged.connect(lambda _index: self._refresh_backtest_symbol_cards())
 
-        backtest_mode_label = QLabel("Mode")
-        self.backtest_mode_combo = QComboBox()
-        for mode_key, mode_label_text in BACKTEST_EXECUTION_MODES:
-            self.backtest_mode_combo.addItem(mode_label_text, mode_key)
-        self.backtest_mode_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        default_mode_index = self.backtest_mode_combo.findData(BACKTEST_MODE_STANDARD)
-        if default_mode_index >= 0:
-            self.backtest_mode_combo.setCurrentIndex(default_mode_index)
-        self.backtest_mode_combo.currentIndexChanged.connect(self._on_backtest_mode_changed)
-        filter_layout.addWidget(backtest_mode_label)
-        filter_layout.addWidget(self.backtest_mode_combo)
+        filter_layout.addWidget(backtest_coin_label)
+        filter_layout.addWidget(self.backtest_coin_combo)
+        filter_layout.addSpacing(8)
+        filter_layout.addWidget(backtest_strategy_label)
+        filter_layout.addWidget(self.backtest_strategy_combo)
         filter_layout.addSpacing(8)
 
         backtest_interval_label = QLabel("Timeframe")
@@ -1455,43 +1105,45 @@ class TradingTerminalWindow(QMainWindow):
         self.optimize_button.setCheckable(True)
         self.optimize_button.toggled.connect(lambda _checked: self._update_status_label())
         self.optimize_button.toggled.connect(lambda _checked: self._apply_button_states())
-        self.optimize_button.toggled.connect(lambda _checked: self._refresh_backtest_period_visuals())
         action_layout.addWidget(self.optimize_button)
         self.run_selected_button = QPushButton("Run Selected Coins")
         self.run_selected_button.clicked.connect(self._on_run_selected_clicked)
         action_layout.addWidget(self.run_selected_button)
+        self.run_selected_dual_interval_button = QPushButton("Run Selected 15m -> 1h")
+        self.run_selected_dual_interval_button.clicked.connect(
+            self._on_run_selected_dual_interval_clicked
+        )
+        action_layout.addWidget(self.run_selected_dual_interval_button)
         self.run_all_button = QPushButton("Run All Coins")
         self.run_all_button.clicked.connect(self._on_run_all_clicked)
         action_layout.addWidget(self.run_all_button)
         self.stop_backtest_button = QPushButton("Stop Backtest")
         self.stop_backtest_button.clicked.connect(self._stop_backtest)
         action_layout.addWidget(self.stop_backtest_button)
+        self.copy_summary_button = QPushButton("Copy Summary")
+        self.copy_summary_button.clicked.connect(self._copy_backtest_summary_to_clipboard)
+        action_layout.addWidget(self.copy_summary_button)
+        self.copy_backtest_button = QPushButton("Copy Backtest")
+        self.copy_backtest_button.clicked.connect(self._copy_backtest_table_to_clipboard)
+        action_layout.addWidget(self.copy_backtest_button)
         action_layout.addStretch(1)
         for action_button in (
             self.backtest_button,
             self.optimize_button,
             self.run_selected_button,
+            self.run_selected_dual_interval_button,
             self.run_all_button,
             self.stop_backtest_button,
+            self.copy_summary_button,
+            self.copy_backtest_button,
         ):
             action_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             action_button.setMinimumWidth(max(action_button.sizeHint().width() + 14, 136))
-        self._refresh_backtest_period_visuals()
         analytics_main_layout.addWidget(button_row)
 
-        selector_row_panel = QFrame()
-        selector_row_panel.setFrameShape(QFrame.Shape.NoFrame)
-        selector_row_layout = QHBoxLayout(selector_row_panel)
-        selector_row_layout.setContentsMargins(0, 0, 0, 0)
-        selector_row_layout.setSpacing(10)
-        timeframe_selector_panel = self._build_backtest_interval_selector()
-        strategy_selector_panel = self._build_backtest_strategy_selector()
-        selector_row_layout.addWidget(timeframe_selector_panel, 1)
-        selector_row_layout.addWidget(strategy_selector_panel, 1)
-        analytics_main_layout.addWidget(selector_row_panel)
-        self.backtest_selector_row_panel = selector_row_panel
         selector_panel = self._build_backtest_symbol_selector()
-        analytics_main_layout.addWidget(selector_panel, 1)
+        analytics_main_layout.addWidget(selector_panel)
+        analytics_main_layout.addWidget(self._build_backtest_strategy_selector())
 
         metrics_row = QFrame()
         metrics_row.setObjectName("DashboardPanel")
@@ -1506,7 +1158,16 @@ class TradingTerminalWindow(QMainWindow):
         metrics_layout.addWidget(self.backtest_win_rate_label, 1)
         metrics_layout.addWidget(self.backtest_total_trades_label, 1)
         analytics_main_layout.addWidget(metrics_row)
-        analytics_main_layout.addWidget(self._build_live_vs_challenger_results_panel())
+
+        self.backtest_table = self._build_backtest_table()
+        backtest_table_panel = QFrame()
+        backtest_table_panel.setObjectName("DashboardPanel")
+        backtest_table_layout = QVBoxLayout(backtest_table_panel)
+        backtest_table_layout.setContentsMargins(10, 10, 10, 10)
+        backtest_table_layout.setSpacing(8)
+        backtest_table_layout.addWidget(QLabel("Backtest Trades"))
+        backtest_table_layout.addWidget(self.backtest_table, 1)
+        analytics_main_layout.addWidget(backtest_table_panel, 1)
 
         backtest_log_panel = self._build_backtest_log_panel()
         analytics_splitter.addWidget(analytics_main)
@@ -1517,7 +1178,6 @@ class TradingTerminalWindow(QMainWindow):
         backtest_log_panel.setMinimumWidth(420)
         analytics_layout.addWidget(analytics_splitter, 1)
         QTimer.singleShot(0, self._apply_backtest_splitter_sizes)
-        self._apply_backtest_mode_ui_state()
         return analytics_tab
 
     def _build_backtest_log_panel(self) -> QFrame:
@@ -1565,48 +1225,6 @@ class TradingTerminalWindow(QMainWindow):
         layout.addWidget(self.backtest_log_output, 1)
         return panel
 
-    def _build_live_vs_challenger_results_panel(self) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("DashboardPanel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(6)
-
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(6)
-        title = QLabel("Live vs Challenger")
-        title.setStyleSheet("font-weight: 700;")
-        subtitle = QLabel("Per-coin baseline/challenger verdict overview")
-        subtitle.setStyleSheet(f"color: {TEXT_MUTED};")
-        header_layout.addWidget(title)
-        header_layout.addSpacing(6)
-        header_layout.addWidget(subtitle)
-        header_layout.addStretch(1)
-        layout.addLayout(header_layout)
-
-        self.live_vs_challenger_results_output = QTextEdit()
-        self.live_vs_challenger_results_output.setReadOnly(True)
-        self.live_vs_challenger_results_output.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.live_vs_challenger_results_output.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.live_vs_challenger_results_output.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        self.live_vs_challenger_results_output.setFont(QFont("Consolas", 10))
-        self.live_vs_challenger_results_output.setMinimumHeight(132)
-        self.live_vs_challenger_results_output.setMaximumHeight(210)
-        self.live_vs_challenger_results_output.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        layout.addWidget(self.live_vs_challenger_results_output)
-
-        self.live_vs_challenger_results_panel = panel
-        self._refresh_live_vs_challenger_results_view()
-        return panel
-
     def _build_backtest_symbol_selector(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("DashboardPanel")
@@ -1629,34 +1247,26 @@ class TradingTerminalWindow(QMainWindow):
         self.backtest_select_all_button = QPushButton("Select All")
         self.backtest_select_all_button.clicked.connect(self._select_all_backtest_symbols)
         header_layout.addWidget(self.backtest_select_all_button)
-        self.backtest_clear_cards_button = QPushButton("Clear Cards")
-        self.backtest_clear_cards_button.clicked.connect(self._clear_backtest_coin_cards)
-        header_layout.addWidget(self.backtest_clear_cards_button)
         layout.addLayout(header_layout)
 
         self.backtest_symbols_scroll = QScrollArea()
         self.backtest_symbols_scroll.setWidgetResizable(True)
         self.backtest_symbols_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.backtest_symbols_scroll.setObjectName("CoinCardScroll")
-        self.backtest_symbols_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.backtest_symbols_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.backtest_symbols_container = QWidget()
         self.backtest_symbols_layout = QGridLayout(self.backtest_symbols_container)
         self.backtest_symbols_layout.setContentsMargins(0, 0, 0, 0)
         self.backtest_symbols_layout.setSpacing(4)
         for symbol in _configured_backtest_symbols():
-            card = LiveSymbolCard(symbol, compact=True, show_deploy_button=True)
+            card = LiveSymbolCard(symbol, compact=True)
             card.clicked.connect(self._toggle_backtest_symbol_selection)
-            card.deploy_requested.connect(self._deploy_backtest_symbol_to_live)
             self._backtest_coin_cards[symbol] = card
         self._rebuild_backtest_symbol_grid()
         self.backtest_symbols_scroll.setWidget(self.backtest_symbols_container)
         layout.addWidget(self.backtest_symbols_scroll, 1)
-        QTimer.singleShot(0, self._sync_backtest_symbol_selector_viewport)
 
         self._select_default_backtest_symbols()
-        self._sync_backtest_symbol_universe()
         return panel
 
     def _build_backtest_strategy_selector(self) -> QFrame:
@@ -1683,25 +1293,16 @@ class TradingTerminalWindow(QMainWindow):
         strategy_grid.setContentsMargins(0, 0, 0, 0)
         strategy_grid.setHorizontalSpacing(8)
         strategy_grid.setVerticalSpacing(8)
-        strategy_buttons: list[QPushButton] = []
         for index, strategy_name in enumerate(BACKTEST_STRATEGY_NAMES):
             button = QPushButton(STRATEGY_LABELS.get(strategy_name, strategy_name))
             button.setCheckable(True)
-            button.setFixedHeight(28)
-            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.toggled.connect(
                 lambda checked, name=strategy_name: self._toggle_backtest_strategy_selection(name, checked)
             )
             self._backtest_strategy_buttons[strategy_name] = button
-            strategy_buttons.append(button)
             row = index // 2
             column = index % 2
             strategy_grid.addWidget(button, row, column)
-        if strategy_buttons:
-            # Add safety padding so long labels do not clip with theme/border rendering.
-            strategy_width = max(button.sizeHint().width() for button in strategy_buttons) + 26
-            for button in strategy_buttons:
-                button.setFixedWidth(strategy_width)
         strategy_grid.setColumnStretch(0, 1)
         strategy_grid.setColumnStretch(1, 1)
         layout.addLayout(strategy_grid)
@@ -1709,243 +1310,11 @@ class TradingTerminalWindow(QMainWindow):
         self._select_default_backtest_strategies()
         return panel
 
-    def _build_backtest_interval_selector(self) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("DashboardPanel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(6)
-        title = QLabel("Batch Timeframe Selection")
-        title.setStyleSheet("font-weight: 700;")
-        subtitle = QLabel("Select one or multiple timeframes for sequential runs")
-        subtitle.setStyleSheet(f"color: {TEXT_MUTED};")
-        header_layout.addWidget(title)
-        header_layout.addSpacing(6)
-        header_layout.addWidget(subtitle)
-        header_layout.addStretch(1)
-
-        self.backtest_select_all_intervals_button = QPushButton("All TF")
-        self.backtest_select_all_intervals_button.clicked.connect(self._select_all_backtest_intervals)
-        header_layout.addWidget(self.backtest_select_all_intervals_button)
-
-        self.backtest_single_interval_button = QPushButton("Primary TF")
-        self.backtest_single_interval_button.clicked.connect(self._select_primary_backtest_interval)
-        header_layout.addWidget(self.backtest_single_interval_button)
-
-        layout.addLayout(header_layout)
-
-        interval_grid = QGridLayout()
-        interval_grid.setContentsMargins(0, 0, 0, 0)
-        interval_grid.setHorizontalSpacing(6)
-        interval_grid.setVerticalSpacing(0)
-        interval_buttons: list[QPushButton] = []
-        for index, interval in enumerate(BACKTEST_INTERVAL_OPTIONS):
-            button = QPushButton(interval)
-            button.setCheckable(True)
-            button.setFixedHeight(28)
-            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            button.toggled.connect(
-                lambda checked, value=interval: self._toggle_backtest_interval_selection(value, checked)
-            )
-            self._backtest_interval_buttons[interval] = button
-            interval_buttons.append(button)
-            interval_grid.addWidget(button, 0, index, Qt.AlignmentFlag.AlignLeft)
-        if interval_buttons:
-            interval_width = max(button.sizeHint().width() for button in interval_buttons) + 12
-            for button in interval_buttons:
-                button.setFixedWidth(interval_width)
-        layout.addLayout(interval_grid)
-
-        self._select_default_backtest_intervals()
-        return panel
-
-    @staticmethod
-    def _parse_utc_date_only(value: object, fallback: QDate) -> QDate:
-        text = str(value or "").strip()
-        if not text:
-            return fallback
-        with suppress(Exception):
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            if parsed.tzinfo is not None:
-                parsed = parsed.astimezone(UTC).replace(tzinfo=None)
-            return QDate(parsed.year, parsed.month, parsed.day)
-        return fallback
-
-    def _default_backtest_period_start_date(self, *, optimize_mode: bool) -> QDate:
-        fallback = QDate.currentDate().addYears(-1)
-        configured_value = (
-            settings.trading.optimizer_history_start_utc
-            if optimize_mode
-            else settings.trading.backtest_history_start_utc
-        )
-        return self._parse_utc_date_only(configured_value, fallback)
-
-    def _build_backtest_period_bar(self) -> QFrame:
-        bar = QFrame()
-        bar.setObjectName("BacktestPeriodBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        title = QLabel("Period (UTC)")
-        title.setStyleSheet("font-weight: 700;")
-        layout.addWidget(title)
-
-        today = QDate.currentDate()
-        min_date = QDate(2018, 1, 1)
-        max_date = today.addYears(1)
-
-        self.backtest_period_start_edit = QDateEdit()
-        self.backtest_period_start_edit.setCalendarPopup(True)
-        self.backtest_period_start_edit.setDisplayFormat("yyyy-MM-dd")
-        self.backtest_period_start_edit.setMinimumDate(min_date)
-        self.backtest_period_start_edit.setMaximumDate(max_date)
-        self.backtest_period_start_edit.setDate(self._default_backtest_period_start_date(optimize_mode=False))
-        self.backtest_period_start_edit.dateChanged.connect(self._on_backtest_period_changed)
-        self.backtest_period_start_edit.setFixedWidth(124)
-        layout.addWidget(self.backtest_period_start_edit)
-
-        arrow_label = QLabel("->")
-        arrow_label.setStyleSheet(f"color: {TEXT_MUTED}; font-weight: 700;")
-        layout.addWidget(arrow_label)
-
-        self.backtest_period_end_edit = QDateEdit()
-        self.backtest_period_end_edit.setCalendarPopup(True)
-        self.backtest_period_end_edit.setDisplayFormat("yyyy-MM-dd")
-        self.backtest_period_end_edit.setMinimumDate(min_date)
-        self.backtest_period_end_edit.setMaximumDate(max_date)
-        self.backtest_period_end_edit.setDate(today)
-        self.backtest_period_end_edit.dateChanged.connect(self._on_backtest_period_changed)
-        self.backtest_period_end_edit.setFixedWidth(124)
-        layout.addWidget(self.backtest_period_end_edit)
-
-        quick_presets = (
-            ("2024-Full", "2024"),
-            ("2025-Full", "2025"),
-            ("YTD", "ytd"),
-        )
-        for label_text, preset_key in quick_presets:
-            button = QPushButton(label_text)
-            button.setFixedHeight(24)
-            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            button.clicked.connect(lambda _checked=False, preset=preset_key: self._select_backtest_period_preset(preset))
-            layout.addWidget(button)
-
-        self.backtest_period_span_label = QLabel("")
-        self.backtest_period_span_label.setStyleSheet(f"color: {TEXT_MUTED}; font-weight: 600;")
-        layout.addWidget(self.backtest_period_span_label)
-
-        self.backtest_walkforward_strip = QFrame()
-        self.backtest_walkforward_strip.setVisible(False)
-        strip_layout = QHBoxLayout(self.backtest_walkforward_strip)
-        strip_layout.setContentsMargins(0, 0, 0, 0)
-        strip_layout.setSpacing(0)
-        self.backtest_walkforward_in_sample = QLabel("In-Sample")
-        self.backtest_walkforward_in_sample.setAlignment(
-            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.backtest_walkforward_out_sample = QLabel("Out-of-Sample")
-        self.backtest_walkforward_out_sample.setAlignment(
-            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.backtest_walkforward_in_sample.setStyleSheet(
-            "background:#1f5f7a; color:#e7f5ff; border:1px solid #2f7ea4; border-top-left-radius:5px; border-bottom-left-radius:5px; padding:1px 6px; font-size:10px; font-weight:700;"
-        )
-        self.backtest_walkforward_out_sample.setStyleSheet(
-            "background:#4e6b29; color:#e8ffe0; border:1px solid #67863a; border-left:none; border-top-right-radius:5px; border-bottom-right-radius:5px; padding:1px 6px; font-size:10px; font-weight:700;"
-        )
-        strip_layout.addWidget(self.backtest_walkforward_in_sample, 7)
-        strip_layout.addWidget(self.backtest_walkforward_out_sample, 3)
-        layout.addWidget(self.backtest_walkforward_strip)
-
-        layout.addStretch(1)
-        self._refresh_backtest_period_visuals()
-        return bar
-
-    def _on_backtest_period_changed(self, _value: QDate) -> None:
-        self._backtest_period_user_modified = True
-        start_date = self.backtest_period_start_edit.date()
-        end_date = self.backtest_period_end_edit.date()
-        if end_date < start_date:
-            if self.sender() is self.backtest_period_start_edit:
-                self.backtest_period_end_edit.blockSignals(True)
-                self.backtest_period_end_edit.setDate(start_date)
-                self.backtest_period_end_edit.blockSignals(False)
-            else:
-                self.backtest_period_start_edit.blockSignals(True)
-                self.backtest_period_start_edit.setDate(end_date)
-                self.backtest_period_start_edit.blockSignals(False)
-        self._refresh_backtest_period_visuals()
-
-    def _select_backtest_period_preset(self, preset: str) -> None:
-        today = datetime.now(UTC).date()
-        if preset == "2024":
-            start_date = QDate(2024, 1, 1)
-            end_date = QDate(2024, 12, 31)
-        elif preset == "2025":
-            start_date = QDate(2025, 1, 1)
-            end_date = QDate(2025, 12, 31)
-        else:
-            start_date = QDate(today.year, 1, 1)
-            end_date = QDate(today.year, today.month, today.day)
-        self.backtest_period_start_edit.blockSignals(True)
-        self.backtest_period_end_edit.blockSignals(True)
-        self.backtest_period_start_edit.setDate(start_date)
-        self.backtest_period_end_edit.setDate(end_date)
-        self.backtest_period_start_edit.blockSignals(False)
-        self.backtest_period_end_edit.blockSignals(False)
-        self._backtest_period_user_modified = True
-        self._refresh_backtest_period_visuals()
-
-    def _current_backtest_history_range(self) -> tuple[datetime | None, datetime | None]:
-        if not hasattr(self, "backtest_period_start_edit") or not hasattr(self, "backtest_period_end_edit"):
-            return None, None
-        start_date = self.backtest_period_start_edit.date()
-        end_date = self.backtest_period_end_edit.date()
-        if not start_date.isValid() or not end_date.isValid():
-            return None, None
-        if end_date < start_date:
-            end_date = start_date
-        start_utc = datetime(start_date.year(), start_date.month(), start_date.day())
-        end_utc_exclusive = (
-            datetime(end_date.year(), end_date.month(), end_date.day())
-            + timedelta(days=1)
-        )
-        return start_utc, end_utc_exclusive
-
-    def _refresh_backtest_period_visuals(self) -> None:
-        if not hasattr(self, "backtest_period_start_edit") or not hasattr(self, "backtest_period_end_edit"):
-            return
-        start_date = self.backtest_period_start_edit.date()
-        end_date = self.backtest_period_end_edit.date()
-        span_days = max(1, start_date.daysTo(end_date) + 1)
-        self.backtest_period_span_label.setText(f"Window: {span_days}d")
-        walk_forward_active = bool(
-            getattr(settings.trading, "use_hmm_regime_filter", False)
-            and hasattr(self, "optimize_button")
-            and self.optimize_button.isChecked()
-        )
-        self.backtest_walkforward_strip.setVisible(walk_forward_active)
-
-    def _set_backtest_period_controls_enabled(self, enabled: bool) -> None:
-        if hasattr(self, "backtest_period_start_edit"):
-            self.backtest_period_start_edit.setEnabled(enabled)
-        if hasattr(self, "backtest_period_end_edit"):
-            self.backtest_period_end_edit.setEnabled(enabled)
-        if hasattr(self, "backtest_period_bar"):
-            for button in self.backtest_period_bar.findChildren(QPushButton):
-                button.setEnabled(enabled)
-
     @staticmethod
     def _populate_strategy_combo(
         combo_box: QComboBox,
         *,
         strategy_names: tuple[str, ...] | None = None,
-        select_default: bool = False,
     ) -> None:
         combo_box.clear()
         available_names = (
@@ -1958,90 +1327,12 @@ class TradingTerminalWindow(QMainWindow):
                 STRATEGY_LABELS.get(strategy_name, strategy_name),
                 strategy_name,
             )
-        combo_box.setPlaceholderText("Strategie wählen")
-        if not select_default:
-            combo_box.setCurrentIndex(-1)
-            return
         if BACKTEST_AUTO_STRATEGY in available_names:
             default_strategy_index = combo_box.findData(BACKTEST_AUTO_STRATEGY)
         else:
             default_strategy_index = combo_box.findData(settings.strategy.default_strategy_name)
         if default_strategy_index >= 0:
             combo_box.setCurrentIndex(default_strategy_index)
-        else:
-            combo_box.setCurrentIndex(-1)
-
-    def _current_backtest_execution_mode(self) -> str:
-        if not hasattr(self, "backtest_mode_combo"):
-            return BACKTEST_MODE_STANDARD
-        return str(self.backtest_mode_combo.currentData() or BACKTEST_MODE_STANDARD)
-
-    def _current_backtest_execution_mode_label(self) -> str:
-        mode = self._current_backtest_execution_mode()
-        for mode_key, mode_label in BACKTEST_EXECUTION_MODES:
-            if mode_key == mode:
-                return mode_label
-        return "Standard"
-
-    def _is_live_vs_challenger_mode_active(self) -> bool:
-        return self._current_backtest_execution_mode() == BACKTEST_MODE_LIVE_VS_CHALLENGER
-
-    def _on_backtest_mode_changed(self, _index: int) -> None:
-        mode_label = self._current_backtest_execution_mode_label()
-        self._append_backtest_log(f"Backtest execution mode set to: {mode_label}")
-        self._apply_backtest_mode_ui_state()
-        self._update_status_label()
-
-    def _apply_backtest_mode_ui_state(self) -> None:
-        mode_is_live_vs_challenger = self._is_live_vs_challenger_mode_active()
-        backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
-        controls_locked = backtest_running or self._batch_active
-
-        if hasattr(self, "backtest_mode_combo"):
-            tooltip = (
-                "Standard Backtest/Optimizer flow"
-                if not mode_is_live_vs_challenger
-                else (
-                    "Live baseline vs challenger strategies. "
-                    "Uses production profile per live coin as baseline."
-                )
-            )
-            self.backtest_mode_combo.setToolTip(tooltip)
-            self.backtest_mode_combo.setEnabled(not controls_locked)
-
-        strategy_controls_enabled = (not mode_is_live_vs_challenger) and (not controls_locked)
-        interval_controls_enabled = (not mode_is_live_vs_challenger) and (not controls_locked)
-        if hasattr(self, "backtest_strategy_combo"):
-            self.backtest_strategy_combo.setEnabled(strategy_controls_enabled)
-        if hasattr(self, "backtest_interval_combo"):
-            self.backtest_interval_combo.setEnabled(interval_controls_enabled)
-        for button in self._backtest_strategy_buttons.values():
-            button.setEnabled((not mode_is_live_vs_challenger) and (not controls_locked))
-        for button in self._backtest_interval_buttons.values():
-            button.setEnabled((not mode_is_live_vs_challenger) and (not controls_locked))
-        if hasattr(self, "backtest_select_all_intervals_button"):
-            self.backtest_select_all_intervals_button.setEnabled(
-                (not mode_is_live_vs_challenger) and (not controls_locked)
-            )
-        if hasattr(self, "backtest_single_interval_button"):
-            self.backtest_single_interval_button.setEnabled(
-                (not mode_is_live_vs_challenger) and (not controls_locked)
-            )
-
-        if hasattr(self, "live_vs_challenger_results_panel"):
-            has_results = bool(self._live_vs_challenger_coin_results)
-            self.live_vs_challenger_results_panel.setVisible(
-                mode_is_live_vs_challenger or has_results
-            )
-            if mode_is_live_vs_challenger:
-                self.live_vs_challenger_results_output.setMinimumHeight(96)
-                self.live_vs_challenger_results_output.setMaximumHeight(130)
-            else:
-                self.live_vs_challenger_results_output.setMinimumHeight(132)
-                self.live_vs_challenger_results_output.setMaximumHeight(210)
-        if hasattr(self, "backtest_selector_row_panel"):
-            self.backtest_selector_row_panel.setVisible(not mode_is_live_vs_challenger)
-        self._sync_backtest_symbol_selector_viewport()
 
     def _current_live_strategy_name(self) -> str:
         return str(
@@ -2050,7 +1341,7 @@ class TradingTerminalWindow(QMainWindow):
 
     def _current_backtest_strategy_name(self) -> str:
         return str(
-            self.backtest_strategy_combo.currentData() or BACKTEST_AUTO_STRATEGY
+            self.backtest_strategy_combo.currentData() or settings.strategy.default_strategy_name
         )
 
     def _is_backtest_auto_strategy(
@@ -2060,27 +1351,6 @@ class TradingTerminalWindow(QMainWindow):
         resolved_name = self._current_backtest_strategy_name() if strategy_name is None else strategy_name
         return resolved_name == BACKTEST_AUTO_STRATEGY
 
-    @staticmethod
-    def _sanitize_backtest_strategy_name(symbol: str, strategy_name: str) -> str:
-        allowed_strategy_names = {
-            str(name)
-            for name in BACKTEST_STRATEGY_NAMES
-            if str(name) != BACKTEST_AUTO_STRATEGY
-        }
-        if strategy_name in allowed_strategy_names:
-            return strategy_name
-        try:
-            fallback_name = resolve_optimizer_strategy_for_symbol(
-                symbol,
-                settings.strategy.default_strategy_name,
-                apply_backtest_optimizer_overrides=False,
-            )
-            if fallback_name in allowed_strategy_names:
-                return fallback_name
-        except Exception:
-            pass
-        return "frama_cross"
-
     def _resolve_backtest_strategy_for_symbol(
         self,
         symbol: str,
@@ -2088,59 +1358,51 @@ class TradingTerminalWindow(QMainWindow):
     ) -> str:
         selected_strategy = self._current_backtest_strategy_name() if strategy_name is None else strategy_name
         if self._is_backtest_auto_strategy(selected_strategy):
-            # Auto (from Config) always follows the current live-config mapping.
-            resolved_strategy = resolve_strategy_for_symbol(
+            if self._batch_active or self._is_optimization_mode_active():
+                return resolve_optimizer_strategy_for_symbol(
+                    symbol,
+                    settings.strategy.default_strategy_name,
+                )
+            return resolve_strategy_for_symbol(
                 symbol,
                 settings.strategy.default_strategy_name,
                 use_coin_override=True,
             )
-            return self._sanitize_backtest_strategy_name(symbol, resolved_strategy)
-        resolved_strategy = resolve_strategy_for_symbol(
+        return resolve_strategy_for_symbol(
             symbol,
             selected_strategy,
             use_coin_override=False,
         )
-        return self._sanitize_backtest_strategy_name(symbol, resolved_strategy)
+
+    @staticmethod
+    def _fallback_scan_strategy_for_symbol(symbol: str) -> str | None:
+        try:
+            return resolve_optimizer_strategy_for_symbol(
+                symbol,
+                settings.strategy.default_strategy_name,
+            )
+        except Exception:
+            return None
 
     def _build_backtest_batch_queue(
         self,
         symbols: list[str],
-        *,
-        interval_overrides: Sequence[str] | None = None,
     ) -> tuple[list[BacktestBatchItem], list[str], str]:
         selected_strategy_names = self._get_selected_backtest_strategy_names()
         if not selected_strategy_names:
             selected_strategy_names = [self._current_backtest_strategy_name()]
 
-        if interval_overrides is None:
-            selected_intervals = self._get_selected_backtest_intervals()
-        else:
-            selected_intervals = [
-                interval
-                for interval in dict.fromkeys(str(interval) for interval in interval_overrides)
-                if interval in BACKTEST_INTERVAL_OPTIONS
-            ]
-        if not selected_intervals:
-            selected_intervals = list(BACKTEST_INTERVAL_OPTIONS)
-        interval_label = (
-            selected_intervals[0]
-            if len(selected_intervals) == 1
-            else f"{len(selected_intervals)} timeframes"
-        )
-
-        base_queue: list[BacktestBatchItem] = []
-        base_auto_flags: list[bool] = []
-        has_auto = BACKTEST_AUTO_STRATEGY in selected_strategy_names
-        if has_auto:
+        if BACKTEST_AUTO_STRATEGY in selected_strategy_names:
+            queue: list[BacktestBatchItem] = []
             for symbol in symbols:
                 resolved_strategy = self._resolve_backtest_strategy_for_symbol(
                     symbol,
                     BACKTEST_AUTO_STRATEGY,
                 )
-                batch_item: BacktestBatchItem = (symbol, resolved_strategy, None)
-                base_queue.append(batch_item)
-                base_auto_flags.append(True)
+                queue.append((symbol, resolved_strategy, None))
+            return queue, [BACKTEST_AUTO_STRATEGY], STRATEGY_LABELS[BACKTEST_AUTO_STRATEGY]
 
+        queue: list[BacktestBatchItem] = []
         for symbol in symbols:
             for strategy_name in selected_strategy_names:
                 if strategy_name == BACKTEST_AUTO_STRATEGY:
@@ -2153,140 +1415,12 @@ class TradingTerminalWindow(QMainWindow):
                     )
                 except Exception:
                     continue
-                base_queue.append((symbol, resolved_strategy, None))
-                base_auto_flags.append(False)
-
-        queue: list[BacktestBatchItem] = []
-        auto_flags: list[bool] = []
-        for (symbol, strategy_name, interval_override), is_auto in zip(
-            base_queue,
-            base_auto_flags,
-            strict=False,
-        ):
-            if interval_override is not None:
-                queue.append((symbol, strategy_name, interval_override))
-                auto_flags.append(bool(is_auto))
-                continue
-            for interval in selected_intervals:
-                queue.append((symbol, strategy_name, interval))
-                auto_flags.append(bool(is_auto))
-        self._batch_auto_strategy_flags = auto_flags
+                queue.append((symbol, resolved_strategy, None))
 
         effective_selected_strategies = list(
             dict.fromkeys(strategy_name for _symbol, strategy_name, _interval in queue)
         )
-        if has_auto and len(selected_strategy_names) == 1:
-            mode_label = f"{STRATEGY_LABELS[BACKTEST_AUTO_STRATEGY]} / {interval_label}"
-        elif has_auto:
-            mode_label = (
-                f"{len(selected_strategy_names)} strategies "
-                f"(incl. {STRATEGY_LABELS[BACKTEST_AUTO_STRATEGY]}) / {interval_label}"
-            )
-        else:
-            mode_label = f"{len(effective_selected_strategies)} strategies / {interval_label}"
-        return queue, effective_selected_strategies, mode_label
-
-    @staticmethod
-    def _normalize_live_profile_for_symbol(symbol: str) -> dict[str, object] | None:
-        raw_profile = config_module.PRODUCTION_PROFILE_REGISTRY.get(str(symbol).strip().upper())
-        if not isinstance(raw_profile, dict):
-            return None
-        return dict(raw_profile)
-
-    def _build_live_vs_challenger_batch_queue(
-        self,
-        symbols: list[str],
-    ) -> tuple[list[BacktestBatchItem], list[BacktestRunContext], str]:
-        selected_symbol_set = set(symbols)
-        configured_live_symbols = tuple(
-            symbol
-            for symbol in settings.live.available_symbols
-            if symbol in selected_symbol_set
-        )
-        queue: list[BacktestBatchItem] = []
-        run_contexts: list[BacktestRunContext] = []
-        auto_flags: list[bool] = []
-        self._live_vs_challenger_coin_results.clear()
-        self._live_vs_challenger_last_export_path = None
-
-        for symbol in configured_live_symbols:
-            live_profile = self._normalize_live_profile_for_symbol(symbol)
-            if not live_profile:
-                self._append_backtest_log(
-                    f"Live vs Challenger skip: {symbol} has no production profile entry."
-                )
-                continue
-
-            live_strategy_name = self._sanitize_backtest_strategy_name(
-                symbol,
-                str(live_profile.get("strategy_name", "") or ""),
-            )
-            live_interval = str(
-                live_profile.get("interval")
-                or resolve_interval_for_symbol(
-                    symbol,
-                    settings.trading.interval,
-                    use_coin_override=True,
-                )
-            ).strip()
-            if live_interval not in settings.api.timeframes:
-                live_interval = settings.trading.interval
-
-            challenger_strategies = [
-                strategy_name
-                for strategy_name in LIVE_VS_CHALLENGER_STRATEGIES
-                if strategy_name != live_strategy_name
-            ]
-            expected_runs = 1 + len(challenger_strategies)
-            self._live_vs_challenger_coin_results[symbol] = {
-                "symbol": symbol,
-                "live_profile": dict(live_profile),
-                "live_strategy_name": live_strategy_name,
-                "live_interval": live_interval,
-                "baseline_result": None,
-                "challenger_results": {},
-                "best_challenger": None,
-                "verdict": "BEOBACHTEN",
-                "delta_fitness": 0.0,
-                "delta_pnl_usd": 0.0,
-                "delta_profit_factor": 0.0,
-                "completed_runs": 0,
-                "expected_runs": int(expected_runs),
-                "errors": [],
-            }
-
-            queue.append((symbol, live_strategy_name, live_interval))
-            run_contexts.append(
-                {
-                    "mode": BACKTEST_MODE_LIVE_VS_CHALLENGER,
-                    "run_role": "baseline",
-                    "symbol": symbol,
-                    "live_strategy_name": live_strategy_name,
-                    "live_interval": live_interval,
-                }
-            )
-            auto_flags.append(False)
-
-            for challenger_strategy in challenger_strategies:
-                queue.append((symbol, challenger_strategy, live_interval))
-                run_contexts.append(
-                    {
-                        "mode": BACKTEST_MODE_LIVE_VS_CHALLENGER,
-                        "run_role": "challenger",
-                        "symbol": symbol,
-                        "live_strategy_name": live_strategy_name,
-                        "live_interval": live_interval,
-                        "challenger_strategy_name": challenger_strategy,
-                    }
-                )
-                auto_flags.append(False)
-
-        self._batch_auto_strategy_flags = auto_flags
-        return (
-            queue,
-            run_contexts,
-            "Live baseline + challenger strategy universe",
-        )
+        return queue, effective_selected_strategies, f"{len(effective_selected_strategies)} strategies"
 
     @staticmethod
     def _expand_batch_queue_with_intervals(
@@ -2369,22 +1503,12 @@ class TradingTerminalWindow(QMainWindow):
         self.backtest_interval_combo.blockSignals(was_blocked)
 
     def _on_backtest_strategy_changed(self, _index: int) -> None:
-        selected_strategy_name = self.backtest_strategy_combo.currentData()
-        if selected_strategy_name is None:
-            self._selected_backtest_strategies = set()
-        else:
-            self._selected_backtest_strategies = {str(selected_strategy_name)}
+        self._selected_backtest_strategies = {self._current_backtest_strategy_name()}
         self._refresh_backtest_strategy_buttons()
         self._refresh_backtest_symbol_cards()
         self._update_status_label()
 
     def _on_backtest_interval_changed(self, _interval: str) -> None:
-        current_interval = self._current_backtest_interval()
-        if current_interval in BACKTEST_INTERVAL_OPTIONS:
-            selected_intervals = self._get_selected_backtest_intervals()
-            if len(selected_intervals) <= 1:
-                self._selected_backtest_intervals = {current_interval}
-                self._refresh_backtest_interval_buttons()
         self._update_status_label()
 
     def _summarize_live_resolved_strategies(self) -> str:
@@ -2402,17 +1526,6 @@ class TradingTerminalWindow(QMainWindow):
             return unique_badges[0]
         return "MIXED (" + " / ".join(unique_badges) + ")"
 
-    def _summarize_backtest_intervals(self) -> str:
-        selected_intervals = self._get_selected_backtest_intervals()
-        if not selected_intervals:
-            return self._current_backtest_interval()
-        if len(selected_intervals) == 1:
-            return selected_intervals[0]
-        if len(selected_intervals) <= 3:
-            return ", ".join(selected_intervals)
-        preview = ", ".join(selected_intervals[:3])
-        return f"{len(selected_intervals)} TF ({preview} +{len(selected_intervals) - 3})"
-
     def _format_live_strategy_resolution(self, symbols: list[str], fallback_strategy_name: str) -> str:
         parts: list[str] = []
         for symbol in symbols:
@@ -2428,28 +1541,15 @@ class TradingTerminalWindow(QMainWindow):
             for symbol in symbols
         }
 
-    def _sorted_live_intervals(self, intervals: Sequence[str]) -> list[str]:
-        unique_intervals = [
-            str(interval)
-            for interval in dict.fromkeys(str(interval) for interval in intervals)
-            if str(interval).strip()
-        ]
-        return sorted(
-            unique_intervals,
-            key=lambda interval: (
-                self._interval_total_seconds(interval),
-                interval.lower(),
-            ),
-        )
-
     def _summarize_live_intervals(self) -> str:
         selected_symbols = self._get_selected_live_symbols()
         if not selected_symbols:
             return "-"
-        unique_intervals = self._sorted_live_intervals(
-            resolve_interval_for_symbol(symbol, self._live_interval)
-            for symbol in selected_symbols
-        )
+        unique_intervals: list[str] = []
+        for symbol in selected_symbols:
+            interval = resolve_interval_for_symbol(symbol, self._live_interval)
+            if interval not in unique_intervals:
+                unique_intervals.append(interval)
         if len(unique_intervals) == 1:
             return unique_intervals[0]
         return "MIXED (" + " / ".join(unique_intervals) + ")"
@@ -2482,7 +1582,7 @@ class TradingTerminalWindow(QMainWindow):
         self._heartbeat_snapshot = {}
 
     def _build_positions_table(self) -> QTableWidget:
-        table = QTableWidget(0, 12)
+        table = QTableWidget(0, 11)
         table.setHorizontalHeaderLabels(
             [
                 "ID",
@@ -2492,7 +1592,6 @@ class TradingTerminalWindow(QMainWindow):
                 "Last",
                 "Qty",
                 "Leverage",
-                "Einsatz (USDT)",
                 "Fees Paid",
                 "Unrealized Net",
                 "Health",
@@ -2516,9 +1615,8 @@ class TradingTerminalWindow(QMainWindow):
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(11, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(10, QHeaderView.ResizeMode.ResizeToContents)
         table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         return table
 
@@ -2695,7 +1793,7 @@ class TradingTerminalWindow(QMainWindow):
         strategy_label = self.strategy_combo.currentText()
         live_strategy_summary = self._summarize_live_resolved_strategies()
         live_symbol_intervals = self._collect_live_symbol_intervals(symbols)
-        live_intervals = self._sorted_live_intervals(live_symbol_intervals.values())
+        live_intervals = list(dict.fromkeys(live_symbol_intervals.values()))
         self._append_live_log(f"--- LIVE PAPER TRADING STARTED FOR: {', '.join(symbols)} ---")
         self._append_live_log(
             f"Starting bot for {', '.join(symbols)} with configured leverage {leverage}x "
@@ -2718,7 +1816,6 @@ class TradingTerminalWindow(QMainWindow):
             )
         )
         self._reset_feed_table()
-        self._live_runtime_profiles.clear()
         self._bot_stop_requested = False
 
         self._bot_thread = BotEngineThread(
@@ -2736,7 +1833,6 @@ class TradingTerminalWindow(QMainWindow):
         self._bot_thread.positions_updated.connect(self._handle_positions_updated)
         self._bot_thread.price_update.connect(self._handle_price_update)
         self._bot_thread.heartbeat_status.connect(self._update_heartbeat_display)
-        self._bot_thread.runtime_profile_update.connect(self._handle_runtime_profile_update)
         self._bot_thread.finished.connect(self._handle_thread_finished)
         self._bot_thread.start()
 
@@ -2751,243 +1847,6 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_live_symbol_cards()
         self._refresh_trade_readiness(force=True)
 
-    @staticmethod
-    def _normalize_backtest_log_mode(raw_mode: str | None) -> str:
-        normalized = str(raw_mode or "").strip().lower()
-        if normalized in {
-            TradingTerminalWindow._BACKTEST_LOG_MODE_QUIET,
-            TradingTerminalWindow._BACKTEST_LOG_MODE_STANDARD,
-            TradingTerminalWindow._BACKTEST_LOG_MODE_DEBUG,
-        }:
-            return normalized
-        return TradingTerminalWindow._BACKTEST_LOG_MODE_STANDARD
-
-    def _resolve_backtest_log_mode_for_run(
-        self,
-        *,
-        symbol_override: str | None,
-        strategy_override: str | None,
-        interval_override: str | None,
-    ) -> tuple[str, dict[str, int]]:
-        env_mode = self._normalize_backtest_log_mode(os.getenv("BACKTEST_LOG_MODE"))
-        if env_mode != self._BACKTEST_LOG_MODE_STANDARD:
-            context = {"coins": 1, "strategies": 1, "timeframes": 1}
-            return env_mode, context
-
-        configured_mode = self._normalize_backtest_log_mode(
-            getattr(settings.trading, "backtest_log_mode", None)
-        )
-        if configured_mode != self._BACKTEST_LOG_MODE_STANDARD:
-            context = {"coins": 1, "strategies": 1, "timeframes": 1}
-            return configured_mode, context
-
-        if self._batch_active:
-            if self._batch_mode == BACKTEST_MODE_LIVE_VS_CHALLENGER:
-                queued_contexts = [
-                    context
-                    for context in self._batch_run_context_queue
-                    if isinstance(context, dict)
-                ]
-                active_context = (
-                    self._active_backtest_run_context
-                    if isinstance(self._active_backtest_run_context, dict)
-                    else {}
-                )
-                interval_values = {
-                    str(context.get("live_interval", "")).strip()
-                    for context in (*queued_contexts, active_context)
-                    if str(context.get("live_interval", "")).strip()
-                }
-                context = {
-                    "coins": max(1, self._batch_total_symbols),
-                    "strategies": max(1, len(LIVE_VS_CHALLENGER_STRATEGIES)),
-                    "timeframes": max(1, len(interval_values)),
-                }
-                return self._BACKTEST_LOG_MODE_STANDARD, context
-            context = {
-                "coins": max(1, self._batch_total_symbols),
-                "strategies": max(1, len(self._get_selected_backtest_strategy_names())),
-                "timeframes": max(1, len(self._get_selected_backtest_intervals())),
-            }
-            active_thread_runs = (
-                1
-                if self._backtest_thread is not None and self._backtest_thread.isRunning()
-                else 0
-            )
-            remaining_runs = len(self._batch_queue) + active_thread_runs
-            if (
-                context["coins"] == 1
-                and context["strategies"] == 1
-                and context["timeframes"] == 1
-                and remaining_runs <= 1
-            ):
-                return self._BACKTEST_LOG_MODE_QUIET, context
-            return self._BACKTEST_LOG_MODE_STANDARD, context
-
-        selected_symbols = self._get_selected_backtest_symbols()
-        selected_strategies = self._get_selected_backtest_strategy_names()
-        selected_intervals = self._get_selected_backtest_intervals()
-        context = {
-            "coins": 1 if symbol_override is not None else max(1, len(selected_symbols)),
-            "strategies": 1 if strategy_override is not None else max(1, len(selected_strategies)),
-            "timeframes": 1 if interval_override is not None else max(1, len(selected_intervals)),
-        }
-        if context["coins"] == 1 and context["strategies"] == 1 and context["timeframes"] == 1:
-            return self._BACKTEST_LOG_MODE_QUIET, context
-        return self._BACKTEST_LOG_MODE_STANDARD, context
-
-    def _set_active_backtest_log_mode(self, mode: str, context: dict[str, int]) -> None:
-        self._active_backtest_log_mode = self._normalize_backtest_log_mode(mode)
-        self._active_backtest_log_context = {
-            "coins": int(context.get("coins", 1) or 1),
-            "strategies": int(context.get("strategies", 1) or 1),
-            "timeframes": int(context.get("timeframes", 1) or 1),
-        }
-
-    def _write_backtest_detail_log(self, message: str) -> None:
-        try:
-            GUI_BACKTEST_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with GUI_BACKTEST_DEBUG_LOG_PATH.open("a", encoding="utf-8") as detail_file:
-                detail_file.write(f"[{timestamp}] {message}\n")
-        except Exception:
-            pass
-
-    @staticmethod
-    def _summarize_profile_blob(profile_blob: str) -> str:
-        pairs = {
-            key: value.strip()
-            for key, value in re.findall(r"'([^']+)':\s*([^,}]+)", profile_blob)
-        }
-        if not pairs:
-            return "profile"
-
-        parts: list[str] = []
-        if {"ema_fast", "ema_mid", "ema_slow"}.issubset(pairs):
-            parts.append(f"EMA{pairs['ema_fast']}/{pairs['ema_mid']}/{pairs['ema_slow']}")
-        elif {"ema_fast_period", "ema_slow_period"}.issubset(pairs):
-            parts.append(f"EMA{pairs['ema_fast_period']}/{pairs['ema_slow_period']}")
-        elif {"frama_fast_period", "frama_slow_period"}.issubset(pairs):
-            parts.append(f"FRAMA{pairs['frama_fast_period']}/{pairs['frama_slow_period']}")
-        elif {"dual_thrust_period", "dual_thrust_k1", "dual_thrust_k2"}.issubset(pairs):
-            parts.append(
-                "DT "
-                f"p={pairs['dual_thrust_period']} "
-                f"k1={pairs['dual_thrust_k1']} "
-                f"k2={pairs['dual_thrust_k2']}"
-            )
-        for key, label in (
-            ("slope_lookback", "slope"),
-            ("min_ema_spread_pct", "spread"),
-            ("volume_multiplier", "vol"),
-            ("rsi_length", "rsi"),
-            ("volume_ma_length", "volMA"),
-            ("atr_stop_buffer_mult", "atrBuf"),
-            ("stop_loss_pct", "SL"),
-            ("take_profit_pct", "TP"),
-            ("trailing_activation_pct", "TrailOn"),
-            ("trailing_distance_pct", "TrailDist"),
-            ("breakeven_activation_pct", "BE"),
-        ):
-            if key in pairs:
-                parts.append(f"{label}={pairs[key]}")
-        if "use_rsi_filter" in pairs:
-            parts.append("RSI=on" if int(float(pairs["use_rsi_filter"])) > 0 else "RSI=off")
-        if "use_volume_filter" in pairs:
-            parts.append("VOL=on" if int(float(pairs["use_volume_filter"])) > 0 else "VOL=off")
-        if "use_atr_stop_buffer" in pairs:
-            parts.append("ATR=on" if int(float(pairs["use_atr_stop_buffer"])) > 0 else "ATR=off")
-        return " | ".join(parts[:8]) if parts else "profile"
-
-    @classmethod
-    def _compact_profile_preview(cls, profile: object) -> str:
-        if not isinstance(profile, dict) or not profile:
-            return "{}"
-        blob = ", ".join(f"'{key}': {value}" for key, value in profile.items())
-        return cls._summarize_profile_blob(blob)
-
-    def _compact_backtest_thread_log_message(self, message: str) -> str | None:
-        mode = self._active_backtest_log_mode
-        if mode == self._BACKTEST_LOG_MODE_DEBUG:
-            return message
-
-        if message.startswith("BACKTEST_TRACE|"):
-            return None
-
-        suppressed_in_standard = (
-            "top profile diagnostics",
-            "Stage 1 #",
-            "Stage 2 #",
-            "Backtest runtime leverage",
-            "Backtest fee stress active",
-            "Backtest slippage penalty active",
-            "Tiered trailing summary:",
-            "Trailing Level 1",
-            "Trailing Level 2",
-            "Trailing Level 3",
-            "Dynamic SL/TP overrides applied",
-            "Time-Stop exits applied",
-            "EMA Band Rejection JIT alignment check passed",
-            "EMA Band Rejection end-to-end consistency probe passed",
-            "Numba JIT path active for",
-            "Python vector path active for",
-            "Intermediate optimizer checkpoint cache restored",
-        )
-        if any(token in message for token in suppressed_in_standard):
-            return None
-
-        if mode != self._BACKTEST_LOG_MODE_QUIET:
-            return message
-
-        quiet_allow_tokens = (
-            "Backtest strategy selected:",
-            "Backtest history window",
-            "Historical data range loaded:",
-            "Backtest window in use:",
-            "optimizer mode:",
-            "Stage 1: evaluating",
-            "Stage 2: verifying",
-            "Stage 1 fail-reason summary:",
-            "Stage 2 fail-reason summary:",
-            "Stage 2 Verified Candidate:",
-            "Stage 2 Low-Edge Candidate:",
-            "Best Optimizer Candidate",
-            "Low-Edge Optimizer Candidate",
-            "Final Verified Result",
-            "Optimizer verdict for",
-            "Sampling mode active:",
-            "Full Scan active:",
-            "No eligible profile under strict avg_profit gate;",
-            "No optimization profile passed stability constraints",
-            "Stage 2 verification produced no eligible profile",
-            "Optimization did not produce any result.",
-            "Backtest result saved to DB",
-            "Optimization for ",
-            "HMM regime detector failed",
-            "JIT alignment check failed",
-            "consistency probe failed",
-            "consistency probe error",
-            "EMA Band Rejection audit",
-        )
-        if not any(token in message for token in quiet_allow_tokens):
-            return None
-
-        if "profile={" in message:
-            message = re.sub(
-                r"profile=\{([^}]*)\}",
-                lambda match: f"profile={self._summarize_profile_blob(match.group(1))}",
-                message,
-                count=1,
-            )
-        return message
-
-    def _handle_backtest_thread_log(self, message: str) -> None:
-        self._write_backtest_detail_log(message)
-        compact_message = self._compact_backtest_thread_log_message(message)
-        if compact_message is None:
-            return
-        self._append_backtest_log(compact_message)
-
     def _start_backtest(
         self,
         *,
@@ -2995,21 +1854,8 @@ class TradingTerminalWindow(QMainWindow):
         strategy_override: str | None = None,
         auto_from_config: bool | None = None,
         interval_override: str | None = None,
-        allow_auto_interval_override: bool | None = None,
     ) -> None:
-        self._sync_backtest_symbol_universe()
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
-            return
-        if (
-            not self._batch_active
-            and symbol_override is None
-            and strategy_override is None
-            and self._is_live_vs_challenger_mode_active()
-        ):
-            self._append_backtest_log(
-                "Live vs Challenger mode active: running selected-coin challenger comparison."
-            )
-            self._on_run_selected_clicked()
             return
         live_running = self._bot_thread is not None and self._bot_thread.isRunning()
         self._backtest_stop_requested = False
@@ -3021,13 +1867,6 @@ class TradingTerminalWindow(QMainWindow):
             if len(selected_symbols) > 1:
                 self._append_backtest_log(
                     f"Multiple coins selected ({len(selected_symbols)}). Starting selected batch instead of single-coin backtest."
-                )
-                self._on_run_selected_clicked()
-                return
-            selected_strategies = self._get_selected_backtest_strategy_names()
-            if len(selected_strategies) > 1:
-                self._append_backtest_log(
-                    f"Multiple strategies selected ({len(selected_strategies)}). Starting selected batch instead of single-coin backtest."
                 )
                 self._on_run_selected_clicked()
                 return
@@ -3105,91 +1944,29 @@ class TradingTerminalWindow(QMainWindow):
             self._append_backtest_log(
                 "Live bot is active. Backtest will use an isolated temp DB so both can run in parallel."
             )
-        history_requested_start_utc: datetime | None = None
-        history_end_utc: datetime | None = None
-        if self._backtest_period_user_modified:
-            history_requested_start_utc, history_end_utc = self._current_backtest_history_range()
-        if history_requested_start_utc is not None:
-            requested_end_text = (
-                history_end_utc.strftime("%Y-%m-%d %H:%M:%S")
-                if history_end_utc is not None
-                else "latest available"
-            )
-            self._append_backtest_log(
-                "Backtest period selection: "
-                f"{history_requested_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC -> "
-                f"{requested_end_text} UTC."
-            )
-
-        log_mode, log_context = self._resolve_backtest_log_mode_for_run(
-            symbol_override=symbol_override,
-            strategy_override=strategy_override,
-            interval_override=interval_override,
-        )
-        self._set_active_backtest_log_mode(log_mode, log_context)
-        self._append_backtest_log(
-            "Backtest log mode: "
-            f"{log_mode.upper()} "
-            f"(coins={log_context['coins']}, strategies={log_context['strategies']}, timeframes={log_context['timeframes']})."
-        )
-        active_run_context = (
-            dict(self._active_backtest_run_context)
-            if isinstance(self._active_backtest_run_context, dict)
-            else {}
-        )
-        enforce_interval_fairness = (
-            str(active_run_context.get("mode", "") or "") == BACKTEST_MODE_LIVE_VS_CHALLENGER
-        )
-        if (
-            not enforce_interval_fairness
-            and self._batch_active
-            and self._batch_mode == BACKTEST_MODE_LIVE_VS_CHALLENGER
-        ):
-            enforce_interval_fairness = True
-        if enforce_interval_fairness:
-            self._append_backtest_log(
-                "Live vs Challenger fairness lock active: "
-                f"{symbol} uses fixed comparison interval {backtest_interval} for baseline and challengers."
-            )
 
         self.backtest_button.setEnabled(False)
-        backtest_thread = BacktestThread(
+        self._backtest_thread = BacktestThread(
             symbol=symbol,
             interval=backtest_interval,
             strategy_name=strategy_name,
-            auto_from_config=auto_strategy_mode,
-            allow_auto_interval_override=(
-                bool(allow_auto_interval_override)
-                if allow_auto_interval_override is not None
-                else interval_override is None
-            ),
-            enforce_interval_fairness=enforce_interval_fairness,
             leverage=leverage,
             min_confidence_pct=min_confidence_pct,
             optimize_profile=optimize_profile,
             isolated_db=live_running,
             db_path=self._db_path,
-            history_requested_start_utc=history_requested_start_utc,
-            history_end_utc=history_end_utc,
-            log_mode=log_mode,
         )
-        self._backtest_thread = backtest_thread
-        backtest_thread.log_message.connect(self._handle_backtest_thread_log)
-        backtest_thread.progress_update.connect(self._update_progress)
-        backtest_thread.backtest_finished.connect(self._handle_backtest_finished)
-        backtest_thread.backtest_error.connect(self._handle_backtest_error)
-        backtest_thread.finished.connect(
-            lambda finished_thread=backtest_thread: self._handle_backtest_thread_finished(
-                finished_thread
-            )
-        )
-        backtest_thread.start()
+        self._backtest_thread.log_message.connect(self._append_backtest_log)
+        self._backtest_thread.progress_update.connect(self._update_progress)
+        self._backtest_thread.backtest_finished.connect(self._handle_backtest_finished)
+        self._backtest_thread.backtest_error.connect(self._handle_backtest_error)
+        self._backtest_thread.finished.connect(self._handle_backtest_thread_finished)
+        self._backtest_thread.start()
         self.symbol_combo.setEnabled(False)
         self.backtest_coin_combo.setEnabled(False)
         self.backtest_strategy_combo.setEnabled(False)
         self.backtest_interval_combo.setEnabled(False)
         self.backtest_leverage_slider.setEnabled(False)
-        self._set_backtest_period_controls_enabled(False)
         self._set_backtest_symbol_controls_enabled(False)
         self.confidence_spin.setEnabled(False)
         self._apply_button_states()
@@ -3197,64 +1974,24 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_backtest_symbol_cards()
 
     def _on_run_all_clicked(self) -> None:
-        self._sync_backtest_symbol_universe()
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
             return
 
-        mode_is_live_vs_challenger = self._is_live_vs_challenger_mode_active()
-        symbols = (
-            list(settings.live.available_symbols)
-            if mode_is_live_vs_challenger
-            else list(_configured_backtest_symbols())
-        )
+        symbols = [self.backtest_coin_combo.itemText(index) for index in range(self.backtest_coin_combo.count())]
         if not symbols:
             self._append_backtest_log("No symbols available for batch backtest.")
             return
 
         optimize_profile = self._is_optimization_mode_active()
         self._backtest_stop_requested = False
-        self._begin_backtest_report_session(
-            mode=(
-                BACKTEST_MODE_LIVE_VS_CHALLENGER
-                if mode_is_live_vs_challenger
-                else "batch"
-            )
-        )
-        if mode_is_live_vs_challenger:
-            (
-                self._batch_queue,
-                self._batch_run_context_queue,
-                strategy_mode_label,
-            ) = self._build_live_vs_challenger_batch_queue(symbols)
-            self._batch_mode = BACKTEST_MODE_LIVE_VS_CHALLENGER
-        else:
-            (
-                self._batch_queue,
-                _selected_strategies,
-                strategy_mode_label,
-            ) = self._build_backtest_batch_queue(symbols)
-            self._batch_run_context_queue = []
-            self._batch_mode = BACKTEST_MODE_STANDARD
-        if not self._batch_queue:
-            self._append_backtest_log("No eligible runs available for this backtest mode.")
-            self._batch_run_context_queue.clear()
-            self._active_backtest_run_context = None
-            self._finalize_backtest_report_session(status="stopped")
-            return
+        self._begin_backtest_report_session(mode="batch")
+        self._batch_queue, selected_strategies, strategy_mode_label = self._build_backtest_batch_queue(symbols)
+        self._batch_mode = "standard"
         self._batch_active = True
         self._initialize_batch_tracking(
             [symbol for symbol, _strategy_name, _interval_override in self._batch_queue]
         )
-        if mode_is_live_vs_challenger:
-            self._append_backtest_log(
-                f"Starting Live vs Challenger comparison for {len(symbols)} live coins "
-                f"({len(self._batch_queue)} runs)."
-            )
-            self._append_backtest_log(
-                "Timeframe/strategy selector is ignored in this mode; baseline interval/profile "
-                "comes from production config per coin."
-            )
-        elif optimize_profile:
+        if optimize_profile:
             self._append_backtest_log(
                 f"Starting batch profile optimization for {len(symbols)} coins using "
                 f"{strategy_mode_label} ({len(self._batch_queue)} runs)."
@@ -3268,90 +2005,28 @@ class TradingTerminalWindow(QMainWindow):
             self._append_backtest_log(
                 "Live bot is active. Batch runs will use isolated temp DBs to avoid lock contention."
             )
-        self._refresh_live_vs_challenger_results_view()
         self._apply_button_states()
         self._process_next_in_batch()
 
     def _on_run_selected_clicked(self) -> None:
-        self._sync_backtest_symbol_universe()
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
             return
 
-        selected_symbols = self._get_selected_backtest_symbols()
-        if not selected_symbols:
-            self._append_backtest_log("Select at least one coin in the backtest selector first.")
-            return
-
-        mode_is_live_vs_challenger = self._is_live_vs_challenger_mode_active()
-        if mode_is_live_vs_challenger:
-            live_symbol_set = set(settings.live.available_symbols)
-            symbols = [
-                symbol
-                for symbol in selected_symbols
-                if symbol in live_symbol_set
-            ]
-            skipped_symbols = [
-                symbol
-                for symbol in selected_symbols
-                if symbol not in live_symbol_set
-            ]
-            if skipped_symbols:
-                self._append_backtest_log(
-                    "Live vs Challenger skip (not active live coin): "
-                    + ", ".join(skipped_symbols)
-                )
-        else:
-            symbols = list(selected_symbols)
+        symbols = self._get_selected_backtest_symbols()
         if not symbols:
-            self._append_backtest_log(
-                "No eligible symbols selected for this backtest mode."
-            )
+            self._append_backtest_log("Select at least one coin in the backtest selector first.")
             return
 
         optimize_profile = self._is_optimization_mode_active()
         self._backtest_stop_requested = False
-        self._begin_backtest_report_session(
-            mode=(
-                BACKTEST_MODE_LIVE_VS_CHALLENGER
-                if mode_is_live_vs_challenger
-                else "batch"
-            )
-        )
-        if mode_is_live_vs_challenger:
-            (
-                self._batch_queue,
-                self._batch_run_context_queue,
-                strategy_mode_label,
-            ) = self._build_live_vs_challenger_batch_queue(symbols)
-            self._batch_mode = BACKTEST_MODE_LIVE_VS_CHALLENGER
-        else:
-            (
-                self._batch_queue,
-                _selected_strategies,
-                strategy_mode_label,
-            ) = self._build_backtest_batch_queue(symbols)
-            self._batch_run_context_queue = []
-            self._batch_mode = BACKTEST_MODE_STANDARD
-        if not self._batch_queue:
-            self._append_backtest_log("No eligible runs available for this backtest mode.")
-            self._batch_run_context_queue.clear()
-            self._active_backtest_run_context = None
-            self._finalize_backtest_report_session(status="stopped")
-            return
+        self._begin_backtest_report_session(mode="batch")
+        self._batch_queue, selected_strategies, strategy_mode_label = self._build_backtest_batch_queue(symbols)
+        self._batch_mode = "standard"
         self._batch_active = True
         self._initialize_batch_tracking(
             [symbol for symbol, _strategy_name, _interval_override in self._batch_queue]
         )
-        if mode_is_live_vs_challenger:
-            self._append_backtest_log(
-                f"Starting selected Live vs Challenger comparison for {len(symbols)} live coins "
-                f"({len(self._batch_queue)} runs)."
-            )
-            self._append_backtest_log(
-                "Timeframe/strategy selector is ignored in this mode; baseline interval/profile "
-                "comes from production config per coin."
-            )
-        elif optimize_profile:
+        if optimize_profile:
             self._append_backtest_log(
                 f"Starting selected profile optimization for {len(symbols)} coins using "
                 f"{strategy_mode_label} ({len(self._batch_queue)} runs)."
@@ -3365,37 +2040,77 @@ class TradingTerminalWindow(QMainWindow):
             self._append_backtest_log(
                 "Live bot is active. Selected runs will use isolated temp DBs to avoid lock contention."
             )
-        self._refresh_live_vs_challenger_results_view()
+        self._apply_button_states()
+        self._process_next_in_batch()
+
+    def _on_run_selected_dual_interval_clicked(self) -> None:
+        if self._backtest_thread is not None and self._backtest_thread.isRunning():
+            return
+
+        symbols = self._get_selected_backtest_symbols()
+        if not symbols:
+            self._append_backtest_log("Select at least one coin in the backtest selector first.")
+            return
+        if len(BACKTEST_INTERVAL_SWEEP_SEQUENCE) < 2:
+            self._append_backtest_log(
+                "Dual-timeframe run unavailable: 15m and 1h are not both enabled in API timeframes."
+            )
+            return
+
+        optimize_profile = self._is_optimization_mode_active()
+        self._backtest_stop_requested = False
+        self._begin_backtest_report_session(mode="batch")
+        base_queue, selected_strategies, strategy_mode_label = self._build_backtest_batch_queue(symbols)
+        self._batch_queue = self._expand_batch_queue_with_intervals(
+            base_queue,
+            BACKTEST_INTERVAL_SWEEP_SEQUENCE,
+        )
+        self._batch_mode = "dual_interval"
+        self._batch_active = True
+        self._initialize_batch_tracking(
+            [symbol for symbol, _strategy_name, _interval_override in self._batch_queue]
+        )
+
+        interval_label = " -> ".join(BACKTEST_INTERVAL_SWEEP_SEQUENCE)
+        if optimize_profile:
+            self._append_backtest_log(
+                f"Starting selected dual-timeframe optimization ({interval_label}) for "
+                f"{len(symbols)} coins using {strategy_mode_label} ({len(self._batch_queue)} runs)."
+            )
+        else:
+            self._append_backtest_log(
+                f"Starting selected dual-timeframe backtest ({interval_label}) for "
+                f"{len(symbols)} coins using {strategy_mode_label} ({len(self._batch_queue)} runs)."
+            )
+        if self._bot_thread is not None and self._bot_thread.isRunning():
+            self._append_backtest_log(
+                "Live bot is active. Selected runs will use isolated temp DBs to avoid lock contention."
+            )
         self._apply_button_states()
         self._process_next_in_batch()
 
     def _process_next_in_batch(self) -> None:
         if not self._batch_active:
             return
-        if self._backtest_thread is not None and self._backtest_thread.isRunning():
-            QTimer.singleShot(50, self._process_next_in_batch)
-            return
+        if self._backtest_thread is not None:
+            if self._backtest_thread.isRunning():
+                QTimer.singleShot(50, self._process_next_in_batch)
+                return
+            self._backtest_thread.deleteLater()
+            self._backtest_thread = None
         if not self._batch_queue:
             self._batch_active = False
-            self._batch_mode = BACKTEST_MODE_STANDARD
-            self._batch_auto_strategy_flags.clear()
-            self._batch_run_context_queue.clear()
-            self._active_backtest_run_context = None
+            self._batch_mode = "standard"
             self._batch_total_symbols = 0
             self._batch_started_symbols.clear()
             self._batch_completed_symbols.clear()
             self._batch_symbol_remaining_runs.clear()
-            self._set_active_backtest_log_mode(
-                self._BACKTEST_LOG_MODE_STANDARD,
-                {"coins": 1, "strategies": 1, "timeframes": 1},
-            )
             self._append_backtest_log("Batch Backtest completed!")
             self._finalize_backtest_report_session(status="completed")
             self.backtest_coin_combo.setEnabled(True)
             self.backtest_strategy_combo.setEnabled(True)
             self.backtest_interval_combo.setEnabled(True)
             self.backtest_leverage_slider.setEnabled(True)
-            self._set_backtest_period_controls_enabled(True)
             self._set_backtest_symbol_controls_enabled(True)
             if self._bot_thread is None or not self._bot_thread.isRunning():
                 self.symbol_combo.setEnabled(True)
@@ -3406,12 +2121,6 @@ class TradingTerminalWindow(QMainWindow):
             return
 
         symbol, strategy_name, interval_override = self._batch_queue.pop(0)
-        run_context: BacktestRunContext = (
-            self._batch_run_context_queue.pop(0)
-            if self._batch_run_context_queue
-            else {}
-        )
-        self._active_backtest_run_context = run_context
         if symbol not in self._batch_started_symbols:
             self._batch_started_symbols.add(symbol)
             batch_progress_message = (
@@ -3425,12 +2134,7 @@ class TradingTerminalWindow(QMainWindow):
             self.backtest_interval_combo.setCurrentText(interval_override)
             self.backtest_interval_combo.blockSignals(was_blocked)
         strategy_label = STRATEGY_LABELS.get(strategy_name, strategy_name)
-        auto_from_config_for_run = (
-            bool(self._batch_auto_strategy_flags.pop(0))
-            if self._batch_auto_strategy_flags
-            else False
-        )
-        if not auto_from_config_for_run:
+        if not self._is_backtest_auto_strategy():
             self._set_current_backtest_strategy(strategy_name)
         else:
             strategy_label = f"{strategy_label} [Auto]"
@@ -3439,12 +2143,7 @@ class TradingTerminalWindow(QMainWindow):
             if interval_override is not None
             else strategy_label
         )
-        if str(run_context.get("mode", "") or "") == BACKTEST_MODE_LIVE_VS_CHALLENGER:
-            run_role = str(run_context.get("run_role", "challenger") or "challenger").upper()
-            self._append_backtest_log(
-                f"--- Live vs Challenger: {symbol} / {run_role} / {strategy_context_label} ---"
-            )
-        elif self._is_optimization_mode_active():
+        if self._is_optimization_mode_active():
             self._append_backtest_log(
                 f"--- Starting next optimization: {symbol} / {strategy_context_label} ---"
             )
@@ -3455,9 +2154,8 @@ class TradingTerminalWindow(QMainWindow):
         self._start_backtest(
             symbol_override=symbol,
             strategy_override=strategy_name,
-            auto_from_config=auto_from_config_for_run,
+            auto_from_config=BACKTEST_AUTO_STRATEGY in self._selected_backtest_strategies,
             interval_override=interval_override,
-            allow_auto_interval_override=False,
         )
 
     def _stop_bot(self) -> None:
@@ -3481,19 +2179,12 @@ class TradingTerminalWindow(QMainWindow):
         if batch_active:
             remaining_runs = len(self._batch_queue) + (1 if backtest_running else 0)
             self._batch_active = False
-            self._batch_mode = BACKTEST_MODE_STANDARD
+            self._batch_mode = "standard"
             self._batch_queue.clear()
-            self._batch_auto_strategy_flags.clear()
-            self._batch_run_context_queue.clear()
-            self._active_backtest_run_context = None
             self._batch_total_symbols = 0
             self._batch_started_symbols.clear()
             self._batch_completed_symbols.clear()
             self._batch_symbol_remaining_runs.clear()
-            self._set_active_backtest_log_mode(
-                self._BACKTEST_LOG_MODE_STANDARD,
-                {"coins": 1, "strategies": 1, "timeframes": 1},
-            )
             self._append_backtest_log(
                 f"Stopping batch backtest ({remaining_runs} remaining run(s) canceled)."
             )
@@ -3514,7 +2205,6 @@ class TradingTerminalWindow(QMainWindow):
             self._bot_thread.deleteLater()
         self._bot_thread = None
         self._bot_stop_requested = False
-        self._live_runtime_profiles.clear()
         with Database(self._db_path) as db:
             self._realized_pnl_total = db.fetch_realized_pnl()
             self._realized_pnl_today = db.fetch_realized_pnl_since(self._today_start())
@@ -3527,7 +2217,6 @@ class TradingTerminalWindow(QMainWindow):
         self.backtest_coin_combo.setEnabled(True)
         self.backtest_strategy_combo.setEnabled(True)
         self.backtest_interval_combo.setEnabled(True)
-        self._set_backtest_period_controls_enabled(True)
         self._heartbeat_snapshot = {}
         self.sync_status_label.setText("Sync: -")
         self.sync_status_label.setStyleSheet(f"color: {TEXT_MUTED}; font-weight: 700;")
@@ -3537,35 +2226,13 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_backtest_symbol_cards()
         if hasattr(self, "readiness_bars"):
             self.readiness_bars.clear_items()
-        if self._pending_close_request:
-            bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
-            backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
-            if not bot_running and not backtest_running:
-                self._pending_close_request = False
-                QTimer.singleShot(0, self.close)
 
     def _handle_backtest_finished(self, result: dict) -> None:
-        run_context: BacktestRunContext | None = (
-            dict(self._active_backtest_run_context)
-            if isinstance(self._active_backtest_run_context, dict)
-            else None
-        )
         (
             compact_result,
             trimmed_trades,
             trimmed_optimization_rows,
         ) = self._compact_backtest_result_for_gui(result)
-        compact_summary = generate_compact_summary(result)
-        if (
-            isinstance(run_context, dict)
-            and str(run_context.get("mode", "") or "") == BACKTEST_MODE_LIVE_VS_CHALLENGER
-        ):
-            self._record_live_vs_challenger_result(
-                result,
-                run_context=run_context,
-                compact_summary=compact_summary,
-            )
-        compact_result["compact_summary"] = dict(compact_summary)
         self._last_backtest_result = compact_result
         try:
             self._record_backtest_report_entry(result)
@@ -3576,80 +2243,22 @@ class TradingTerminalWindow(QMainWindow):
             )
             self._backtest_report_errors.append(str(exc))
         symbol = str(result.get("symbol") or self._current_backtest_symbol())
-        strategy_name = self._sanitize_backtest_strategy_name(
-            symbol,
-            str(result.get("strategy_name") or self._current_backtest_strategy_name()),
-        )
+        strategy_name = str(result.get("strategy_name") or self._current_backtest_strategy_name())
         interval = str(result.get("interval") or self._current_backtest_interval())
         strategy_label = STRATEGY_LABELS.get(strategy_name, strategy_name)
-        profit_factor = float(compact_summary.get("robust_profit_factor", 0.0) or 0.0)
-        profit_factor_display = str(compact_summary.get("robust_profit_factor_display", f"{profit_factor:.2f}") or f"{profit_factor:.2f}")
-        total_pnl_usd = float(compact_summary.get("net_pnl_usd", 0.0) or 0.0)
-        win_rate_pct = float(compact_summary.get("win_rate_pct", 0.0) or 0.0)
-        total_trades = int(compact_summary.get("trade_count", 0) or 0)
-        long_trades = int(result.get("long_trades", 0) or 0)
-        short_trades = int(result.get("short_trades", 0) or 0)
-        if (long_trades + short_trades) <= 0 and total_trades > 0:
-            trade_rows = compact_result.get("closed_trades", [])
-            if isinstance(trade_rows, list):
-                long_trades = sum(
-                    1
-                    for trade in trade_rows
-                    if str(trade.get("side", "")).strip().upper() == "LONG"
-                )
-                short_trades = sum(
-                    1
-                    for trade in trade_rows
-                    if str(trade.get("side", "")).strip().upper() == "SHORT"
-                )
-        existing_summary = self._backtest_compact_summaries.get(symbol)
-        incoming_fitness_score = calculate_fitness_score(compact_summary)
-        existing_fitness_score = (
-            calculate_fitness_score(existing_summary)
-            if isinstance(existing_summary, dict)
-            else float("-inf")
-        )
-        incoming_is_winner = (
-            not isinstance(existing_summary, dict)
-            or incoming_fitness_score > existing_fitness_score
-        )
-
-        best_profile = result.get("best_profile", {})
-        normalized_profile: dict[str, float] = {}
-        if isinstance(best_profile, dict) and best_profile:
-            for key, value in best_profile.items():
-                with suppress(Exception):
-                    normalized_profile[str(key)] = float(value)
-
-        if incoming_is_winner:
-            compact_summary["strategy_name"] = strategy_name
-            self._backtest_profit_factors[symbol] = profit_factor
-            self._backtest_win_rates[symbol] = win_rate_pct
-            self._backtest_trade_counts[symbol] = total_trades
-            self._backtest_compact_summaries[symbol] = dict(compact_summary)
-            if normalized_profile:
-                self._backtest_best_profiles[symbol] = dict(normalized_profile)
-            else:
-                self._backtest_best_profiles.pop(symbol, None)
-        else:
-            existing_strategy_name = "-"
-            if isinstance(existing_summary, dict):
-                existing_strategy_name = self._sanitize_backtest_strategy_name(
-                    symbol,
-                    str(existing_summary.get("strategy_name", "-") or "-"),
-                )
-            self._append_backtest_log(
-                "King of the Hill hold: "
-                f"{symbol} kept {existing_strategy_name} "
-                f"(score={existing_fitness_score:.2f}) over {strategy_label} "
-                f"(score={incoming_fitness_score:.2f})."
-            )
+        profit_factor = float(result.get("profit_factor", 0.0) or 0.0)
+        total_pnl_usd = float(result.get("total_pnl_usd", 0.0) or 0.0)
+        win_rate_pct = float(result.get("win_rate_pct", 0.0) or 0.0)
+        total_trades = int(result.get("total_trades", 0) or 0)
+        self._backtest_profit_factors[symbol] = profit_factor
+        self._backtest_win_rates[symbol] = win_rate_pct
+        self._backtest_trade_counts[symbol] = total_trades
         self._update_live_symbol_card(symbol)
         winner_tag = "[WINNER] " if profit_factor > 1.0 else ""
-        verdict = "PASS" if (total_pnl_usd > 0.0 and profit_factor >= 1.0) else "WARN"
         self.backtest_total_pnl_label.setText(f"Total PnL: {total_pnl_usd:,.2f} USD")
         self.backtest_win_rate_label.setText(f"Win Rate: {win_rate_pct:,.2f}%")
         self.backtest_total_trades_label.setText(f"Total Trades: {total_trades}")
+        self._populate_backtest_table(compact_result.get("closed_trades", []))
         if trimmed_trades > 0:
             self._append_backtest_log(
                 f"GUI memory guard: stored only the latest {self._MAX_BACKTEST_RESULT_TRADES} "
@@ -3661,6 +2270,7 @@ class TradingTerminalWindow(QMainWindow):
                 f"({trimmed_optimization_rows} trimmed from UI payload)."
             )
         if result.get("optimization_mode"):
+            best_profile = result.get("best_profile", {})
             sample_note = ""
             if result.get("sampled_profiles") is not None and result.get("evaluated_profiles") is not None:
                 sample_note = (
@@ -3669,47 +2279,30 @@ class TradingTerminalWindow(QMainWindow):
                 )
             if result.get("validated_profiles") is not None:
                 sample_note += f" validated={int(result.get('validated_profiles', 0) or 0)}"
-            optimizer_quality_status = str(
-                compact_summary.get("optimizer_quality_status")
-                or result.get("optimizer_quality_status")
-                or ""
-            ).strip().upper()
-            if optimizer_quality_status:
-                sample_note += f" quality={optimizer_quality_status}"
-            best_profile_preview = (
-                self._compact_profile_preview(best_profile)
-                if self._active_backtest_log_mode == self._BACKTEST_LOG_MODE_QUIET
-                else str(best_profile)
-            )
             self._append_backtest_log(
                 "Optimization finished: "
-                f"{'[KOTH WIN] ' if incoming_is_winner else '[KOTH HOLD] '}"
                 f"{winner_tag}{symbol} "
                 f"[{strategy_label} {interval}] "
-                f"best_profile={best_profile_preview} "
+                f"best_profile={best_profile} "
                 f"pnl={total_pnl_usd:,.2f} "
                 f"win_rate={win_rate_pct:,.2f}% "
-                f"trades={total_trades} (L: {long_trades} / S: {short_trades}) "
-                f"profit_factor={profit_factor_display} "
+                f"trades={total_trades} "
+                f"profit_factor={profit_factor:.2f} "
                 f"max_dd={float(result.get('max_drawdown_pct', 0.0)):.2f}% "
                 f"longest_losses={int(result.get('longest_consecutive_losses', 0) or 0)}"
-                f" verdict={verdict}"
                 f"{sample_note}"
             )
         else:
             self._append_backtest_log(
                 "Backtest finished: "
-                f"{'[KOTH WIN] ' if incoming_is_winner else '[KOTH HOLD] '}"
                 f"{winner_tag}{symbol} "
                 f"[{strategy_label} {interval}] "
                 f"pnl={total_pnl_usd:,.2f} "
                 f"win_rate={win_rate_pct:,.2f}% "
-                f"trades={total_trades} (L: {long_trades} / S: {short_trades}) "
-                f"profit_factor={profit_factor_display} "
-                f"verdict={verdict}"
+                f"trades={total_trades} "
+                f"profit_factor={profit_factor:.2f}"
             )
         self._mark_batch_symbol_progress(symbol, success=True)
-        self._active_backtest_run_context = None
         if self._batch_active:
             QTimer.singleShot(0, self._process_next_in_batch)
         else:
@@ -3723,15 +2316,6 @@ class TradingTerminalWindow(QMainWindow):
         self._reset_progress(f"Backtest failed: {message}")
         self._append_backtest_log(f"Backtest failed: {message}")
         self._backtest_report_errors.append(str(message))
-        self._record_live_vs_challenger_error(
-            run_context=(
-                dict(self._active_backtest_run_context)
-                if isinstance(self._active_backtest_run_context, dict)
-                else None
-            ),
-            message=message,
-        )
-        self._active_backtest_run_context = None
         self._mark_batch_symbol_progress(self._current_backtest_symbol(), success=False)
         if self._batch_active:
             QTimer.singleShot(0, self._process_next_in_batch)
@@ -3762,37 +2346,20 @@ class TradingTerminalWindow(QMainWindow):
         self._append_backtest_log(progress_message)
         self.statusBar().showMessage(progress_message, 5000)
 
-    def _handle_backtest_thread_finished(
-        self,
-        finished_thread: BacktestThread | None = None,
-    ) -> None:
-        if finished_thread is not None:
-            finished_thread.deleteLater()
-            if finished_thread is self._backtest_thread:
-                self._backtest_thread = None
-        elif self._backtest_thread is not None:
+    def _handle_backtest_thread_finished(self) -> None:
+        if self._backtest_thread is not None:
             self._backtest_thread.deleteLater()
             self._backtest_thread = None
-
-        if self._backtest_thread is not None and self._backtest_thread.isRunning():
-            return
-
-        self._active_backtest_run_context = None
         if not self._batch_active and self._backtest_report_pending:
             final_status = "stopped" if self._backtest_stop_requested else "completed"
             self._finalize_backtest_report_session(status=final_status)
         self._backtest_stop_requested = False
         if self._batch_active:
             return
-        self._set_active_backtest_log_mode(
-            self._BACKTEST_LOG_MODE_STANDARD,
-            {"coins": 1, "strategies": 1, "timeframes": 1},
-        )
         self.backtest_coin_combo.setEnabled(True)
         self.backtest_strategy_combo.setEnabled(True)
         self.backtest_interval_combo.setEnabled(True)
         self.backtest_leverage_slider.setEnabled(True)
-        self._set_backtest_period_controls_enabled(True)
         self._set_backtest_symbol_controls_enabled(True)
         if self._bot_thread is None or not self._bot_thread.isRunning():
             self.symbol_combo.setEnabled(True)
@@ -3801,12 +2368,6 @@ class TradingTerminalWindow(QMainWindow):
         self._apply_button_states()
         self._refresh_live_symbol_cards()
         self._refresh_backtest_symbol_cards()
-        if self._pending_close_request:
-            bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
-            backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
-            if not bot_running and not backtest_running:
-                self._pending_close_request = False
-                QTimer.singleShot(0, self.close)
 
     def _on_leverage_changed(self, value: int) -> None:
         if self._bot_thread is not None:
@@ -3843,14 +2404,6 @@ class TradingTerminalWindow(QMainWindow):
         self._flash_market_pulse()
         self._sync_positions_table()
         self._refresh_live_symbol_cards()
-
-    def _handle_runtime_profile_update(self, payload: dict) -> None:
-        normalized_symbol = str(payload.get("symbol", "")).strip().upper()
-        if not normalized_symbol:
-            return
-        self._live_runtime_profiles[normalized_symbol] = dict(payload)
-        self._refresh_live_symbol_cards()
-        self._refresh_trade_readiness(force=True)
 
     def _update_heartbeat_display(self, status_dict: dict) -> None:
         self._heartbeat_snapshot = {
@@ -3922,29 +2475,22 @@ class TradingTerminalWindow(QMainWindow):
             unrealized_pnl = self._calculate_unrealized_net_pnl(trade, last_price)
             total_unrealized_pnl += unrealized_pnl
             fees_paid = float(trade.get("total_fees", 0.0) or 0.0)
-            entry_price = float(trade["entry_price"])
-            quantity = float(trade["qty"])
-            leverage = max(float(trade.get("leverage", 1) or 1), 1.0)
-            invested_margin = (entry_price * quantity) / leverage
 
             self.positions_table.insertRow(row)
             self.positions_table.setItem(row, 0, self._make_item(str(trade["id"])))
             self.positions_table.setItem(row, 1, self._make_item(str(trade["symbol"])))
             self.positions_table.setItem(row, 2, self._make_item(str(trade["side"])))
-            self.positions_table.setItem(row, 3, self._make_item(f"{entry_price:,.4f}", True))
+            self.positions_table.setItem(row, 3, self._make_item(f"{float(trade['entry_price']):,.4f}", True))
             self.positions_table.setItem(row, 4, self._make_item(f"{last_price:,.4f}", True))
-            self.positions_table.setItem(row, 5, self._make_item(f"{quantity:,.6f}", True))
-            self.positions_table.setItem(row, 6, self._make_item(f"{int(leverage)}x", True))
-            self.positions_table.setItem(row, 7, self._make_item(f"{invested_margin:,.2f}", True))
-            self.positions_table.setItem(row, 8, self._make_item(f"{fees_paid:,.4f}", True))
-            self.positions_table.setItem(row, 9, self._make_pnl_item(unrealized_pnl))
-            self.positions_table.setCellWidget(row, 10, self._build_trade_health_bar(trade, last_price))
-            self.positions_table.setItem(row, 11, self._make_item(self._format_timestamp(trade["entry_time"])))
+            self.positions_table.setItem(row, 5, self._make_item(f"{float(trade['qty']):,.6f}", True))
+            self.positions_table.setItem(row, 6, self._make_item(f"{int(trade['leverage'])}x", True))
+            self.positions_table.setItem(row, 7, self._make_item(f"{fees_paid:,.4f}", True))
+            self.positions_table.setItem(row, 8, self._make_pnl_item(unrealized_pnl))
+            self.positions_table.setCellWidget(row, 9, self._build_trade_health_bar(trade, last_price))
+            self.positions_table.setItem(row, 10, self._make_item(self._format_timestamp(trade["entry_time"])))
         self._update_performance_header(total_unrealized_pnl)
 
     def _populate_backtest_table(self, closed_trades: list[dict]) -> None:
-        if self.backtest_table is None:
-            return
         self.backtest_table.setRowCount(0)
         trades_for_table = closed_trades
         if len(trades_for_table) > self._MAX_BACKTEST_TABLE_ROWS:
@@ -3969,13 +2515,16 @@ class TradingTerminalWindow(QMainWindow):
         self._copy_table_to_clipboard(self.positions_table, "Positions table")
 
     def _copy_backtest_table_to_clipboard(self) -> None:
-        summary_text = self._build_backtest_summary_text().strip()
-        if not summary_text:
+        summary_text = self._build_backtest_summary_text()
+        table_text = self._table_to_tsv(self.backtest_table).strip()
+        if not summary_text and not table_text:
             self.statusBar().showMessage("Backtest result is empty.", 3000)
             return
 
+        parts = [part for part in (summary_text, table_text) if part]
+        clipboard_text = "\n\n".join(parts)
         clipboard = QApplication.clipboard()
-        clipboard.setText(summary_text)
+        clipboard.setText(clipboard_text)
         self.statusBar().showMessage("Backtest summary copied to clipboard.", 3000)
         self._append_backtest_log("Backtest summary copied to clipboard.")
 
@@ -4068,382 +2617,16 @@ class TradingTerminalWindow(QMainWindow):
             return int(profile.default_leverage)
         return int(settings.trading.default_leverage)
 
-    @staticmethod
-    def _format_strategy_interval_label(strategy_name: str, interval: str | None = None) -> str:
-        strategy_label = STRATEGY_LABELS.get(strategy_name, strategy_name.replace("_", " ").title())
-        interval_label = str(interval or "").strip()
-        if interval_label:
-            return f"{strategy_label} ({interval_label})"
-        return strategy_label
-
-    def _evaluate_live_vs_challenger_coin(self, symbol: str) -> None:
-        entry = self._live_vs_challenger_coin_results.get(symbol)
-        if not isinstance(entry, dict):
-            return
-        baseline_result = entry.get("baseline_result")
-        challenger_results = entry.get("challenger_results")
-        if not isinstance(challenger_results, dict):
-            challenger_results = {}
-
-        best_challenger: dict[str, object] | None = None
-        if challenger_results:
-            best_challenger = max(
-                (
-                    result
-                    for result in challenger_results.values()
-                    if isinstance(result, dict)
-                ),
-                key=lambda candidate: float(candidate.get("fitness_score", float("-inf")) or float("-inf")),
-                default=None,
-            )
-        entry["best_challenger"] = best_challenger
-
-        if not isinstance(baseline_result, dict) or best_challenger is None:
-            entry["verdict"] = "BEOBACHTEN"
-            entry["delta_fitness"] = 0.0
-            entry["delta_pnl_usd"] = 0.0
-            entry["delta_profit_factor"] = 0.0
-            return
-
-        baseline_fitness = float(baseline_result.get("fitness_score", 0.0) or 0.0)
-        challenger_fitness = float(best_challenger.get("fitness_score", 0.0) or 0.0)
-        baseline_pnl = float(baseline_result.get("total_pnl_usd", 0.0) or 0.0)
-        challenger_pnl = float(best_challenger.get("total_pnl_usd", 0.0) or 0.0)
-        baseline_pf = float(baseline_result.get("profit_factor", 0.0) or 0.0)
-        challenger_pf = float(best_challenger.get("profit_factor", 0.0) or 0.0)
-        delta_fitness = challenger_fitness - baseline_fitness
-        delta_pnl = challenger_pnl - baseline_pnl
-        delta_pf = challenger_pf - baseline_pf
-        entry["delta_fitness"] = float(delta_fitness)
-        entry["delta_pnl_usd"] = float(delta_pnl)
-        entry["delta_profit_factor"] = float(delta_pf)
-
-        if delta_fitness > 1e-9 and (delta_pnl > 0.0 or delta_pf > 0.0):
-            verdict = "ERSETZEN"
-        elif delta_fitness < -1e-9 and (delta_pnl < 0.0 or delta_pf < 0.0):
-            verdict = "BLEIBT"
-        else:
-            verdict = "BEOBACHTEN"
-        entry["verdict"] = verdict
-
-    def _record_live_vs_challenger_result(
-        self,
-        result: dict[str, object],
-        *,
-        run_context: BacktestRunContext,
-        compact_summary: dict[str, object],
-    ) -> None:
-        symbol = str(run_context.get("symbol") or result.get("symbol") or "").strip().upper()
-        if not symbol:
-            return
-        entry = self._live_vs_challenger_coin_results.get(symbol)
-        if not isinstance(entry, dict):
-            return
-
-        strategy_name = self._sanitize_backtest_strategy_name(
-            symbol,
-            str(result.get("strategy_name") or run_context.get("challenger_strategy_name") or "").strip(),
-        )
-        interval = str(
-            result.get("interval")
-            or run_context.get("live_interval")
-            or self._current_backtest_interval()
-        ).strip()
-        run_payload: dict[str, object] = {
-            "symbol": symbol,
-            "strategy_name": strategy_name,
-            "interval": interval,
-            "strategy_label": STRATEGY_LABELS.get(strategy_name, strategy_name),
-            "display_label": self._format_strategy_interval_label(strategy_name, interval),
-            "total_pnl_usd": float(compact_summary.get("net_pnl_usd", result.get("total_pnl_usd", 0.0)) or 0.0),
-            "profit_factor": float(compact_summary.get("robust_profit_factor", result.get("profit_factor", 0.0)) or 0.0),
-            "profit_factor_display": str(
-                compact_summary.get(
-                    "robust_profit_factor_display",
-                    self._format_report_profit_factor(
-                        float(compact_summary.get("robust_profit_factor", result.get("profit_factor", 0.0)) or 0.0)
-                    ),
-                )
-                or "0.00"
-            ),
-            "win_rate_pct": float(compact_summary.get("win_rate_pct", result.get("win_rate_pct", 0.0)) or 0.0),
-            "total_trades": int(compact_summary.get("trade_count", result.get("total_trades", 0)) or 0),
-            "fitness_score": float(calculate_fitness_score(compact_summary)),
-            "best_profile": (
-                dict(result.get("best_profile"))
-                if isinstance(result.get("best_profile"), dict)
-                else {}
-            ),
-        }
-
-        run_role = str(run_context.get("run_role", "") or "").strip().lower()
-        if run_role == "baseline":
-            entry["baseline_result"] = run_payload
-        else:
-            challenger_results = entry.get("challenger_results")
-            if not isinstance(challenger_results, dict):
-                challenger_results = {}
-                entry["challenger_results"] = challenger_results
-            previous = challenger_results.get(strategy_name)
-            if not isinstance(previous, dict) or float(
-                run_payload.get("fitness_score", float("-inf")) or float("-inf")
-            ) >= float(previous.get("fitness_score", float("-inf")) or float("-inf")):
-                challenger_results[strategy_name] = run_payload
-
-        entry["completed_runs"] = int(entry.get("completed_runs", 0) or 0) + 1
-        self._evaluate_live_vs_challenger_coin(symbol)
-        self._refresh_live_vs_challenger_results_view()
-
-    def _record_live_vs_challenger_error(
-        self,
-        *,
-        run_context: BacktestRunContext | None,
-        message: str,
-    ) -> None:
-        if not isinstance(run_context, dict):
-            return
-        symbol = str(run_context.get("symbol", "") or "").strip().upper()
-        if not symbol:
-            return
-        entry = self._live_vs_challenger_coin_results.get(symbol)
-        if not isinstance(entry, dict):
-            return
-        errors = entry.get("errors")
-        if not isinstance(errors, list):
-            errors = []
-            entry["errors"] = errors
-        role = str(run_context.get("run_role", "run") or "run").strip().lower()
-        strategy_name = str(
-            run_context.get("challenger_strategy_name")
-            or run_context.get("live_strategy_name")
-            or ""
-        ).strip()
-        role_label = f"{role}:{strategy_name}" if strategy_name else role
-        errors.append(f"{role_label}: {message}")
-        entry["completed_runs"] = int(entry.get("completed_runs", 0) or 0) + 1
-        self._evaluate_live_vs_challenger_coin(symbol)
-        self._refresh_live_vs_challenger_results_view()
-
-    def _refresh_live_vs_challenger_results_view(self) -> None:
-        if not hasattr(self, "live_vs_challenger_results_output"):
-            return
-        if not self._live_vs_challenger_coin_results:
-            self.live_vs_challenger_results_output.setPlainText(
-                "No Live vs Challenger results yet."
-            )
-            return
-
-        lines: list[str] = []
-        for index, symbol in enumerate(settings.live.available_symbols, start=1):
-            entry = self._live_vs_challenger_coin_results.get(symbol)
-            if not isinstance(entry, dict):
-                continue
-            baseline_result = entry.get("baseline_result")
-            best_challenger = entry.get("best_challenger")
-            verdict = str(entry.get("verdict", "BEOBACHTEN") or "BEOBACHTEN")
-            completed_runs = int(entry.get("completed_runs", 0) or 0)
-            expected_runs = int(entry.get("expected_runs", 0) or 0)
-
-            live_profile = entry.get("live_profile")
-            live_profile_strategy = ""
-            live_profile_interval = ""
-            if isinstance(live_profile, dict):
-                live_profile_strategy = str(live_profile.get("strategy_name", "") or "")
-                live_profile_interval = str(live_profile.get("interval", "") or "")
-            live_profile_label = self._format_strategy_interval_label(
-                live_profile_strategy,
-                live_profile_interval,
-            )
-
-            lines.append(f"{index:02d}. {symbol} | verdict={verdict} | progress={completed_runs}/{expected_runs}")
-            lines.append(f"    live_profile={live_profile_label}")
-            if isinstance(baseline_result, dict):
-                lines.append(
-                    "    live_result="
-                    + (
-                        f"pnl={float(baseline_result.get('total_pnl_usd', 0.0) or 0.0):.2f} "
-                        f"pf={str(baseline_result.get('profit_factor_display', '0.00') or '0.00')} "
-                        f"wr={float(baseline_result.get('win_rate_pct', 0.0) or 0.0):.2f}% "
-                        f"tr={int(baseline_result.get('total_trades', 0) or 0)}"
-                    )
-                )
-            else:
-                lines.append("    live_result=pending")
-
-            if isinstance(best_challenger, dict):
-                lines.append(
-                    "    best_challenger="
-                    + (
-                        f"{str(best_challenger.get('display_label', '-') or '-')} "
-                        f"pnl={float(best_challenger.get('total_pnl_usd', 0.0) or 0.0):.2f} "
-                        f"pf={str(best_challenger.get('profit_factor_display', '0.00') or '0.00')} "
-                        f"wr={float(best_challenger.get('win_rate_pct', 0.0) or 0.0):.2f}% "
-                        f"tr={int(best_challenger.get('total_trades', 0) or 0)}"
-                    )
-                )
-                lines.append(
-                    "    delta="
-                    + (
-                        f"fitness={float(entry.get('delta_fitness', 0.0) or 0.0):.2f} "
-                        f"pnl={float(entry.get('delta_pnl_usd', 0.0) or 0.0):+.2f} "
-                        f"pf={float(entry.get('delta_profit_factor', 0.0) or 0.0):+.2f}"
-                    )
-                )
-            else:
-                lines.append("    best_challenger=pending")
-
-            errors = entry.get("errors")
-            if isinstance(errors, list) and errors:
-                lines.append(f"    errors={len(errors)}")
-            lines.append("")
-
-        self.live_vs_challenger_results_output.setPlainText("\n".join(lines).strip())
-
-    def _write_live_vs_challenger_export(
-        self,
-        *,
-        status: str,
-        started_at: datetime,
-        finished_at: datetime,
-    ) -> Path | None:
-        if not self._live_vs_challenger_coin_results:
-            return None
-
-        duration_seconds = int(max(0.0, (finished_at - started_at).total_seconds()))
-        lines: list[str] = [
-            "Live vs Challenger Summary",
-            f"Status: {status}",
-            f"Started (UTC): {started_at.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Finished (UTC): {finished_at.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Duration (s): {duration_seconds}",
-            f"Coins: {len(self._live_vs_challenger_coin_results)}",
-            f"Strategies compared per coin: baseline + challengers ({', '.join(LIVE_VS_CHALLENGER_STRATEGIES)})",
-            "",
-        ]
-
-        verdict_counts = Counter(
-            str(entry.get("verdict", "BEOBACHTEN") or "BEOBACHTEN")
-            for entry in self._live_vs_challenger_coin_results.values()
-            if isinstance(entry, dict)
-        )
-
-        for index, symbol in enumerate(settings.live.available_symbols, start=1):
-            entry = self._live_vs_challenger_coin_results.get(symbol)
-            if not isinstance(entry, dict):
-                continue
-            lines.append(f"{index}. {symbol}")
-            live_profile = entry.get("live_profile")
-            live_profile_text = "-"
-            if isinstance(live_profile, dict):
-                live_profile_text = self._format_strategy_interval_label(
-                    str(live_profile.get("strategy_name", "") or ""),
-                    str(live_profile.get("interval", "") or ""),
-                )
-            lines.append(f"  live_profile={live_profile_text}")
-            if isinstance(live_profile, dict):
-                lines.append(
-                    "  live_profile_json="
-                    + json.dumps(live_profile, ensure_ascii=True, sort_keys=True)
-                )
-
-            baseline_result = entry.get("baseline_result")
-            if isinstance(baseline_result, dict):
-                lines.append(
-                    "  baseline_metrics="
-                    + (
-                        f"pnl={float(baseline_result.get('total_pnl_usd', 0.0) or 0.0):.2f} "
-                        f"pf={str(baseline_result.get('profit_factor_display', '0.00') or '0.00')} "
-                        f"wr={float(baseline_result.get('win_rate_pct', 0.0) or 0.0):.2f}% "
-                        f"tr={int(baseline_result.get('total_trades', 0) or 0)}"
-                    )
-                )
-                baseline_profile = baseline_result.get("best_profile")
-                if isinstance(baseline_profile, dict) and baseline_profile:
-                    lines.append(
-                        "  baseline_best_profile="
-                        + json.dumps(baseline_profile, ensure_ascii=True, sort_keys=True)
-                    )
-            else:
-                lines.append("  baseline_metrics=pending/failed")
-
-            best_challenger = entry.get("best_challenger")
-            if isinstance(best_challenger, dict):
-                lines.append(
-                    "  best_challenger="
-                    + (
-                        f"{str(best_challenger.get('display_label', '-') or '-')} "
-                        f"pnl={float(best_challenger.get('total_pnl_usd', 0.0) or 0.0):.2f} "
-                        f"pf={str(best_challenger.get('profit_factor_display', '0.00') or '0.00')} "
-                        f"wr={float(best_challenger.get('win_rate_pct', 0.0) or 0.0):.2f}% "
-                        f"tr={int(best_challenger.get('total_trades', 0) or 0)}"
-                    )
-                )
-                challenger_profile = best_challenger.get("best_profile")
-                if isinstance(challenger_profile, dict) and challenger_profile:
-                    lines.append(
-                        "  challenger_best_profile="
-                        + json.dumps(challenger_profile, ensure_ascii=True, sort_keys=True)
-                    )
-                lines.append(
-                    "  delta="
-                    + (
-                        f"fitness={float(entry.get('delta_fitness', 0.0) or 0.0):.2f} "
-                        f"pnl={float(entry.get('delta_pnl_usd', 0.0) or 0.0):+.2f} "
-                        f"pf={float(entry.get('delta_profit_factor', 0.0) or 0.0):+.2f}"
-                    )
-                )
-            else:
-                lines.append("  best_challenger=none")
-
-            lines.append(f"  verdict={str(entry.get('verdict', 'BEOBACHTEN') or 'BEOBACHTEN')}")
-            lines.append(
-                "  progress="
-                + (
-                    f"{int(entry.get('completed_runs', 0) or 0)}/"
-                    f"{int(entry.get('expected_runs', 0) or 0)}"
-                )
-            )
-            errors = entry.get("errors")
-            if isinstance(errors, list) and errors:
-                lines.append(f"  errors={len(errors)}")
-                for error_line in errors[:8]:
-                    lines.append(f"    - {str(error_line)}")
-            lines.append("")
-
-        lines.extend(
-            [
-                "Summary",
-                f"  BLEIBT: {int(verdict_counts.get('BLEIBT', 0))}",
-                f"  ERSETZEN: {int(verdict_counts.get('ERSETZEN', 0))}",
-                f"  BEOBACHTEN: {int(verdict_counts.get('BEOBACHTEN', 0))}",
-            ]
-        )
-
-        reports_dir = Path(__file__).resolve().parent / "archive" / "research_reports"
-        reports_dir.mkdir(parents=True, exist_ok=True)
-        export_path = reports_dir / f"live_vs_challenger_summary_{finished_at.strftime('%Y%m%d_%H%M%S')}.txt"
-        export_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-        self._live_vs_challenger_last_export_path = export_path
-        return export_path
-
     def _build_backtest_summary_text(self) -> str:
         result = self._last_backtest_result
         if not result:
             return ""
-        compact_summary = (
-            dict(result.get("compact_summary"))
-            if isinstance(result.get("compact_summary"), dict)
-            else generate_compact_summary(result)
-        )
 
         symbol = str(result.get("symbol") or self._current_backtest_symbol())
-        strategy_name = self._sanitize_backtest_strategy_name(
-            symbol,
-            str(result.get("strategy_name") or self._current_backtest_strategy_name()),
-        )
+        strategy_name = str(result.get("strategy_name") or self._current_backtest_strategy_name())
         interval = str(result.get("interval") or self._current_backtest_interval())
         strategy_label = STRATEGY_LABELS.get(strategy_name, strategy_name)
-        total_trades = int(compact_summary.get("trade_count", result.get("total_trades", 0)) or 0)
+        total_trades = int(result.get("total_trades", 0) or 0)
         low_sample, sample_quality = self._classify_sample_quality(total_trades)
         effective_leverage = self._resolve_report_leverage(symbol, result.get("effective_leverage"))
         history_start_text = self._normalize_utc_text(
@@ -4479,20 +2662,15 @@ class TradingTerminalWindow(QMainWindow):
                 return float(strategy_diagnostics.get(field_name, 0.0) or 0.0)
             return 0.0
         profit_factor = float(result.get("profit_factor", 0.0) or 0.0)
-        robust_pf_display = str(compact_summary.get("robust_profit_factor_display", "0.00") or "0.00")
-        avg_win_fee_ratio_display = str(compact_summary.get("avg_win_fee_ratio_display", "0.00") or "0.00")
-        net_pnl_usd = float(compact_summary.get("net_pnl_usd", result.get("total_pnl_usd", 0.0)) or 0.0)
         lines = [
             "Backtest Summary",
             f"Symbol\t{symbol}",
             f"Strategy\t{strategy_label}",
             f"Interval\t{interval}",
-            f"Net PnL USD\t{net_pnl_usd:.2f}",
+            f"Total PnL USD\t{float(result.get('total_pnl_usd', 0.0) or 0.0):.2f}",
             f"Win Rate %\t{float(result.get('win_rate_pct', 0.0) or 0.0):.2f}",
-            f"Robust PF\t{robust_pf_display}",
             f"Profit Factor\t{self._format_report_profit_factor(profit_factor)}",
             f"Total Trades\t{total_trades}",
-            f"Avg Win/Fee Ratio\t{avg_win_fee_ratio_display}",
             f"Average Win USD\t{float(result.get('average_win_usd', 0.0) or 0.0):.2f}",
             f"Average Loss USD\t{float(result.get('average_loss_usd', 0.0) or 0.0):.2f}",
             f"Real RRR\t{float(result.get('real_rrr', 0.0) or 0.0):.2f}",
@@ -4506,8 +2684,6 @@ class TradingTerminalWindow(QMainWindow):
             "Leverage Mode\t"
             f"configured={int(result.get('configured_leverage', settings.trading.default_leverage) or settings.trading.default_leverage)}x "
             f"effective={effective_leverage}x",
-            "HF Metrics\t"
-            f"real_lev_avg={float(result.get('real_leverage_avg', 0.0) or 0.0):.2f}x",
             f"Stop / Take %\t{float(result.get('stop_loss_pct', 0.0) or 0.0):.2f} / {float(result.get('take_profit_pct', 0.0) or 0.0):.2f}",
             "Trailing Act / Dist %\t"
             f"{float(result.get('trailing_activation_pct', 0.0) or 0.0):.2f} / {float(result.get('trailing_distance_pct', 0.0) or 0.0):.2f}",
@@ -4543,43 +2719,7 @@ class TradingTerminalWindow(QMainWindow):
             )
         if result.get("optimization_mode"):
             lines.append(f"Evaluated Profiles\t{int(result.get('evaluated_profiles', 0) or 0)}")
-            lines.append(f"Validated Profiles\t{int(result.get('validated_profiles', 0) or 0)}")
             lines.append(f"Sampled Profiles\t{int(result.get('sampled_profiles', 0) or 0)}")
-            lines.append(f"Theoretical Profiles\t{int(result.get('theoretical_profiles', 0) or 0)}")
-            lines.append(f"Sampling Coverage %\t{float(result.get('sampling_coverage_pct', 0.0) or 0.0):.2f}")
-            lines.append(f"Sampling Mode\t{str(result.get('sampling_mode', '') or 'n/a')}")
-            optimizer_quality_status = str(
-                result.get("optimizer_quality_status")
-                or compact_summary.get("optimizer_quality_status")
-                or ""
-            ).strip().upper()
-            if optimizer_quality_status:
-                lines.append(f"Optimizer Verdict\t{optimizer_quality_status}")
-            lines.append(f"Search Window Candles\t{int(result.get('search_window_candles', 0) or 0)}")
-            lines.append(f"Optimizer Workers\t{int(result.get('optimizer_worker_processes', 0) or 0)}")
-            lines.append(
-                "Full History Optimization\t"
-                + ("yes" if bool(result.get("full_history_optimization")) else "no")
-            )
-            lines.append(
-                "Force Full Scan\t"
-                + ("yes" if bool(result.get("optimizer_force_full_scan")) else "no")
-            )
-            session_leaderboard = (
-                result.get("session_leaderboard")
-                if result.get("session_leaderboard") is not None
-                else result.get("session_day_breakdown")
-            )
-            if isinstance(session_leaderboard, list) and session_leaderboard:
-                top_row = session_leaderboard[0]
-                if isinstance(top_row, dict):
-                    lines.append(
-                        "Top Session\t"
-                        f"{str(top_row.get('session', '') or '').strip().lower()} "
-                        f"(Avg PF {float(top_row.get('avg_pf', 0.0) or 0.0):.2f}, "
-                        f"Avg WR {float(top_row.get('avg_win_rate_pct', 0.0) or 0.0):.2f}%, "
-                        f"Runs {int(top_row.get('runs', 0) or 0)})"
-                    )
             best_profile = result.get("best_profile", {})
             lines.append(
                 "Best Profile\t"
@@ -4597,9 +2737,8 @@ class TradingTerminalWindow(QMainWindow):
     def _record_backtest_report_entry(self, result: dict) -> None:
         if not self._backtest_report_pending:
             self._begin_backtest_report_session(mode="single")
-        compact_summary = generate_compact_summary(result)
         symbol = str(result.get("symbol") or self._current_backtest_symbol())
-        total_trades = int(compact_summary.get("trade_count", result.get("total_trades", 0)) or 0)
+        total_trades = int(result.get("total_trades", 0) or 0)
         total_signals = int(result.get("total_signals", 0) or 0)
         approved_signals = int(result.get("approved_signals", 0) or 0)
         blocked_signals = int(result.get("blocked_signals", 0) or 0)
@@ -4625,31 +2764,6 @@ class TradingTerminalWindow(QMainWindow):
             if isinstance(result.get("best_profile"), dict)
             else {}
         )
-        raw_session_leaderboard = (
-            result.get("session_leaderboard")
-            if result.get("session_leaderboard") is not None
-            else result.get("session_day_breakdown")
-        )
-        session_leaderboard: list[dict[str, object]] = []
-        if isinstance(raw_session_leaderboard, list):
-            for raw_row in raw_session_leaderboard:
-                if not isinstance(raw_row, dict):
-                    continue
-                session_label = str(raw_row.get("session", "") or "").strip().lower()
-                if not session_label:
-                    continue
-                with suppress(Exception):
-                    session_leaderboard.append(
-                        {
-                            "session": session_label,
-                            "avg_pf": float(raw_row.get("avg_pf", 0.0) or 0.0),
-                            "avg_win_rate_pct": float(raw_row.get("avg_win_rate_pct", 0.0) or 0.0),
-                            "avg_pnl_usd": float(raw_row.get("avg_pnl_usd", 0.0) or 0.0),
-                            "runs": int(raw_row.get("runs", 0) or 0),
-                            "top_runs": int(raw_row.get("top_runs", 0) or 0),
-                        }
-                    )
-        session_top = session_leaderboard[0] if session_leaderboard else {}
 
         def _diag_int(field_name: str) -> int:
             with suppress(Exception):
@@ -4663,22 +2777,14 @@ class TradingTerminalWindow(QMainWindow):
 
         entry: dict[str, object] = {
             "symbol": symbol,
-            "strategy_name": self._sanitize_backtest_strategy_name(
-                symbol,
-                str(result.get("strategy_name") or self._current_backtest_strategy_name()),
-            ),
+            "strategy_name": str(result.get("strategy_name") or self._current_backtest_strategy_name()),
             "interval": str(result.get("interval") or self._current_backtest_interval()),
             "optimization_mode": optimization_mode,
-            "total_pnl_usd": float(compact_summary.get("net_pnl_usd", result.get("total_pnl_usd", 0.0)) or 0.0),
-            "profit_factor": float(compact_summary.get("robust_profit_factor", result.get("profit_factor", 0.0)) or 0.0),
-            "robust_profit_factor_display": str(compact_summary.get("robust_profit_factor_display", "0.00") or "0.00"),
-            "win_rate_pct": float(compact_summary.get("win_rate_pct", result.get("win_rate_pct", 0.0)) or 0.0),
+            "total_pnl_usd": float(result.get("total_pnl_usd", 0.0) or 0.0),
+            "profit_factor": float(result.get("profit_factor", 0.0) or 0.0),
+            "win_rate_pct": float(result.get("win_rate_pct", 0.0) or 0.0),
             "total_trades": total_trades,
-            "max_drawdown_pct": float(compact_summary.get("max_drawdown_pct", result.get("max_drawdown_pct", 0.0)) or 0.0),
-            "avg_win_fee_ratio": float(compact_summary.get("avg_win_fee_ratio", 0.0) or 0.0),
-            "avg_win_fee_ratio_display": str(compact_summary.get("avg_win_fee_ratio_display", "0.00") or "0.00"),
-            "avg_win_usd": float(compact_summary.get("avg_win_usd", result.get("average_win_usd", 0.0)) or 0.0),
-            "real_leverage_avg": float(compact_summary.get("real_leverage_avg", result.get("real_leverage_avg", 0.0)) or 0.0),
+            "max_drawdown_pct": float(result.get("max_drawdown_pct", 0.0) or 0.0),
             "longest_consecutive_losses": int(result.get("longest_consecutive_losses", 0) or 0),
             "real_rrr": float(result.get("real_rrr", 0.0) or 0.0),
             "effective_leverage": self._resolve_report_leverage(
@@ -4738,44 +2844,11 @@ class TradingTerminalWindow(QMainWindow):
             "low_sample": bool(low_sample),
             "sample_quality": sample_quality,
             "best_profile": best_profile,
-            "compact_summary": dict(compact_summary),
             "sampled_profiles": int(result.get("sampled_profiles", 0) or 0),
-            "evaluated_profiles": int(result.get("evaluated_profiles", 0) or 0),
-            "validated_profiles": int(result.get("validated_profiles", 0) or 0),
             "theoretical_profiles": int(result.get("theoretical_profiles", 0) or 0),
             "sampling_coverage_pct": float(result.get("sampling_coverage_pct", 0.0) or 0.0),
             "sampling_random_seed": int(result.get("sampling_random_seed", 0) or 0),
-            "sampling_mode": str(result.get("sampling_mode", "") or "n/a"),
-            "optimizer_quality_status": str(
-                compact_summary.get("optimizer_quality_status")
-                or result.get("optimizer_quality_status")
-                or ""
-            ).strip().upper(),
-            "search_window_candles": int(result.get("search_window_candles", 0) or 0),
-            "full_history_optimization": bool(result.get("full_history_optimization")),
-            "optimizer_worker_processes": int(result.get("optimizer_worker_processes", 0) or 0),
-            "optimizer_max_sample_profiles": int(result.get("optimizer_max_sample_profiles", 0) or 0),
-            "optimizer_force_full_scan": bool(result.get("optimizer_force_full_scan")),
-            "session_leaderboard": [dict(row) for row in session_leaderboard[:8]],
-            "session_top_session": str(session_top.get("session", "") or ""),
-            "session_top_avg_pf": float(session_top.get("avg_pf", 0.0) or 0.0),
-            "session_top_avg_win_rate_pct": float(session_top.get("avg_win_rate_pct", 0.0) or 0.0),
-            "session_top_runs": int(session_top.get("runs", 0) or 0),
         }
-        run_context = (
-            dict(self._active_backtest_run_context)
-            if isinstance(self._active_backtest_run_context, dict)
-            else {}
-        )
-        if str(run_context.get("mode", "") or "") == BACKTEST_MODE_LIVE_VS_CHALLENGER:
-            entry["comparison_mode"] = BACKTEST_MODE_LIVE_VS_CHALLENGER
-            entry["comparison_role"] = str(run_context.get("run_role", "") or "")
-            entry["comparison_live_strategy_name"] = str(
-                run_context.get("live_strategy_name", "") or ""
-            )
-            entry["comparison_live_interval"] = str(
-                run_context.get("live_interval", "") or ""
-            )
         self._backtest_report_entries.append(entry)
 
     def _finalize_backtest_report_session(self, *, status: str) -> None:
@@ -4860,6 +2933,17 @@ class TradingTerminalWindow(QMainWindow):
             if total_trades_all > 0
             else 0.0
         )
+        win_rate_target_lower = 28.0
+        win_rate_target_upper = 30.0
+        win_rate_target_center = (win_rate_target_lower + win_rate_target_upper) / 2.0
+        win_rate_target_hit = win_rate_target_lower <= overall_hit_rate_pct <= win_rate_target_upper
+        win_rate_near_target = abs(overall_hit_rate_pct - win_rate_target_center) <= 2.0
+        if win_rate_target_hit:
+            win_rate_target_status = "IM ZIELBAND"
+        elif win_rate_near_target:
+            win_rate_target_status = "NAHE AM ZIELBAND"
+        else:
+            win_rate_target_status = "AUSSERHALB ZIELBAND"
         max_drawdown_batch_pct = max(
             (
                 float(entry.get("max_drawdown_pct", 0.0) or 0.0)
@@ -4940,54 +3024,40 @@ class TradingTerminalWindow(QMainWindow):
             if seed_values
             else "n/a"
         )
-        evaluated_profiles_total = sum(
-            int(entry.get("evaluated_profiles", 0) or 0)
-            for entry in optimization_entries
-        )
-        validated_profiles_total = sum(
-            int(entry.get("validated_profiles", 0) or 0)
-            for entry in optimization_entries
-        )
-        force_full_scan_runs = sum(
-            1 for entry in optimization_entries if bool(entry.get("optimizer_force_full_scan"))
-        )
-        optimizer_workers_display = "n/a"
-        sampling_mode_display = "n/a"
-        search_window_candles_display = "n/a"
-        full_history_optimization_display = "n/a"
-        session_top_counter = Counter(
-            str(entry.get("session_top_session", "") or "").strip().lower()
-            for entry in optimization_entries
-            if str(entry.get("session_top_session", "") or "").strip()
-        )
-        session_top_distribution = (
-            ", ".join(
-                f"{session}:{count}"
-                for session, count in sorted(
-                    session_top_counter.items(),
-                    key=lambda item: (-int(item[1]), str(item[0])),
-                )
-            )
-            if session_top_counter
-            else "n/a"
-        )
-        is_win_rate_robust = overall_hit_rate_pct >= float(BACKTEST_DEPLOY_MIN_WIN_RATE_PCT)
-        is_pf_robust = rating_profit_factor >= float(BACKTEST_DEPLOY_MIN_ROBUST_PF)
-        if is_win_rate_robust and is_pf_robust:
-            final_verdict = "BESTANDEN"
-            verdict_reason = (
-                "Durchschnittliche Trefferquote und Profit-Faktor erfüllen die Robustheits-Grenze."
-            )
+        reinfall_reasons: list[str] = []
+        if total_pnl < 0.0:
+            reinfall_reasons.append("Gesamtergebnis negativ")
+        if max_drawdown_batch_pct > 20.0:
+            reinfall_reasons.append("Drawdown zu hoch")
+        if total_trades_all < 15:
+            reinfall_reasons.append("Zu wenig Trades")
+        if reinfall_reasons:
+            final_verdict = "REINFALL"
+            verdict_reason = ", ".join(reinfall_reasons)
         else:
-            final_verdict = "WARNUNG"
-            verdict_reason = (
-                "Durchschnittliche Trefferquote oder Profit-Faktor unterhalb der Robustheits-Grenze."
-            )
-        mode_label = {
-            "batch": "Batch",
-            "single": "Single",
-            BACKTEST_MODE_LIVE_VS_CHALLENGER: "Live vs Challenger",
-        }.get(self._backtest_report_mode, str(self._backtest_report_mode).title())
+            warning_reasons: list[str] = []
+            minimum_pf = 1.05 if win_rate_near_target else 1.10
+            if rating_profit_factor < minimum_pf:
+                warning_reasons.append("Profit-Faktor zu niedrig")
+            if average_gain_per_trade_pct < 0.05:
+                warning_reasons.append("Ø Gewinn pro Trade zu niedrig")
+            if not win_rate_near_target:
+                warning_reasons.append("Trefferquote außerhalb Zielkorridor 28-30%")
+            if warning_reasons:
+                final_verdict = "WARNUNG"
+                verdict_reason = ", ".join(warning_reasons)
+            elif (
+                total_pnl > 0.0
+                and max_drawdown_batch_pct < 15.0
+                and average_gain_per_trade_pct > 0.07
+                and win_rate_near_target
+            ):
+                final_verdict = "PASST"
+                verdict_reason = "Kennzahlen im Zielbereich (Win-Rate-Fokus erfüllt)"
+            else:
+                final_verdict = "WARNUNG"
+                verdict_reason = "Grenzfall, Zielkriterien nicht voll erfüllt"
+        mode_label = "Batch" if self._backtest_report_mode == "batch" else "Single"
 
         def _display_single_or_mixed(
             values: list[object],
@@ -5055,25 +3125,6 @@ class TradingTerminalWindow(QMainWindow):
         optimization_mode_display = _display_single_or_mixed(
             ["yes" if bool(entry.get("optimization_mode")) else "no" for entry in entries]
         )
-        optimizer_workers_display = _display_single_or_mixed(
-            [entry.get("optimizer_worker_processes") for entry in optimization_entries],
-            empty_label="n/a",
-        )
-        sampling_mode_display = _display_single_or_mixed(
-            [entry.get("sampling_mode") for entry in optimization_entries],
-            empty_label="n/a",
-        )
-        search_window_candles_display = _display_single_or_mixed(
-            [entry.get("search_window_candles") for entry in optimization_entries],
-            empty_label="n/a",
-        )
-        full_history_optimization_display = _display_single_or_mixed(
-            [
-                "yes" if bool(entry.get("full_history_optimization")) else "no"
-                for entry in optimization_entries
-            ],
-            empty_label="n/a",
-        )
 
         lines = [
             "Backtest Compact Summary",
@@ -5120,13 +3171,9 @@ class TradingTerminalWindow(QMainWindow):
             f"Fee Stress Side %: {fee_side_display}",
             f"Leverage Mode: {leverage_mode_display}",
             f"Optimization Mode: {optimization_mode_display}",
-            f"Optimizer Workers: {optimizer_workers_display}",
-            f"Sampling Mode: {sampling_mode_display}",
-            f"Search Window Candles: {search_window_candles_display}",
-            f"Full-History Optimization: {full_history_optimization_display}",
             "",
             "Run Details",
-            "symbol | strategy | interval | leverage | real_leverage_avg | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top",
+            "symbol | strategy | interval | leverage | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | profit_factor | win_rate_pct | trades | max_dd_pct | real_rrr | low_sample | sample_quality | optimization",
         ]
         for entry in entries:
             strategy_name = str(entry.get("strategy_name", ""))
@@ -5145,7 +3192,6 @@ class TradingTerminalWindow(QMainWindow):
                         strategy_label,
                         str(entry.get("interval", "-")),
                         f"{int(entry.get('effective_leverage', 0) or 0)}x",
-                        f"{float(entry.get('real_leverage_avg', 0.0) or 0.0):.2f}x",
                         period_utc,
                         str(int(entry.get("history_candles", 0) or 0)),
                         str(int(entry.get("total_signals", 0) or 0)),
@@ -5177,23 +3223,10 @@ class TradingTerminalWindow(QMainWindow):
                         f"{float(entry.get('win_rate_pct', 0.0) or 0.0):.2f}",
                         str(int(entry.get("total_trades", 0) or 0)),
                         f"{float(entry.get('max_drawdown_pct', 0.0) or 0.0):.2f}",
-                        f"{float(entry.get('avg_win_fee_ratio', 0.0) or 0.0):.2f}",
-                        f"{float(entry.get('avg_win_usd', 0.0) or 0.0):.2f}",
                         f"{float(entry.get('real_rrr', 0.0) or 0.0):.2f}",
                         str(bool(entry.get("low_sample"))).lower(),
                         str(entry.get("sample_quality", "-")),
                         "yes" if bool(entry.get("optimization_mode")) else "no",
-                        str(int(entry.get("evaluated_profiles", 0) or 0)),
-                        str(int(entry.get("validated_profiles", 0) or 0)),
-                        str(int(entry.get("sampled_profiles", 0) or 0)),
-                        str(int(entry.get("theoretical_profiles", 0) or 0)),
-                        str(entry.get("sampling_mode", "n/a") or "n/a"),
-                        f"{float(entry.get('sampling_coverage_pct', 0.0) or 0.0):.2f}",
-                        str(int(entry.get("search_window_candles", 0) or 0)),
-                        str(int(entry.get("optimizer_worker_processes", 0) or 0)),
-                        "yes" if bool(entry.get("full_history_optimization")) else "no",
-                        "yes" if bool(entry.get("optimizer_force_full_scan")) else "no",
-                        str(entry.get("session_top_session", "") or "-"),
                     ]
                 )
             )
@@ -5202,16 +3235,6 @@ class TradingTerminalWindow(QMainWindow):
                 lines.append(
                     "  best_profile="
                     + json.dumps(best_profile, ensure_ascii=True, sort_keys=True)
-                )
-            session_leaderboard = entry.get("session_leaderboard")
-            if isinstance(session_leaderboard, list) and session_leaderboard:
-                lines.append(
-                    "  session_leaderboard="
-                    + json.dumps(
-                        list(session_leaderboard)[:8],
-                        ensure_ascii=True,
-                        sort_keys=True,
-                    )
                 )
 
         if entries:
@@ -5224,7 +3247,7 @@ class TradingTerminalWindow(QMainWindow):
                 [
                     "",
                     "Strategy Aggregates (All Coins)",
-                    "strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals | avg_real_leverage",
+                    "strategy | runs | profitable_runs | total_pnl_usd | total_trades | low_sample_runs | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_gate_pass_rate_pct | median_gate_pass_rate_pct | avg_max_dd_pct | avg_total_signals | avg_approved_signals | avg_blocked_signals",
                 ]
             )
             sorted_groups = sorted(
@@ -5313,15 +3336,6 @@ class TradingTerminalWindow(QMainWindow):
                     if group_runs > 0
                     else 0.0
                 )
-                group_avg_real_leverage = (
-                    sum(
-                        float(group_entry.get("real_leverage_avg", 0.0) or 0.0)
-                        for group_entry in group_entries
-                    )
-                    / group_runs
-                    if group_runs > 0
-                    else 0.0
-                )
                 group_pf_finite = [
                     float(group_entry.get("profit_factor", 0.0) or 0.0)
                     for group_entry in group_entries
@@ -5371,7 +3385,6 @@ class TradingTerminalWindow(QMainWindow):
                             f"{group_avg_total_signals:.2f}",
                             f"{group_avg_approved_signals:.2f}",
                             f"{group_avg_blocked_signals:.2f}",
-                            f"{group_avg_real_leverage:.2f}",
                         ]
                     )
                 )
@@ -5388,9 +3401,11 @@ class TradingTerminalWindow(QMainWindow):
                 "=== ABSCHLUSS-BEWERTUNG (STATISTIK) ===",
                 "================================================================================",
                 f"Gesamt-Ergebnis:     {total_pnl:.2f} USD",
-                f"Profit-Faktor:       {self._format_report_profit_factor(rating_profit_factor)} (Ziel: >= {BACKTEST_DEPLOY_MIN_ROBUST_PF:.1f})",
+                f"Profit-Faktor:       {self._format_report_profit_factor(rating_profit_factor)} (Ziel: > 1.2)",
                 f"Trefferquote:        {overall_hit_rate_pct:.2f}% (HAUPTFOKUS)",
-                f"Win-Rate Minimum:    > {BACKTEST_DEPLOY_MIN_WIN_RATE_PCT:.2f}%",
+                "Win-Rate Zielband:   "
+                f"{win_rate_target_lower:.2f}% - {win_rate_target_upper:.2f}% "
+                f"| Status: {win_rate_target_status}",
                 f"Anzahl Trades:       {total_trades_all} (Wichtig: Aussagekräftig erst ab ~25 Trades)",
                 "--------------------------------------------------------------------------------",
                 "RISIKO- & GEBÜHREN-CHECK:",
@@ -5400,10 +3415,6 @@ class TradingTerminalWindow(QMainWindow):
                 "--------------------------------------------------------------------------------",
                 "OPTIMIERER-INFO:",
                 f"Abdeckung (Grid):    {grid_coverage_pct:.2f}% (Stichproben-Größe)",
-                f"Evaluated Profiles:  {evaluated_profiles_total}",
-                f"Validated Profiles:  {validated_profiles_total}",
-                f"Force Full Scan:     {force_full_scan_runs}/{len(optimization_entries)} run(s)",
-                f"Top Session Votes:   {session_top_distribution}",
                 f"Zufalls-Seed:        {seed_display}",
                 "--------------------------------------------------------------------------------",
                 f"URTEIL: {final_verdict}",
@@ -5412,27 +3423,12 @@ class TradingTerminalWindow(QMainWindow):
             ]
         )
 
-        reports_dir = Path(__file__).resolve().parent / "archive" / "backtest_compact_summaries"
-        reports_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir = Path(__file__).resolve().parent
         filename = f"backtest_compact_summary_{end_at.strftime('%Y%m%d_%H%M%S')}.txt"
         report_path = reports_dir / filename
         report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        if self._backtest_report_mode == BACKTEST_MODE_LIVE_VS_CHALLENGER:
-            comparison_export_path = self._write_live_vs_challenger_export(
-                status=status,
-                started_at=started_at,
-                finished_at=end_at,
-            )
-            if comparison_export_path is not None:
-                self._append_backtest_log(
-                    "Live vs Challenger summary written: "
-                    f"{comparison_export_path.relative_to(Path(__file__).resolve().parent)}"
-                )
-
-        self._append_backtest_log(
-            f"Compact backtest summary written: {report_path.relative_to(Path(__file__).resolve().parent)}"
-        )
+        self._append_backtest_log(f"Compact backtest summary written: {report_path.name}")
         self.statusBar().showMessage(f"Backtest summary saved: {report_path.name}", 8000)
 
         self._backtest_report_started_at = None
@@ -5643,13 +3639,8 @@ class TradingTerminalWindow(QMainWindow):
         self._append_html_log(self.log_output, formatted_message, auto_scroll=is_trade_event)
 
     def _append_backtest_log(self, message: str) -> None:
-        progress_prefix = ""
         if message.startswith(self._HISTORY_PROGRESS_PREFIX):
-            progress_prefix = self._HISTORY_PROGRESS_PREFIX
-        elif message.startswith(self._SIGNAL_CACHE_PROGRESS_PREFIX):
-            progress_prefix = self._SIGNAL_CACHE_PROGRESS_PREFIX
-        if progress_prefix:
-            compact_message = message[len(progress_prefix):].strip()
+            compact_message = message[len(self._HISTORY_PROGRESS_PREFIX):].strip()
             formatted_message, _is_trade_event = self._format_log_html(compact_message)
             self._append_html_log(
                 self.backtest_log_output,
@@ -5694,68 +3685,6 @@ class TradingTerminalWindow(QMainWindow):
         if auto_scroll and was_at_bottom:
             scrollbar.setValue(scrollbar.maximum())
 
-    def _sync_backtest_symbol_universe(self) -> None:
-        configured_symbols = list(_configured_backtest_symbols())
-        if not configured_symbols:
-            return
-
-        if hasattr(self, "backtest_coin_combo"):
-            existing_combo_symbols = [
-                self.backtest_coin_combo.itemText(index)
-                for index in range(self.backtest_coin_combo.count())
-            ]
-            if existing_combo_symbols != configured_symbols:
-                current_symbol = self.backtest_coin_combo.currentText()
-                was_blocked = self.backtest_coin_combo.blockSignals(True)
-                self.backtest_coin_combo.clear()
-                self.backtest_coin_combo.addItems(configured_symbols)
-                target_symbol = (
-                    current_symbol
-                    if current_symbol in configured_symbols
-                    else configured_symbols[0]
-                )
-                self.backtest_coin_combo.setCurrentText(target_symbol)
-                self.backtest_coin_combo.blockSignals(was_blocked)
-
-        stale_symbols = [
-            symbol
-            for symbol in list(self._backtest_coin_cards.keys())
-            if symbol not in configured_symbols
-        ]
-        for symbol in stale_symbols:
-            card = self._backtest_coin_cards.pop(symbol, None)
-            if card is None:
-                continue
-            with suppress(Exception):
-                card.setParent(None)
-            with suppress(Exception):
-                card.deleteLater()
-
-        for symbol in configured_symbols:
-            if symbol in self._backtest_coin_cards:
-                continue
-            card = LiveSymbolCard(symbol, compact=True, show_deploy_button=True)
-            card.clicked.connect(self._toggle_backtest_symbol_selection)
-            card.deploy_requested.connect(self._deploy_backtest_symbol_to_live)
-            self._backtest_coin_cards[symbol] = card
-
-        self._selected_backtest_symbols = {
-            symbol for symbol in self._selected_backtest_symbols if symbol in configured_symbols
-        }
-        if not self._selected_backtest_symbols:
-            fallback_symbol = (
-                self._current_backtest_symbol()
-                if hasattr(self, "backtest_coin_combo")
-                else configured_symbols[0]
-            )
-            if fallback_symbol not in configured_symbols:
-                fallback_symbol = configured_symbols[0]
-            self._selected_backtest_symbols = {fallback_symbol}
-
-        if hasattr(self, "backtest_symbols_layout"):
-            self._rebuild_backtest_symbol_grid()
-        self._refresh_backtest_symbol_cards()
-
     def _get_selected_live_symbols(self) -> list[str]:
         return [
             symbol
@@ -5775,13 +3704,6 @@ class TradingTerminalWindow(QMainWindow):
             strategy_name
             for strategy_name in BACKTEST_STRATEGY_NAMES
             if strategy_name in self._selected_backtest_strategies
-        ]
-
-    def _get_selected_backtest_intervals(self) -> list[str]:
-        return [
-            interval
-            for interval in BACKTEST_INTERVAL_OPTIONS
-            if interval in self._selected_backtest_intervals
         ]
 
     def _select_default_live_symbols(self) -> None:
@@ -5809,36 +3731,22 @@ class TradingTerminalWindow(QMainWindow):
     def _select_default_backtest_strategies(self) -> None:
         if not self._backtest_strategy_buttons:
             return
-        self._selected_backtest_strategies = set()
-        if hasattr(self, "backtest_strategy_combo"):
+        self._selected_backtest_strategies = {
+            "ema_cross_volume",
+            "frama_cross",
+            "dual_thrust",
+        }
+        combo_index = self.backtest_strategy_combo.findData("dual_thrust")
+        if combo_index >= 0:
             was_blocked = self.backtest_strategy_combo.blockSignals(True)
-            self.backtest_strategy_combo.setCurrentIndex(-1)
+            self.backtest_strategy_combo.setCurrentIndex(combo_index)
             self.backtest_strategy_combo.blockSignals(was_blocked)
         self._refresh_backtest_strategy_buttons()
-
-    def _select_default_backtest_intervals(self) -> None:
-        if not self._backtest_interval_buttons:
-            return
-        default_interval = self._current_backtest_interval()
-        if default_interval not in BACKTEST_INTERVAL_OPTIONS:
-            default_interval = BACKTEST_INTERVAL_OPTIONS[0]
-        self._selected_backtest_intervals = {default_interval}
-        if hasattr(self, "backtest_interval_combo"):
-            was_blocked = self.backtest_interval_combo.blockSignals(True)
-            self.backtest_interval_combo.setCurrentText(default_interval)
-            self.backtest_interval_combo.blockSignals(was_blocked)
-        self._refresh_backtest_interval_buttons()
 
     def _is_optimization_mode_active(self) -> bool:
         return hasattr(self, "optimize_button") and self.optimize_button.isChecked()
 
     def _toggle_live_symbol_selection(self, symbol: str) -> None:
-        if self._bot_thread is not None and self._bot_thread.isRunning():
-            self.statusBar().showMessage(
-                "Live coin selection is locked while the bot is running (scroll remains enabled).",
-                3000,
-            )
-            return
         if symbol in self._selected_live_symbols:
             self._selected_live_symbols.remove(symbol)
         else:
@@ -5866,38 +3774,19 @@ class TradingTerminalWindow(QMainWindow):
         self._update_status_label()
 
     def _refresh_live_symbol_cards(self) -> None:
-        self._update_coin_radar_count()
         default_strategy_name = self._current_live_strategy_name()
         for symbol, card in self._coin_cards.items():
             is_selected = symbol in self._selected_live_symbols
-            runtime_profile = self._live_runtime_profiles.get(symbol, {})
-            is_live_candidate = bool(runtime_profile.get("live_candidate", False))
-            resolved_strategy_name = resolve_strategy_for_symbol(symbol, default_strategy_name)
-            resolved_interval = resolve_interval_for_symbol(symbol, self._live_interval)
             card.set_selected(is_selected)
             card.set_profit_factor(self._live_profit_factors.get(symbol))
             card.set_win_rate(self._live_win_rates.get(symbol))
             card.set_trade_count(self._live_trade_counts.get(symbol))
             card.set_strategy_badge(
-                "LIVE_CANDIDATE" if is_live_candidate else get_strategy_badge(symbol, default_strategy_name),
-                resolved_strategy_name,
-                resolved_interval,
+                get_strategy_badge(symbol, default_strategy_name),
+                resolve_strategy_for_symbol(symbol, default_strategy_name),
             )
             status_text, status_color = self._determine_symbol_status(symbol, is_selected)
             card.set_status(status_text, status_color)
-
-    def _is_backtest_symbol_deploy_ready(self, symbol: str) -> bool:
-        summary = self._backtest_compact_summaries.get(symbol, {})
-        win_rate_pct = float(summary.get("win_rate_pct", self._backtest_win_rates.get(symbol, 0.0)) or 0.0)
-        trade_count = int(summary.get("trade_count", self._backtest_trade_counts.get(symbol, 0)) or 0)
-        net_pnl_usd = float(summary.get("net_pnl_usd", 0.0) or 0.0)
-        robust_pf = float(summary.get("robust_profit_factor", self._backtest_profit_factors.get(symbol, 0.0)) or 0.0)
-        return (
-            win_rate_pct >= float(BACKTEST_DEPLOY_MIN_WIN_RATE_PCT)
-            and trade_count >= int(BACKTEST_DEPLOY_MIN_TRADE_COUNT)
-            and net_pnl_usd > 0.0
-            and robust_pf >= float(BACKTEST_DEPLOY_MIN_ROBUST_PF)
-        )
 
     def _refresh_backtest_symbol_cards(self) -> None:
         if not hasattr(self, "backtest_strategy_combo"):
@@ -5906,39 +3795,16 @@ class TradingTerminalWindow(QMainWindow):
         for symbol, card in self._backtest_coin_cards.items():
             is_selected = symbol in self._selected_backtest_symbols
             card.set_selected(is_selected)
-            compact_summary = self._backtest_compact_summaries.get(symbol)
-            card.set_compact_summary(compact_summary)
             card.set_profit_factor(self._backtest_profit_factors.get(symbol))
             card.set_win_rate(self._backtest_win_rates.get(symbol))
             card.set_trade_count(self._backtest_trade_counts.get(symbol))
-            winner_strategy_name = ""
-            if isinstance(compact_summary, dict):
-                winner_strategy_name = str(compact_summary.get("strategy_name", "") or "").strip()
-                if winner_strategy_name:
-                    winner_strategy_name = self._sanitize_backtest_strategy_name(
-                        symbol,
-                        winner_strategy_name,
-                    )
-            resolved_strategy = (
-                winner_strategy_name
-                if winner_strategy_name
-                else self._resolve_backtest_strategy_for_symbol(symbol, strategy_name)
-            )
+            resolved_strategy = self._resolve_backtest_strategy_for_symbol(symbol, strategy_name)
             card.set_strategy_badge(
                 get_strategy_badge(symbol, resolved_strategy, use_coin_override=False),
                 resolved_strategy,
             )
-            if symbol in self._backtest_deployed_symbols:
-                card.set_deploy_state("deployed")
-            elif self._backtest_best_profiles.get(symbol) and self._is_backtest_symbol_deploy_ready(symbol):
-                card.set_deploy_state("ready")
-            elif self._backtest_best_profiles.get(symbol):
-                card.set_deploy_state("blocked")
-            else:
-                card.set_deploy_state("pending")
             status_text, status_color = self._determine_backtest_symbol_status(symbol, is_selected)
             card.set_status(status_text, status_color)
-        self._sync_backtest_symbol_selector_viewport()
 
     def _refresh_backtest_strategy_buttons(self) -> None:
         for strategy_name, button in self._backtest_strategy_buttons.items():
@@ -5948,19 +3814,17 @@ class TradingTerminalWindow(QMainWindow):
             button.blockSignals(False)
             button.setStyleSheet(BUTTON_STYLE_BLUE if is_selected else BUTTON_STYLE_DISABLED)
 
-    def _refresh_backtest_interval_buttons(self) -> None:
-        for interval, button in self._backtest_interval_buttons.items():
-            is_selected = interval in self._selected_backtest_intervals
-            button.blockSignals(True)
-            button.setChecked(is_selected)
-            button.blockSignals(False)
-            button.setStyleSheet(BUTTON_STYLE_BLUE if is_selected else BUTTON_STYLE_DISABLED)
-
     def _toggle_backtest_strategy_selection(self, strategy_name: str, checked: bool) -> None:
         if checked:
-            self._selected_backtest_strategies.add(strategy_name)
+            if strategy_name == BACKTEST_AUTO_STRATEGY:
+                self._selected_backtest_strategies = {BACKTEST_AUTO_STRATEGY}
+            else:
+                self._selected_backtest_strategies.discard(BACKTEST_AUTO_STRATEGY)
+                self._selected_backtest_strategies.add(strategy_name)
         else:
             self._selected_backtest_strategies.discard(strategy_name)
+            if not self._selected_backtest_strategies:
+                self._selected_backtest_strategies = {BACKTEST_AUTO_STRATEGY}
         if len(self._selected_backtest_strategies) == 1:
             only_strategy = next(iter(self._selected_backtest_strategies))
             combo_index = self.backtest_strategy_combo.findData(only_strategy)
@@ -5968,50 +3832,8 @@ class TradingTerminalWindow(QMainWindow):
                 was_blocked = self.backtest_strategy_combo.blockSignals(True)
                 self.backtest_strategy_combo.setCurrentIndex(combo_index)
                 self.backtest_strategy_combo.blockSignals(was_blocked)
-        elif len(self._selected_backtest_strategies) > 1:
-            was_blocked = self.backtest_strategy_combo.blockSignals(True)
-            self.backtest_strategy_combo.setCurrentIndex(-1)
-            self.backtest_strategy_combo.blockSignals(was_blocked)
-        elif not self._selected_backtest_strategies:
-            was_blocked = self.backtest_strategy_combo.blockSignals(True)
-            self.backtest_strategy_combo.setCurrentIndex(-1)
-            self.backtest_strategy_combo.blockSignals(was_blocked)
         self._refresh_backtest_strategy_buttons()
         self._refresh_backtest_symbol_cards()
-        self._update_status_label()
-
-    def _toggle_backtest_interval_selection(self, interval: str, checked: bool) -> None:
-        if interval not in BACKTEST_INTERVAL_OPTIONS:
-            return
-        if checked:
-            self._selected_backtest_intervals.add(interval)
-        else:
-            self._selected_backtest_intervals.discard(interval)
-
-        if not self._selected_backtest_intervals:
-            self._selected_backtest_intervals.add(interval)
-
-        selected_intervals = self._get_selected_backtest_intervals()
-        if len(selected_intervals) == 1:
-            selected_interval = selected_intervals[0]
-            if self.backtest_interval_combo.currentText() != selected_interval:
-                was_blocked = self.backtest_interval_combo.blockSignals(True)
-                self.backtest_interval_combo.setCurrentText(selected_interval)
-                self.backtest_interval_combo.blockSignals(was_blocked)
-        self._refresh_backtest_interval_buttons()
-        self._update_status_label()
-
-    def _select_all_backtest_intervals(self) -> None:
-        self._selected_backtest_intervals = set(BACKTEST_INTERVAL_OPTIONS)
-        self._refresh_backtest_interval_buttons()
-        self._update_status_label()
-
-    def _select_primary_backtest_interval(self) -> None:
-        primary_interval = self._current_backtest_interval()
-        if primary_interval not in BACKTEST_INTERVAL_OPTIONS:
-            primary_interval = BACKTEST_INTERVAL_OPTIONS[0]
-        self._selected_backtest_intervals = {primary_interval}
-        self._refresh_backtest_interval_buttons()
         self._update_status_label()
 
     def _rebuild_backtest_symbol_grid(self) -> None:
@@ -6021,7 +3843,7 @@ class TradingTerminalWindow(QMainWindow):
         while self.backtest_symbols_layout.count():
             self.backtest_symbols_layout.takeAt(0)
 
-        columns = BACKTEST_SYMBOL_GRID_COLUMNS
+        columns = 6
         ordered_symbols = list(_configured_backtest_symbols())
         for index, symbol in enumerate(ordered_symbols):
             card = self._backtest_coin_cards[symbol]
@@ -6033,28 +3855,6 @@ class TradingTerminalWindow(QMainWindow):
             self.backtest_symbols_layout.setColumnStretch(column, 1)
         final_row = (len(ordered_symbols) + columns - 1) // columns
         self.backtest_symbols_layout.setRowStretch(final_row, 1)
-        self._sync_backtest_symbol_selector_viewport()
-
-    def _sync_backtest_symbol_selector_viewport(self) -> None:
-        if not hasattr(self, "backtest_symbols_scroll") or not hasattr(self, "backtest_symbols_layout"):
-            return
-
-        symbols = list(_configured_backtest_symbols())
-        if not symbols:
-            self.backtest_symbols_scroll.setMinimumHeight(120)
-            self.backtest_symbols_scroll.setMaximumHeight(120)
-            return
-
-        self.backtest_symbols_layout.activate()
-        self.backtest_symbols_container.adjustSize()
-        viewport_height = max(
-            int(self.backtest_symbols_container.sizeHint().height()),
-            int(self.backtest_symbols_container.minimumSizeHint().height()),
-        )
-        frame_height = max(self.backtest_symbols_scroll.frameWidth() * 2, 0)
-        target_height = max(120, viewport_height + frame_height)
-        self.backtest_symbols_scroll.setMinimumHeight(target_height)
-        self.backtest_symbols_scroll.setMaximumHeight(target_height)
 
     def _update_live_symbol_card(self, symbol: str) -> None:
         card = self._coin_cards.get(symbol)
@@ -6062,24 +3862,7 @@ class TradingTerminalWindow(QMainWindow):
             return
         self._refresh_live_symbol_cards()
 
-    def _update_coin_radar_count(self) -> None:
-        if not hasattr(self, "coin_radar_count_label"):
-            return
-        coin_count = len(self._coin_cards)
-        suffix = "" if coin_count == 1 else "s"
-        self.coin_radar_count_label.setText(f"({coin_count} coin{suffix})")
-
     def _determine_symbol_status(self, symbol: str, is_selected: bool) -> tuple[str, str]:
-        runtime_profile = self._live_runtime_profiles.get(symbol, {})
-        if bool(runtime_profile.get("live_candidate", False)):
-            candidate_status = str(
-                runtime_profile.get("live_candidate_status", "ACTIVE")
-            ).strip().upper() or "ACTIVE"
-            if candidate_status == "KILL_SWITCHED":
-                return "KILL_SWITCHED", ACCENT_DANGER
-            if candidate_status == "PAUSED":
-                return "PAUSED", ACCENT_WARNING
-            return "ACTIVE", ACCENT_PROFIT
         heartbeat_info = self._heartbeat_snapshot.get(symbol)
         if heartbeat_info is not None and str(heartbeat_info.get("status", "OK")).upper() == "LAGGING":
             return "LAGGING", ACCENT_WARNING
@@ -6088,22 +3871,6 @@ class TradingTerminalWindow(QMainWindow):
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
             if symbol == self._current_backtest_symbol():
                 return "TESTING", ACCENT_WARNING
-        runtime_settings = self._resolve_readiness_runtime_settings()
-        resolved_strategy_name = self._resolve_readiness_strategy_for_symbol(
-            symbol,
-            runtime_settings=runtime_settings,
-        )
-        resolved_interval = self._resolve_readiness_interval_for_symbol(
-            symbol,
-            runtime_settings=runtime_settings,
-        )
-        if self._is_live_profile_loaded_for_symbol(
-            symbol,
-            strategy_name=resolved_strategy_name,
-            interval=resolved_interval,
-            runtime_settings=runtime_settings,
-        ):
-            return "ACTIVE", ACCENT_PROFIT
         if self._bot_thread is not None and self._bot_thread.isRunning() and is_selected:
             return "LIVE", ACCENT_PRIMARY
         if is_selected:
@@ -6119,24 +3886,6 @@ class TradingTerminalWindow(QMainWindow):
                 for queued_symbol, _strategy_name, _interval_override in self._batch_queue
             ):
                 return "QUEUED", ACCENT_PRIMARY
-        if (
-            self._batch_mode == BACKTEST_MODE_LIVE_VS_CHALLENGER
-            or self._is_live_vs_challenger_mode_active()
-        ):
-            comparison_entry = self._live_vs_challenger_coin_results.get(symbol)
-            if isinstance(comparison_entry, dict):
-                verdict = str(comparison_entry.get("verdict", "") or "").strip().upper()
-                completed_runs = int(comparison_entry.get("completed_runs", 0) or 0)
-                expected_runs = int(comparison_entry.get("expected_runs", 0) or 0)
-                if completed_runs >= max(expected_runs, 1):
-                    if verdict == "ERSETZEN":
-                        return "ERSETZEN", ACCENT_WARNING
-                    if verdict == "BLEIBT":
-                        return "BLEIBT", ACCENT_PROFIT
-                    if verdict == "BEOBACHTEN":
-                        return "BEOBACHTEN", ACCENT_PRIMARY
-                if completed_runs > 0 and completed_runs < max(expected_runs, 1):
-                    return "ANALYSE", ACCENT_PRIMARY
         if is_selected:
             return "SELECTED", ACCENT_PRIMARY
         return "IDLE", TEXT_MUTED
@@ -6210,144 +3959,20 @@ class TradingTerminalWindow(QMainWindow):
         self._update_status_label()
         self.statusBar().showMessage(status_message, 3000)
 
-    def _clear_backtest_coin_cards(self) -> None:
-        backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
-        if backtest_running or self._batch_active:
-            self.statusBar().showMessage(
-                "Cannot clear card results while a backtest is running.",
-                3000,
-            )
-            return
-
-        self._backtest_profit_factors.clear()
-        self._backtest_win_rates.clear()
-        self._backtest_trade_counts.clear()
-        self._backtest_compact_summaries.clear()
-        self._backtest_best_profiles.clear()
-        self._live_vs_challenger_coin_results.clear()
-        self._live_vs_challenger_last_export_path = None
-        self._last_backtest_result = None
-
-        self.backtest_total_pnl_label.setText("Total PnL: -")
-        self.backtest_win_rate_label.setText("Win Rate: -")
-        self.backtest_total_trades_label.setText("Total Trades: -")
-
-        self._refresh_backtest_symbol_cards()
-        self._refresh_live_vs_challenger_results_view()
-        self._update_status_label()
-        self._append_backtest_log("Backtest card results cleared.")
-        self.statusBar().showMessage("Backtest card results cleared.", 3000)
-
-    def _ensure_live_symbol_is_visible(self, symbol: str) -> None:
-        normalized_symbol = str(symbol).strip().upper()
-        if not normalized_symbol:
-            return
-        if normalized_symbol not in self._coin_cards:
-            card = LiveSymbolCard(normalized_symbol)
-            card.clicked.connect(self._toggle_live_symbol_selection)
-            self._coin_cards[normalized_symbol] = card
-            insert_index = max(self.live_symbols_layout.count() - 1, 0)
-            self.live_symbols_layout.insertWidget(insert_index, card)
-        self._update_coin_radar_count()
-        if self.symbol_combo.findText(normalized_symbol) < 0:
-            was_blocked = self.symbol_combo.blockSignals(True)
-            self.symbol_combo.addItem(normalized_symbol)
-            self.symbol_combo.blockSignals(was_blocked)
-
-    def _deploy_backtest_symbol_to_live(self, symbol: str) -> None:
-        normalized_symbol = str(symbol).strip().upper()
-        if not normalized_symbol:
-            return
-        if normalized_symbol in self._backtest_deployed_symbols:
-            self.statusBar().showMessage(f"{normalized_symbol} is already deployed to live.", 4000)
-            return
-        if not self._is_backtest_symbol_deploy_ready(normalized_symbol):
-            compact_summary = self._backtest_compact_summaries.get(normalized_symbol, {})
-            win_rate_pct = float(compact_summary.get("win_rate_pct", 0.0) or 0.0)
-            trade_count = int(compact_summary.get("trade_count", 0) or 0)
-            net_pnl_usd = float(compact_summary.get("net_pnl_usd", 0.0) or 0.0)
-            robust_pf = float(compact_summary.get("robust_profit_factor", 0.0) or 0.0)
-            self.statusBar().showMessage(
-                (
-                    f"Deploy blocked for {normalized_symbol}: "
-                    f"Win-Rate must be >= {BACKTEST_DEPLOY_MIN_WIN_RATE_PCT:.0f}% "
-                    f"(current {win_rate_pct:.2f}%), "
-                    f"Trades >= {BACKTEST_DEPLOY_MIN_TRADE_COUNT} (current {trade_count}), "
-                    f"Robust PF >= {BACKTEST_DEPLOY_MIN_ROBUST_PF:.1f} (current {robust_pf:.2f}), "
-                    f"Net-PnL > 0 (current {net_pnl_usd:.2f})."
-                ),
-                6000,
-            )
-            return
-        best_profile = self._backtest_best_profiles.get(normalized_symbol)
-        if not best_profile:
-            self.statusBar().showMessage(
-                f"No optimization profile available for {normalized_symbol} yet.",
-                4000,
-            )
-            return
-
-        min_confidence_pct = float(self.confidence_spin.value())
-        try:
-            config_module.migrate_to_live(
-                normalized_symbol,
-                best_profile,
-                min_confidence=min_confidence_pct,
-            )
-        except Exception as exc:
-            logging.getLogger("gui").exception(
-                "Live deployment failed for %s",
-                normalized_symbol,
-            )
-            error_text = f"Live deployment failed for {normalized_symbol}: {exc}"
-            self._append_backtest_log(error_text)
-            self.statusBar().showMessage(error_text, 6000)
-            return
-
-        self._backtest_deployed_symbols.add(normalized_symbol)
-        self._ensure_live_symbol_is_visible(normalized_symbol)
-        self._rebuild_backtest_symbol_grid()
-        if self.backtest_coin_combo.findText(normalized_symbol) < 0:
-            was_blocked = self.backtest_coin_combo.blockSignals(True)
-            self.backtest_coin_combo.addItem(normalized_symbol)
-            self.backtest_coin_combo.blockSignals(was_blocked)
-        self._refresh_live_symbol_cards()
-        self._refresh_backtest_symbol_cards()
-        self._update_status_label()
-        success_message = (
-            f"[SYSTEM] {normalized_symbol} successfully migrated to Live. "
-            "Config updated and saved."
-        )
-        self._append_backtest_log(success_message)
-        self.statusBar().showMessage(success_message, 6000)
-
     def _set_live_symbol_controls_enabled(self, enabled: bool) -> None:
+        self.live_symbols_scroll.setEnabled(enabled)
         self.live_search_input.setEnabled(enabled)
         self.select_all_button.setEnabled(enabled)
         self.select_winners_button.setEnabled(enabled)
         for card in self._coin_cards.values():
-            card.setEnabled(True)
-            card.setCursor(
-                Qt.CursorShape.PointingHandCursor
-                if enabled
-                else Qt.CursorShape.ArrowCursor
-            )
+            card.setEnabled(enabled)
 
     def _set_backtest_symbol_controls_enabled(self, enabled: bool) -> None:
         self.backtest_symbols_scroll.setEnabled(enabled)
         self.backtest_select_all_button.setEnabled(enabled)
-        if hasattr(self, "backtest_clear_cards_button"):
-            self.backtest_clear_cards_button.setEnabled(enabled)
-        self._set_backtest_period_controls_enabled(enabled)
-        if hasattr(self, "backtest_select_all_intervals_button"):
-            self.backtest_select_all_intervals_button.setEnabled(enabled)
-        if hasattr(self, "backtest_single_interval_button"):
-            self.backtest_single_interval_button.setEnabled(enabled)
         for card in self._backtest_coin_cards.values():
             card.setEnabled(enabled)
         for button in self._backtest_strategy_buttons.values():
-            button.setEnabled(enabled)
-        for button in self._backtest_interval_buttons.values():
             button.setEnabled(enabled)
 
     def _update_performance_header(self, total_unrealized_pnl: float = 0.0) -> None:
@@ -6419,7 +4044,6 @@ class TradingTerminalWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         QTimer.singleShot(0, self._apply_backtest_splitter_sizes)
-        QTimer.singleShot(0, self._sync_backtest_symbol_selector_viewport)
 
     def _apply_backtest_splitter_sizes(self) -> None:
         splitter = self._analytics_splitter
@@ -6503,16 +4127,11 @@ class TradingTerminalWindow(QMainWindow):
             return
         self._readiness_last_refresh_ts = now
 
-        runtime_settings = self._resolve_readiness_runtime_settings()
-        symbols = list(runtime_settings.live.available_symbols)
+        symbols = list(settings.live.available_symbols)
 
         try:
             with Database(self._db_path) as db:
-                items = self._build_trade_readiness_items(
-                    db,
-                    symbols,
-                    runtime_settings=runtime_settings,
-                )
+                items = self._build_trade_readiness_items(db, symbols)
         except Exception:
             items = []
         self.readiness_bars.set_items(items)
@@ -6521,8 +4140,6 @@ class TradingTerminalWindow(QMainWindow):
         self,
         db: Database,
         symbols: list[str],
-        *,
-        runtime_settings,
     ) -> list[dict[str, object]]:
         open_symbols = {
             str(position.get("symbol", "")).strip().upper()
@@ -6539,174 +4156,29 @@ class TradingTerminalWindow(QMainWindow):
                         "symbol": normalized_symbol,
                         "score": 100.0,
                         "color": "#546e7a",
-                        "eta_text": "LIVE",
-                        "eta_color": TEXT_MUTED,
-                        "eta_blink": False,
                     }
                 )
                 continue
 
-            strategy_name = self._resolve_readiness_strategy_for_symbol(
+            strategy_name = resolve_strategy_for_symbol(
                 normalized_symbol,
-                runtime_settings=runtime_settings,
+                self._current_live_strategy_name(),
             )
-            interval = self._resolve_readiness_interval_for_symbol(
-                normalized_symbol,
-                runtime_settings=runtime_settings,
-            )
-            profile_loaded = self._is_live_profile_loaded_for_symbol(
-                normalized_symbol,
-                strategy_name=strategy_name,
-                interval=interval,
-                runtime_settings=runtime_settings,
-            )
-            leverage_confirmed = self._is_live_leverage_confirmed_for_symbol(
-                normalized_symbol,
-                runtime_settings=runtime_settings,
-            )
-            if not profile_loaded or not leverage_confirmed:
-                lock_reason = "CFG" if not profile_loaded else "25x"
-                items.append(
-                    {
-                        "symbol": normalized_symbol,
-                        "score": 0.0,
-                        "color": "#546e7a" if not profile_loaded else ACCENT_WARNING,
-                        "eta_text": f"LOCK {lock_reason}",
-                        "eta_color": TEXT_MUTED if not profile_loaded else ACCENT_WARNING,
-                        "eta_blink": False,
-                    }
-                )
-                continue
+            interval = resolve_interval_for_symbol(normalized_symbol, self._live_interval)
             candles = db.fetch_recent_candles(normalized_symbol, interval, limit=320)
-            readiness = self._compute_symbol_trade_readiness(
+            score = self._compute_symbol_trade_readiness(
                 strategy_name=strategy_name,
                 symbol=normalized_symbol,
                 candles=candles,
-                runtime_settings=runtime_settings,
             )
             items.append(
                 {
                     "symbol": normalized_symbol,
-                    "score": float(readiness.get("score", 0.0) or 0.0),
-                    "color": str(readiness.get("color", ACCENT_PRIMARY)),
-                    "eta_text": str(readiness.get("eta_text", "--")),
-                    "eta_color": str(readiness.get("eta_color", TEXT_MUTED)),
-                    "eta_blink": bool(readiness.get("eta_blink", False)),
+                    "score": float(score),
+                    "color": self._readiness_color(score),
                 }
             )
         return items
-
-    def _resolve_readiness_runtime_settings(self):
-        try:
-            current_mtime_ns = self._readiness_config_file.stat().st_mtime_ns
-        except OSError:
-            return self._readiness_runtime_settings
-
-        if current_mtime_ns == self._readiness_config_mtime_ns:
-            return self._readiness_runtime_settings
-
-        try:
-            importlib.invalidate_caches()
-            refreshed_config = importlib.reload(config_module)
-            refreshed_settings = getattr(refreshed_config, "settings", None)
-            if refreshed_settings is not None:
-                self._readiness_runtime_settings = refreshed_settings
-                self._readiness_config_mtime_ns = current_mtime_ns
-                self._readiness_config_reload_error_mtime_ns = None
-        except Exception:
-            if self._readiness_config_reload_error_mtime_ns != current_mtime_ns:
-                logging.getLogger("gui").exception(
-                    "Failed to hot-reload config.py for trade readiness."
-                )
-                self._readiness_config_reload_error_mtime_ns = current_mtime_ns
-            self._readiness_config_mtime_ns = current_mtime_ns
-
-        return self._readiness_runtime_settings
-
-    def _resolve_readiness_strategy_for_symbol(
-        self,
-        symbol: str,
-        *,
-        runtime_settings,
-    ) -> str:
-        fallback_strategy = str(
-            self.strategy_combo.currentData() or runtime_settings.strategy.default_strategy_name
-        )
-        allowed_strategies = {
-            str(strategy_name)
-            for strategy_name in runtime_settings.strategy.available_strategies
-        }
-        coin_strategy_map = getattr(runtime_settings.strategy, "coin_strategies", {}) or {}
-
-        resolved_strategy = str(coin_strategy_map.get(symbol, fallback_strategy))
-        if resolved_strategy in allowed_strategies:
-            return resolved_strategy
-        if fallback_strategy in allowed_strategies:
-            return fallback_strategy
-        return str(runtime_settings.strategy.default_strategy_name)
-
-    def _resolve_readiness_interval_for_symbol(
-        self,
-        symbol: str,
-        *,
-        runtime_settings,
-    ) -> str:
-        allowed_timeframes = {str(interval) for interval in runtime_settings.api.timeframes}
-        fallback_interval = str(self._live_interval or runtime_settings.trading.interval)
-        if fallback_interval not in allowed_timeframes:
-            fallback_interval = str(runtime_settings.trading.interval)
-        profile = runtime_settings.trading.coin_profiles.get(symbol)
-        if profile is not None and profile.interval is not None:
-            candidate_interval = str(profile.interval)
-            if candidate_interval in allowed_timeframes:
-                return candidate_interval
-        return fallback_interval
-
-    def _is_live_profile_loaded_for_symbol(
-        self,
-        symbol: str,
-        *,
-        strategy_name: str,
-        interval: str,
-        runtime_settings,
-    ) -> bool:
-        production_registry = getattr(config_module, "PRODUCTION_PROFILE_REGISTRY", {}) or {}
-        production_profile = production_registry.get(symbol)
-        if not isinstance(production_profile, dict):
-            return False
-        expected_strategy = str(production_profile.get("strategy_name", "") or "").strip()
-        expected_interval = str(production_profile.get("interval", "") or "").strip()
-        if expected_strategy != str(strategy_name):
-            return False
-        if expected_interval != str(interval):
-            return False
-        profile_settings = runtime_settings.trading.coin_profiles.get(symbol)
-        if profile_settings is None:
-            return False
-        expected_leverage = 25
-        with suppress(Exception):
-            expected_leverage = int(production_profile.get("default_leverage", 25) or 25)
-        return profile_settings.default_leverage == expected_leverage
-
-    def _is_live_leverage_confirmed_for_symbol(
-        self,
-        symbol: str,
-        *,
-        runtime_settings,
-    ) -> bool:
-        production_registry = getattr(config_module, "PRODUCTION_PROFILE_REGISTRY", {}) or {}
-        production_profile = production_registry.get(symbol, {})
-        expected_leverage = 25
-        with suppress(Exception):
-            expected_leverage = int(production_profile.get("default_leverage", 25) or 25)
-        runtime_profile = self._live_runtime_profiles.get(symbol)
-        if runtime_profile is not None:
-            effective_leverage = runtime_profile.get("effective_leverage")
-            with suppress(Exception):
-                return int(effective_leverage) == int(expected_leverage)
-            return False
-        _ = runtime_settings
-        return False
 
     def _compute_symbol_trade_readiness(
         self,
@@ -6714,105 +4186,27 @@ class TradingTerminalWindow(QMainWindow):
         strategy_name: str,
         symbol: str,
         candles: list,
-        runtime_settings,
-    ) -> dict[str, object]:
+    ) -> float:
         if not candles:
-            return {
-                "score": 0.0,
-                "color": self._readiness_color(0.0),
-                "eta_text": "--",
-                "eta_color": TEXT_MUTED,
-                "eta_blink": False,
-            }
-        params = runtime_settings.strategy.coin_strategy_params.get(symbol, {})
+            return 0.0
+        params = settings.strategy.coin_strategy_params.get(symbol, {})
         if strategy_name == "ema_cross_volume":
-            score = self._compute_ema_trade_readiness(
-                candles=candles,
-                strategy_params=params,
-                runtime_settings=runtime_settings,
-            )
-            return {
-                "score": score,
-                "color": self._readiness_color(score),
-                "eta_text": "--",
-                "eta_color": TEXT_MUTED,
-                "eta_blink": False,
-            }
+            return self._compute_ema_trade_readiness(candles=candles, strategy_params=params)
         if strategy_name == "frama_cross":
-            score = self._compute_frama_trade_readiness(
-                candles=candles,
-                strategy_params=params,
-                runtime_settings=runtime_settings,
-            )
-            return {
-                "score": score,
-                "color": self._readiness_color(score),
-                "eta_text": "--",
-                "eta_color": TEXT_MUTED,
-                "eta_blink": False,
-            }
-        if strategy_name == "ema_band_rejection":
-            score = self._compute_ema_band_rejection_trade_readiness(
-                candles=candles,
-                strategy_params=params,
-            )
-            return {
-                "score": score,
-                "color": self._readiness_color(score),
-                "eta_text": "--",
-                "eta_color": TEXT_MUTED,
-                "eta_blink": False,
-            }
-        if strategy_name == "supertrend_ema":
-            score = self._compute_supertrend_trade_readiness(
-                candles=candles,
-                strategy_params=params,
-                runtime_settings=runtime_settings,
-            )
-            return {
-                "score": score,
-                "color": self._readiness_color(score),
-                "eta_text": "--",
-                "eta_color": TEXT_MUTED,
-                "eta_blink": False,
-            }
-        if strategy_name == "dual_thrust":
-            return self._compute_dual_thrust_trade_readiness(
-                candles=candles,
-                strategy_params=params,
-                runtime_settings=runtime_settings,
-            )
-        score = self._compute_fallback_trade_readiness(candles=candles)
-        return {
-            "score": score,
-            "color": self._readiness_color(score),
-            "eta_text": "--",
-            "eta_color": TEXT_MUTED,
-            "eta_blink": False,
-        }
+            return self._compute_frama_trade_readiness(candles=candles, strategy_params=params)
+        return self._compute_fallback_trade_readiness(candles=candles)
 
     def _compute_ema_trade_readiness(
         self,
         *,
         candles: list,
         strategy_params: dict[str, float],
-        runtime_settings,
     ) -> float:
         candles_df = self._candles_to_frame(candles)
-        fast_period = int(
-            strategy_params.get("ema_fast_period", runtime_settings.strategy.ema_fast_period)
-        )
-        slow_period = int(
-            strategy_params.get("ema_slow_period", runtime_settings.strategy.ema_slow_period)
-        )
-        volume_period = int(runtime_settings.strategy.volume_sma_period)
-        volume_multiplier = float(
-            strategy_params.get("volume_multiplier", runtime_settings.strategy.volume_multiplier)
-        )
-        if not math.isfinite(volume_multiplier) or volume_multiplier <= 0.0:
-            volume_multiplier = float(runtime_settings.strategy.volume_multiplier)
-        if not math.isfinite(volume_multiplier) or volume_multiplier <= 0.0:
-            volume_multiplier = 1.0
+        fast_period = int(strategy_params.get("ema_fast_period", settings.strategy.ema_fast_period))
+        slow_period = int(strategy_params.get("ema_slow_period", settings.strategy.ema_slow_period))
+        volume_period = int(settings.strategy.volume_sma_period)
+        volume_multiplier = float(settings.strategy.volume_multiplier)
         required = max(fast_period, slow_period, volume_period) + 2
         if len(candles_df) < required:
             return 0.0
@@ -6846,136 +4240,15 @@ class TradingTerminalWindow(QMainWindow):
             return 100.0
         return float(max(0.0, min(gap_score * 72.0 + volume_score * 28.0, 100.0)))
 
-    def _compute_ema_band_rejection_trade_readiness(
-        self,
-        *,
-        candles: list,
-        strategy_params: dict[str, float],
-    ) -> float:
-        candles_df = self._candles_to_frame(candles)
-
-        def _param_int(name: str, default_value: int) -> int:
-            with suppress(Exception):
-                return int(float(strategy_params.get(name, default_value) or default_value))
-            return int(default_value)
-
-        def _param_float(name: str, default_value: float) -> float:
-            with suppress(Exception):
-                return float(strategy_params.get(name, default_value) or default_value)
-            return float(default_value)
-
-        def _param_flag(name: str, default_value: bool = False) -> bool:
-            raw_value = strategy_params.get(name, default_value)
-            if isinstance(raw_value, bool):
-                return bool(raw_value)
-            with suppress(Exception):
-                return bool(float(raw_value) >= 0.5)
-            return bool(default_value)
-
-        ema_slow = max(2, _param_int("ema_slow", 20))
-        slope_lookback = max(1, _param_int("slope_lookback", 5))
-        rsi_length = max(2, _param_int("rsi_length", 14))
-        volume_ma_length = max(1, _param_int("volume_ma_length", 20))
-        atr_length = max(2, _param_int("atr_length", 14))
-        required = max(
-            ema_slow + slope_lookback + 2,
-            rsi_length + 2,
-            volume_ma_length + 2,
-            atr_length + 2,
-            64,
-        )
-        if len(candles_df) < required:
-            return 0.0
-
-        try:
-            signal_frame = build_ema_band_rejection_signal_frame(
-                candles_df,
-                ema_fast=max(1, _param_int("ema_fast", 5)),
-                ema_mid=max(1, _param_int("ema_mid", 10)),
-                ema_slow=ema_slow,
-                slope_lookback=slope_lookback,
-                min_ema_spread_pct=max(0.0, _param_float("min_ema_spread_pct", 0.05)),
-                min_slow_slope_pct=max(0.0, _param_float("min_slow_slope_pct", 0.0)),
-                pullback_requires_outer_band_touch=_param_flag(
-                    "pullback_requires_outer_band_touch",
-                    False,
-                ),
-                use_rejection_quality_filter=_param_flag(
-                    "use_rejection_quality_filter",
-                    False,
-                ),
-                rejection_wick_min_ratio=max(0.0, _param_float("rejection_wick_min_ratio", 0.35)),
-                rejection_body_min_ratio=max(0.0, _param_float("rejection_body_min_ratio", 0.20)),
-                use_rsi_filter=_param_flag("use_rsi_filter", False),
-                rsi_length=rsi_length,
-                rsi_midline=_param_float("rsi_midline", 50.0),
-                use_rsi_cross_filter=_param_flag("use_rsi_cross_filter", False),
-                rsi_midline_margin=max(0.0, _param_float("rsi_midline_margin", 0.0)),
-                use_volume_filter=_param_flag("use_volume_filter", False),
-                volume_ma_length=volume_ma_length,
-                volume_multiplier=max(0.0001, _param_float("volume_multiplier", 1.0)),
-                use_atr_stop_buffer=_param_flag("use_atr_stop_buffer", False),
-                atr_length=atr_length,
-                atr_stop_buffer_mult=max(0.0, _param_float("atr_stop_buffer_mult", 0.5)),
-                signal_cooldown_bars=max(0, _param_int("signal_cooldown_bars", 0)),
-            )
-        except Exception:
-            return 0.0
-
-        latest_signal = 0
-        with suppress(Exception):
-            latest_signal = int(signal_frame["ema_band_signal_direction"].iloc[-1])
-        if latest_signal != 0:
-            return 100.0
-
-        latest_row = signal_frame.iloc[-1]
-        trend_ok = bool(
-            bool(latest_row.get("ema_band_trend_long", False))
-            or bool(latest_row.get("ema_band_trend_short", False))
-        )
-        pullback_ok = bool(
-            bool(latest_row.get("ema_band_pullback_long", False))
-            or bool(latest_row.get("ema_band_pullback_short", False))
-        )
-        rejection_ok = bool(
-            bool(latest_row.get("ema_band_rejection_long", False))
-            or bool(latest_row.get("ema_band_rejection_short", False))
-        )
-        setup_ok = bool(
-            bool(latest_row.get("ema_band_setup_long", False))
-            or bool(latest_row.get("ema_band_setup_short", False))
-        )
-
-        spread_value = 0.0
-        with suppress(Exception):
-            spread_value = float(latest_row.get("ema_band_ema_spread_pct", 0.0) or 0.0)
-        spread_threshold = max(0.0001, _param_float("min_ema_spread_pct", 0.05))
-        spread_score = max(0.0, min(spread_value / spread_threshold, 1.0)) * 10.0
-
-        score = (
-            (40.0 if trend_ok else 0.0)
-            + (25.0 if pullback_ok else 0.0)
-            + (25.0 if rejection_ok else 0.0)
-            + float(spread_score)
-        )
-        if setup_ok:
-            score = max(score, 95.0)
-        return float(max(0.0, min(score, 100.0)))
-
     def _compute_frama_trade_readiness(
         self,
         *,
         candles: list,
         strategy_params: dict[str, float],
-        runtime_settings,
     ) -> float:
         candles_df = self._candles_to_frame(candles)
-        fast_period = int(
-            strategy_params.get("frama_fast_period", runtime_settings.strategy.frama_fast_period)
-        )
-        slow_period = int(
-            strategy_params.get("frama_slow_period", runtime_settings.strategy.frama_slow_period)
-        )
+        fast_period = int(strategy_params.get("frama_fast_period", settings.strategy.frama_fast_period))
+        slow_period = int(strategy_params.get("frama_slow_period", settings.strategy.frama_slow_period))
         required = max(fast_period, slow_period, 22)
         if len(candles_df) < required:
             return 0.0
@@ -7014,14 +4287,7 @@ class TradingTerminalWindow(QMainWindow):
         crossover_score = max(0.0, 1.0 - min(current_gap / 0.0035, 1.0))
 
         volume_sma_20 = pd.Series(volume_values).rolling(window=20, min_periods=1).mean().to_numpy(dtype=np.float64)
-        volume_multiplier = float(
-            strategy_params.get("volume_multiplier", runtime_settings.strategy.volume_multiplier)
-        )
-        if not math.isfinite(volume_multiplier) or volume_multiplier <= 0.0:
-            volume_multiplier = float(runtime_settings.strategy.volume_multiplier)
-        if not math.isfinite(volume_multiplier) or volume_multiplier <= 0.0:
-            volume_multiplier = 0.8
-        volume_confirm_threshold = max(float(volume_sma_20[-1]) * volume_multiplier, 1e-9)
+        volume_confirm_threshold = max(float(volume_sma_20[-1]) * 0.8, 1e-9)
         volume_ratio = float(volume_values[-1]) / volume_confirm_threshold
         volume_score = max(0.0, min(volume_ratio, 1.0))
 
@@ -7032,300 +4298,6 @@ class TradingTerminalWindow(QMainWindow):
         if (crossed_long or crossed_short) and gap_confirmed and volume_confirmed:
             return 100.0
         return float(max(0.0, min(crossover_score * 70.0 + volume_score * 30.0, 100.0)))
-
-    def _compute_supertrend_trade_readiness(
-        self,
-        *,
-        candles: list,
-        strategy_params: dict[str, float],
-        runtime_settings,
-    ) -> float:
-        candles_df = self._candles_to_frame(candles)
-        supertrend_length = max(
-            2,
-            int(
-                strategy_params.get(
-                    "supertrend_ema_supertrend_length",
-                    strategy_params.get(
-                        "supertrend_length",
-                        runtime_settings.strategy.supertrend_ema_supertrend_length,
-                    ),
-                )
-            ),
-        )
-        supertrend_multiplier = float(
-            strategy_params.get(
-                "supertrend_ema_supertrend_multiplier",
-                strategy_params.get(
-                    "supertrend_multiplier",
-                    runtime_settings.strategy.supertrend_ema_supertrend_multiplier,
-                ),
-            )
-        )
-        ema_length = max(
-            2,
-            int(
-                strategy_params.get(
-                    "supertrend_ema_ema_length",
-                    strategy_params.get(
-                        "ema_length",
-                        runtime_settings.strategy.supertrend_ema_ema_length,
-                    ),
-                )
-            ),
-        )
-        required = max(supertrend_length + 3, ema_length + 2, 12)
-        if len(candles_df) < required or supertrend_multiplier <= 0.0:
-            return 0.0
-
-        close_series = pd.to_numeric(candles_df["close"], errors="coerce").ffill().fillna(0.0)
-        high_series = pd.to_numeric(candles_df["high"], errors="coerce").ffill().fillna(0.0)
-        low_series = pd.to_numeric(candles_df["low"], errors="coerce").ffill().fillna(0.0)
-        ema_series = close_series.ewm(span=ema_length, adjust=False).mean()
-
-        supertrend_line, direction_series = self._calculate_supertrend_for_readiness(
-            high_series=high_series,
-            low_series=low_series,
-            close_series=close_series,
-            length=supertrend_length,
-            multiplier=supertrend_multiplier,
-        )
-        if len(direction_series) < 2:
-            return 0.0
-
-        previous_direction = direction_series.shift(1)
-        flip_up = previous_direction.lt(0) & direction_series.gt(0)
-        flip_down = previous_direction.gt(0) & direction_series.lt(0)
-        signal_long = bool(flip_up.iloc[-1] and close_series.iloc[-1] > ema_series.iloc[-1])
-        signal_short = bool(flip_down.iloc[-1] and close_series.iloc[-1] < ema_series.iloc[-1])
-        if signal_long or signal_short:
-            return 100.0
-
-        current_close = max(float(close_series.iloc[-1]), 1e-9)
-        current_line = float(supertrend_line.iloc[-1])
-        if not math.isfinite(current_line):
-            return 0.0
-        current_ema = float(ema_series.iloc[-1])
-        current_direction = int(direction_series.iloc[-1])
-
-        line_gap_pct = abs(current_close - current_line) / current_close
-        ema_gap_pct = abs(current_close - current_ema) / current_close
-        line_score = max(0.0, 1.0 - min(line_gap_pct / 0.012, 1.0))
-        ema_score = max(0.0, 1.0 - min(ema_gap_pct / 0.008, 1.0))
-        trend_aligned = (
-            (current_direction > 0 and current_close > current_ema)
-            or (current_direction < 0 and current_close < current_ema)
-        )
-        trend_score = 1.0 if trend_aligned else 0.35
-        return float(max(0.0, min((line_score * 55.0) + (ema_score * 30.0) + (trend_score * 15.0), 100.0)))
-
-    @staticmethod
-    def _calculate_supertrend_for_readiness(
-        *,
-        high_series: pd.Series,
-        low_series: pd.Series,
-        close_series: pd.Series,
-        length: int,
-        multiplier: float,
-    ) -> tuple[pd.Series, pd.Series]:
-        previous_close = close_series.shift(1)
-        true_range = pd.concat(
-            [
-                (high_series - low_series).abs(),
-                (high_series - previous_close).abs(),
-                (low_series - previous_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-        atr = true_range.ewm(
-            alpha=1.0 / float(max(length, 1)),
-            adjust=False,
-            min_periods=max(length, 1),
-        ).mean()
-        hl2 = (high_series + low_series) * 0.5
-        basic_upper = hl2 + (float(multiplier) * atr)
-        basic_lower = hl2 - (float(multiplier) * atr)
-
-        row_count = len(close_series)
-        final_upper = np.full(row_count, np.nan, dtype="float64")
-        final_lower = np.full(row_count, np.nan, dtype="float64")
-        supertrend = np.full(row_count, np.nan, dtype="float64")
-        direction = np.zeros(row_count, dtype="int8")
-        close_values = close_series.to_numpy(dtype="float64", copy=False)
-        upper_values = basic_upper.to_numpy(dtype="float64", copy=False)
-        lower_values = basic_lower.to_numpy(dtype="float64", copy=False)
-
-        for index in range(row_count):
-            current_close = close_values[index]
-            current_upper = upper_values[index]
-            current_lower = lower_values[index]
-
-            if index == 0:
-                final_upper[index] = current_upper
-                final_lower[index] = current_lower
-                if np.isnan(current_upper) and np.isnan(current_lower):
-                    direction[index] = 0
-                    supertrend[index] = np.nan
-                elif np.isnan(current_upper):
-                    direction[index] = 1
-                    supertrend[index] = current_lower
-                else:
-                    direction[index] = -1
-                    supertrend[index] = current_upper
-                continue
-
-            previous_upper = final_upper[index - 1]
-            previous_lower = final_lower[index - 1]
-            previous_close_value = close_values[index - 1]
-
-            if np.isnan(current_upper):
-                final_upper[index] = previous_upper
-            elif (
-                np.isnan(previous_upper)
-                or current_upper < previous_upper
-                or (not np.isnan(previous_close_value) and previous_close_value > previous_upper)
-            ):
-                final_upper[index] = current_upper
-            else:
-                final_upper[index] = previous_upper
-
-            if np.isnan(current_lower):
-                final_lower[index] = previous_lower
-            elif (
-                np.isnan(previous_lower)
-                or current_lower > previous_lower
-                or (not np.isnan(previous_close_value) and previous_close_value < previous_lower)
-            ):
-                final_lower[index] = current_lower
-            else:
-                final_lower[index] = previous_lower
-
-            previous_direction = int(direction[index - 1])
-            if np.isnan(final_upper[index]) and np.isnan(final_lower[index]):
-                direction[index] = previous_direction
-                supertrend[index] = supertrend[index - 1]
-                continue
-            if np.isnan(current_close):
-                direction[index] = previous_direction
-                supertrend[index] = supertrend[index - 1]
-                continue
-
-            if previous_direction <= 0:
-                if np.isnan(final_upper[index]):
-                    direction[index] = 1
-                    supertrend[index] = final_lower[index]
-                elif current_close <= final_upper[index]:
-                    direction[index] = -1
-                    supertrend[index] = final_upper[index]
-                else:
-                    direction[index] = 1
-                    supertrend[index] = final_lower[index]
-            else:
-                if np.isnan(final_lower[index]):
-                    direction[index] = -1
-                    supertrend[index] = final_upper[index]
-                elif current_close >= final_lower[index]:
-                    direction[index] = 1
-                    supertrend[index] = final_lower[index]
-                else:
-                    direction[index] = -1
-                    supertrend[index] = final_upper[index]
-
-        return (
-            pd.Series(supertrend, index=close_series.index, dtype="float64"),
-            pd.Series(direction, index=close_series.index, dtype="int8"),
-        )
-
-    def _compute_dual_thrust_trade_readiness(
-        self,
-        *,
-        candles: list,
-        strategy_params: dict[str, float],
-        runtime_settings,
-    ) -> dict[str, object]:
-        candles_df = self._candles_to_frame(candles)
-        period = max(
-            1,
-            int(
-                strategy_params.get(
-                    "dual_thrust_period",
-                    runtime_settings.strategy.dual_thrust_period,
-                )
-            ),
-        )
-        k1 = float(strategy_params.get("dual_thrust_k1", runtime_settings.strategy.dual_thrust_k1))
-        k2 = float(strategy_params.get("dual_thrust_k2", runtime_settings.strategy.dual_thrust_k2))
-        required = max(period + 2, 6)
-        if len(candles_df) < required or k1 <= 0.0 or k2 <= 0.0:
-            return {
-                "score": 0.0,
-                "color": ACCENT_PRIMARY,
-                "eta_text": "--",
-                "eta_color": TEXT_MUTED,
-                "eta_blink": False,
-            }
-
-        open_series = pd.to_numeric(candles_df["open"], errors="coerce").ffill().fillna(0.0)
-        high_series = pd.to_numeric(candles_df["high"], errors="coerce").ffill().fillna(0.0)
-        low_series = pd.to_numeric(candles_df["low"], errors="coerce").ffill().fillna(0.0)
-        close_series = pd.to_numeric(candles_df["close"], errors="coerce").ffill().fillna(0.0)
-
-        highest_high = high_series.rolling(window=period, min_periods=period).max().shift(1)
-        highest_close = close_series.rolling(window=period, min_periods=period).max().shift(1)
-        lowest_close = close_series.rolling(window=period, min_periods=period).min().shift(1)
-        lowest_low = low_series.rolling(window=period, min_periods=period).min().shift(1)
-        dual_range = pd.concat(
-            [
-                highest_high - lowest_close,
-                highest_close - lowest_low,
-            ],
-            axis=1,
-        ).max(axis=1)
-        upper_trigger = open_series + (dual_range * k1)
-        lower_trigger = open_series - (dual_range * k2)
-
-        current_price = float(close_series.iloc[-1])
-        upper_level = float(upper_trigger.iloc[-1])
-        lower_level = float(lower_trigger.iloc[-1])
-        if not math.isfinite(current_price) or not math.isfinite(upper_level) or not math.isfinite(lower_level):
-            return {
-                "score": 0.0,
-                "color": ACCENT_PRIMARY,
-                "eta_text": "--",
-                "eta_color": TEXT_MUTED,
-                "eta_blink": False,
-            }
-
-        half_span_series = ((upper_trigger - lower_trigger).abs() / 2.0).replace(0.0, np.nan)
-        midpoint_series = (upper_trigger + lower_trigger) / 2.0
-        trigger_proximity_series = (
-            (close_series - midpoint_series).abs() / half_span_series
-        ).clip(lower=0.0, upper=1.0)
-        current_proximity = float(trigger_proximity_series.iloc[-1])
-        if not math.isfinite(current_proximity):
-            current_proximity = 0.0
-        score = float(max(0.0, min(current_proximity * 100.0, 100.0)))
-
-        eta_candles = self._estimate_candles_to_threshold(
-            trigger_proximity_series.to_numpy(dtype=np.float64, copy=False),
-            target_value=1.0,
-            direction="up",
-        )
-        eta_text, eta_color, eta_blink = self._format_eta_display(eta_candles)
-
-        return {
-            "score": score,
-            "color": (
-                ACCENT_PROFIT
-                if score >= 100.0
-                else "#fbc02d"
-                if score >= 70.0
-                else ACCENT_PRIMARY
-            ),
-            "eta_text": eta_text,
-            "eta_color": eta_color,
-            "eta_blink": eta_blink,
-        }
 
     def _compute_fallback_trade_readiness(self, *, candles: list) -> float:
         candles_df = self._candles_to_frame(candles)
@@ -7353,50 +4325,6 @@ class TradingTerminalWindow(QMainWindow):
                 for candle in candles
             ]
         )
-
-    @staticmethod
-    def _estimate_candles_to_threshold(
-        values: np.ndarray,
-        *,
-        target_value: float,
-        direction: str,
-        lookback_candles: int = 5,
-    ) -> float | None:
-        finite_values = values[np.isfinite(values)]
-        if finite_values.size < (lookback_candles + 1):
-            return None
-
-        recent = finite_values[-(lookback_candles + 1):]
-        current_value = float(recent[-1])
-        if direction == "down":
-            if current_value <= target_value:
-                return 0.0
-            slope_per_candle = (float(recent[-1]) - float(recent[0])) / max(lookback_candles, 1)
-            if slope_per_candle >= 0.0:
-                return None
-            return max((current_value - target_value) / abs(slope_per_candle), 0.0)
-
-        if direction == "up":
-            if current_value >= target_value:
-                return 0.0
-            slope_per_candle = (float(recent[-1]) - float(recent[0])) / max(lookback_candles, 1)
-            if slope_per_candle <= 0.0:
-                return None
-            return max((target_value - current_value) / slope_per_candle, 0.0)
-
-        return None
-
-    @staticmethod
-    def _format_eta_display(eta_candles: float | None) -> tuple[str, str, bool]:
-        if eta_candles is None or not math.isfinite(eta_candles):
-            return "--", TEXT_MUTED, False
-        estimated_candles = max(0, int(math.ceil(eta_candles)))
-        eta_text = f"~{estimated_candles}c"
-        if estimated_candles <= 2:
-            return eta_text, "#39ff88", True
-        if estimated_candles <= 5:
-            return eta_text, "#fbc02d", False
-        return eta_text, TEXT_MUTED, False
 
     @staticmethod
     def _readiness_color(score: float) -> str:
@@ -7481,12 +4409,7 @@ class TradingTerminalWindow(QMainWindow):
         bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
         backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
         optimization_active = self._is_optimization_mode_active()
-        if self._batch_mode == BACKTEST_MODE_LIVE_VS_CHALLENGER:
-            batch_running_text = "Challenger Running..."
-        elif self._batch_mode == "dual_interval":
-            batch_running_text = "Sweep Running..."
-        else:
-            batch_running_text = "Batch Running..."
+        batch_running_text = "Sweep Running..." if self._batch_mode == "dual_interval" else "Batch Running..."
 
         if bot_running and not self._bot_stop_requested:
             self._set_button_state(self.start_button, "Running...", False, BUTTON_STYLE_DISABLED)
@@ -7502,6 +4425,12 @@ class TradingTerminalWindow(QMainWindow):
             self._set_button_state(self.backtest_button, "Run Backtest", False, BUTTON_STYLE_DISABLED)
             self._set_button_state(self.optimize_button, "Optimize Profile", False, BUTTON_STYLE_DISABLED)
             self._set_button_state(self.run_selected_button, batch_running_text, False, BUTTON_STYLE_DISABLED)
+            self._set_button_state(
+                self.run_selected_dual_interval_button,
+                batch_running_text,
+                False,
+                BUTTON_STYLE_DISABLED,
+            )
             self._set_button_state(self.run_all_button, batch_running_text, False, BUTTON_STYLE_DISABLED)
             if self._backtest_stop_requested:
                 self._set_button_state(
@@ -7511,7 +4440,6 @@ class TradingTerminalWindow(QMainWindow):
                 self._set_button_state(
                     self.stop_backtest_button, "Stop Backtest", True, BUTTON_STYLE_RED
                 )
-            self._apply_backtest_mode_ui_state()
             return
         if backtest_running:
             self._set_button_state(self.backtest_button, "Simulating...", False, BUTTON_STYLE_DISABLED)
@@ -7519,6 +4447,17 @@ class TradingTerminalWindow(QMainWindow):
             self._set_button_state(self.optimize_button, optimize_text, False, BUTTON_STYLE_DISABLED)
             run_selected_text = batch_running_text if self._batch_active else "Run Selected Coins"
             self._set_button_state(self.run_selected_button, run_selected_text, False, BUTTON_STYLE_DISABLED)
+            run_selected_dual_interval_text = (
+                batch_running_text
+                if self._batch_active
+                else "Run Selected 15m -> 1h"
+            )
+            self._set_button_state(
+                self.run_selected_dual_interval_button,
+                run_selected_dual_interval_text,
+                False,
+                BUTTON_STYLE_DISABLED,
+            )
             run_all_text = batch_running_text if self._batch_active else "Run All Coins"
             self._set_button_state(self.run_all_button, run_all_text, False, BUTTON_STYLE_DISABLED)
             if self._backtest_stop_requested:
@@ -7529,29 +4468,19 @@ class TradingTerminalWindow(QMainWindow):
                 self._set_button_state(
                     self.stop_backtest_button, "Stop Backtest", True, BUTTON_STYLE_RED
                 )
-            self._apply_backtest_mode_ui_state()
             return
         self._set_button_state(self.backtest_button, "Run Backtest", True, BUTTON_STYLE_BLUE)
         optimize_style = BUTTON_STYLE_GREEN if optimization_active else BUTTON_STYLE_BLUE
         self._set_button_state(self.optimize_button, "Optimize Profile", True, optimize_style)
-        if self._is_live_vs_challenger_mode_active():
-            self._set_button_state(
-                self.run_selected_button,
-                "Run Selected (Live vs Challenger)",
-                True,
-                BUTTON_STYLE_BLUE,
-            )
-            self._set_button_state(
-                self.run_all_button,
-                "Run All (Live vs Challenger)",
-                True,
-                BUTTON_STYLE_BLUE,
-            )
-        else:
-            self._set_button_state(self.run_selected_button, "Run Selected Coins", True, BUTTON_STYLE_BLUE)
-            self._set_button_state(self.run_all_button, "Run All Coins", True, BUTTON_STYLE_BLUE)
+        self._set_button_state(self.run_selected_button, "Run Selected Coins", True, BUTTON_STYLE_BLUE)
+        self._set_button_state(
+            self.run_selected_dual_interval_button,
+            "Run Selected 15m -> 1h",
+            True,
+            BUTTON_STYLE_BLUE,
+        )
+        self._set_button_state(self.run_all_button, "Run All Coins", True, BUTTON_STYLE_BLUE)
         self._set_button_state(self.stop_backtest_button, "Stop Backtest", False, BUTTON_STYLE_DISABLED)
-        self._apply_backtest_mode_ui_state()
 
     @staticmethod
     def _set_button_state(button: QPushButton, text: str, enabled: bool, style_sheet: str) -> None:
@@ -7571,24 +4500,20 @@ class TradingTerminalWindow(QMainWindow):
         live_leverage = self.leverage_spin.value()
         live_interval_label = self._summarize_live_intervals()
         backtest_leverage = self._current_backtest_leverage()
-        backtest_interval = self._summarize_backtest_intervals()
+        backtest_interval = self._current_backtest_interval()
         live_strategy_label = self._summarize_live_resolved_strategies()
-        if self._is_live_vs_challenger_mode_active():
-            backtest_strategy_label = "Live Baseline vs Challengers"
-            backtest_interval = "per live profile"
-        elif len(backtest_strategy_names) <= 1:
+        if len(backtest_strategy_names) <= 1:
             backtest_strategy_label = self.backtest_strategy_combo.currentText()
         else:
             backtest_strategy_label = f"{len(backtest_strategy_names)} strategies"
         backtest_mode = "Optimize" if self._is_optimization_mode_active() else "Backtest"
-        backtest_mode_label = self._current_backtest_execution_mode_label()
         if self._bot_thread is not None and self._bot_thread.isRunning():
             self.status_label.setText(
                 f"Running: {live_label} / {live_interval_label} / {live_leverage}x / {live_strategy_label}"
             )
             return
         self.status_label.setText(
-            f"Idle / {backtest_mode} [{backtest_mode_label}] {backtest_symbol} / {backtest_interval} / {backtest_strategy_label} / {backtest_leverage}x / "
+            f"Idle / {backtest_mode} {backtest_symbol} / {backtest_interval} / {backtest_strategy_label} / {backtest_leverage}x / "
             f"Live {live_label} / {live_interval_label} / {live_leverage}x / {live_strategy_label}"
         )
 

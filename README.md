@@ -34,7 +34,7 @@ Die zentralen Live-Parameter liegen in `config.py`:
 ### Was der Backtest macht
 - Lädt historische Candles aus der lokalen DB.
 - Simuliert Trades inkl. Gebühren, Slippage-Penalty, Trailing, Breakeven, Exit-Regeln.
-- Schreibt Ergebnisse in die DB (`backtest_runs`) und in kompakte TXT-Reports (`backtest_compact_summary_YYYYMMDD_HHMMSS.txt`).
+- Schreibt Ergebnisse in die DB (`backtest_runs`) und in kompakte TXT-Reports unter `archive/backtest_compact_summaries/`.
 - Unterstützt Batch-Läufe über mehrere Coins/Strategien/Timeframes.
 
 ### Optimizer-Fokus
@@ -76,14 +76,16 @@ python gui.py
 1. Coins, Strategien und Timeframes im Backtest-Tab wählen.
 2. `Run Backtest` oder Batch-Lauf starten.
 3. Ergebnis in Kacheln/Logs prüfen.
-4. `backtest_compact_summary_*.txt` für Vergleich und Dokumentation nutzen.
+4. Reports in `archive/backtest_compact_summaries/` für Vergleich und Dokumentation nutzen.
 
 ## Daten & Artefakte
 
 - `data/paper_trading.duckdb` - Candle-Historie, Paper-Trades, Backtest-Runs  
   Hinweis: Diese Datei ist **nicht im Repository enthalten** (zu groß) und wird lokal erzeugt/gefüllt.
 - `paper_trades.json` - Persistenz offener Paper-Positionen
-- `backtest_compact_summary_*.txt` - kompakter Laufreport inkl. Aggregates
+- `archive/backtest_compact_summaries/backtest_compact_summary_*.txt` - kompakter Laufreport inkl. Aggregates
+- `archive/research_reports/` - zusammengefasste Reports, Notizen und Research-Artefakte
+- `data/snapshots/` - lokale Snapshot-/Einmal-JSONs
 - `logs/` - GUI- und Runtime-Logs
 
 ## Hinweis

@@ -8,3 +8,10 @@ logs/
 data/*.duckdb.wal
 data/*.duckdb.shm
 backup/
+backtest_compact_summary_*.txt
+backtest_compact_summaries_merged.txt
+latest_*_snapshot.json
+final_*_results.json
+data/snapshots/
+*_hook_test.txt
+_summary_tmp_*.txt

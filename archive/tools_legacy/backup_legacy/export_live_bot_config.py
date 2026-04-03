@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from config import (
+    DEFAULT_COIN_PROFILE_VALUES,
     DEFAULT_COIN_STRATEGIES,
     settings,
 )
@@ -16,30 +17,16 @@ RISK_FIELDS: tuple[str, ...] = (
     "default_leverage",
     "stop_loss_pct",
     "take_profit_pct",
-    "breakeven_activation_pct",
-    "breakeven_buffer_pct",
     "trailing_activation_pct",
     "trailing_distance_pct",
-    "tight_trailing_activation_pct",
-    "tight_trailing_distance_pct",
 )
 
-STRATEGY_PARAM_ALIASES: dict[str, str] = {
-    # Legacy/short names mapped to current canonical runtime keys.
-    "supertrend_length": "supertrend_ema_supertrend_length",
-    "supertrend_multiplier": "supertrend_ema_supertrend_multiplier",
-    "ema_length": "supertrend_ema_ema_length",
-}
+STRATEGY_PARAM_ALIASES: dict[str, str] = {}
 
 STRATEGY_REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
-    "ema_cross_volume": ("ema_fast_period", "ema_slow_period", "volume_multiplier"),
-    "frama_cross": ("frama_fast_period", "frama_slow_period", "volume_multiplier"),
+    "ema_cross_volume": ("ema_fast_period", "ema_slow_period", "volume_sma_period", "volume_multiplier"),
+    "frama_cross": ("frama_fast_period", "frama_slow_period"),
     "dual_thrust": ("dual_thrust_period", "dual_thrust_k1", "dual_thrust_k2"),
-    "supertrend_ema": (
-        "supertrend_ema_supertrend_length",
-        "supertrend_ema_supertrend_multiplier",
-        "supertrend_ema_ema_length",
-    ),
 }
 
 
@@ -58,12 +45,8 @@ def _resolve_runtime_risk_profile(symbol: str) -> dict[str, Any]:
     leverage = settings.trading.default_leverage
     stop_loss_pct = settings.trading.stop_loss_pct
     take_profit_pct = settings.trading.take_profit_pct
-    breakeven_activation_pct: float | None = None
-    breakeven_buffer_pct: float | None = None
     trailing_activation_pct = settings.trading.trailing_activation_pct
     trailing_distance_pct = settings.trading.trailing_distance_pct
-    tight_trailing_activation_pct: float | None = None
-    tight_trailing_distance_pct: float | None = None
 
     if profile is not None:
         if profile.interval is not None:
@@ -74,30 +57,18 @@ def _resolve_runtime_risk_profile(symbol: str) -> dict[str, Any]:
             stop_loss_pct = profile.stop_loss_pct
         if profile.take_profit_pct is not None:
             take_profit_pct = profile.take_profit_pct
-        if profile.breakeven_activation_pct is not None:
-            breakeven_activation_pct = profile.breakeven_activation_pct
-        if profile.breakeven_buffer_pct is not None:
-            breakeven_buffer_pct = profile.breakeven_buffer_pct
         if profile.trailing_activation_pct is not None:
             trailing_activation_pct = profile.trailing_activation_pct
         if profile.trailing_distance_pct is not None:
             trailing_distance_pct = profile.trailing_distance_pct
-        if profile.tight_trailing_activation_pct is not None:
-            tight_trailing_activation_pct = profile.tight_trailing_activation_pct
-        if profile.tight_trailing_distance_pct is not None:
-            tight_trailing_distance_pct = profile.tight_trailing_distance_pct
 
     return {
         "interval": interval,
         "default_leverage": leverage,
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
-        "breakeven_activation_pct": breakeven_activation_pct,
-        "breakeven_buffer_pct": breakeven_buffer_pct,
         "trailing_activation_pct": trailing_activation_pct,
         "trailing_distance_pct": trailing_distance_pct,
-        "tight_trailing_activation_pct": tight_trailing_activation_pct,
-        "tight_trailing_distance_pct": tight_trailing_distance_pct,
     }
 
 
@@ -112,13 +83,6 @@ def _build_effective_strategy_params(symbol: str) -> dict[str, float]:
         "volume_multiplier": float(settings.strategy.volume_multiplier),
         "frama_fast_period": float(settings.strategy.frama_fast_period),
         "frama_slow_period": float(settings.strategy.frama_slow_period),
-        "supertrend_ema_supertrend_length": float(settings.strategy.supertrend_ema_supertrend_length),
-        "supertrend_ema_supertrend_multiplier": float(
-            settings.strategy.supertrend_ema_supertrend_multiplier
-        ),
-        "supertrend_ema_ema_length": float(settings.strategy.supertrend_ema_ema_length),
-        "chandelier_period": float(settings.trading.chandelier_period),
-        "chandelier_multiplier": float(settings.trading.chandelier_multiplier),
     }
 
     coin_overrides = settings.strategy.coin_strategy_params.get(symbol, {}) or {}
@@ -208,25 +172,18 @@ def _validate_live_config(
         if strategy_name == "ema_cross_volume":
             if _param("ema_fast_period") >= _param("ema_slow_period"):
                 issues.append("ema_fast_period must be < ema_slow_period")
+            if _param("volume_sma_period") <= 0:
+                issues.append("volume_sma_period must be > 0")
             if _param("volume_multiplier") <= 0:
                 issues.append("volume_multiplier must be > 0")
         elif strategy_name == "frama_cross":
             if _param("frama_fast_period") >= _param("frama_slow_period"):
                 issues.append("frama_fast_period must be < frama_slow_period")
-            if _param("volume_multiplier") <= 0:
-                issues.append("volume_multiplier must be > 0")
         elif strategy_name == "dual_thrust":
             if _param("dual_thrust_period") <= 0:
                 issues.append("dual_thrust_period must be > 0")
             if _param("dual_thrust_k1") <= 0 or _param("dual_thrust_k2") <= 0:
                 issues.append("dual_thrust_k1/dual_thrust_k2 must be > 0")
-        elif strategy_name == "supertrend_ema":
-            if _param("supertrend_ema_supertrend_length") <= 1:
-                issues.append("supertrend_ema_supertrend_length must be > 1")
-            if _param("supertrend_ema_supertrend_multiplier") <= 0:
-                issues.append("supertrend_ema_supertrend_multiplier must be > 0")
-            if _param("supertrend_ema_ema_length") <= 1:
-                issues.append("supertrend_ema_ema_length must be > 1")
     except (TypeError, ValueError) as exc:
         issues.append(f"invalid strategy param value ({exc})")
 
@@ -234,12 +191,7 @@ def _validate_live_config(
 
 
 def _format_pct(value: Any) -> str:
-    try:
-        if value is None:
-            return "-"
-        return f"{float(value):.4f}%"
-    except (TypeError, ValueError):
-        return "-"
+    return f"{float(value):.4f}%"
 
 
 def _format_runtime_line(runtime_risk: dict[str, Any]) -> str:
@@ -248,11 +200,8 @@ def _format_runtime_line(runtime_risk: dict[str, Any]) -> str:
         f"Leverage: {int(runtime_risk['default_leverage'])}x | "
         f"SL: {_format_pct(runtime_risk['stop_loss_pct'])} | "
         f"TP: {_format_pct(runtime_risk['take_profit_pct'])} | "
-        f"BE: {_format_pct(runtime_risk['breakeven_activation_pct'])} | "
         f"TrailOn: {_format_pct(runtime_risk['trailing_activation_pct'])} | "
-        f"TrailDist: {_format_pct(runtime_risk['trailing_distance_pct'])} | "
-        f"TightOn: {_format_pct(runtime_risk['tight_trailing_activation_pct'])} | "
-        f"TightDist: {_format_pct(runtime_risk['tight_trailing_distance_pct'])}"
+        f"TrailDist: {_format_pct(runtime_risk['trailing_distance_pct'])}"
     )
 
 
@@ -275,6 +224,13 @@ def export_live_bot_config(output_path: str | Path | None = None) -> str:
         default_strategy = _normalize_strategy_name(DEFAULT_COIN_STRATEGIES.get(symbol))
         runtime_risk = _resolve_runtime_risk_profile(symbol)
         strategy_params = _build_effective_strategy_params(symbol)
+        default_profile_values = DEFAULT_COIN_PROFILE_VALUES.get(symbol, {})
+        profile_extras = {
+            key: value
+            for key, value in default_profile_values.items()
+            if key not in RISK_FIELDS
+        }
+
         is_inactive = runtime_strategy is None
         issues = _validate_live_config(
             strategy_name=runtime_strategy,
@@ -304,6 +260,10 @@ def export_live_bot_config(output_path: str | Path | None = None) -> str:
             lines.append(f"  Strategy Params: {formatted_params}")
         else:
             lines.append("  Strategy Params: -")
+
+        if profile_extras:
+            extras_text = ", ".join(f"{key}={value}" for key, value in sorted(profile_extras.items()))
+            lines.append(f"  Profile Extras (DEFAULT_COIN_PROFILE_VALUES): {extras_text}")
 
         strategy_info = default_strategy if default_strategy is not None else "-"
         lines.append(f"  Default Mapping: strategy={strategy_info}")

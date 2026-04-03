@@ -1,0 +1,23 @@
+Live vs Challenger Summary
+Status: completed
+Started (UTC): 2026-04-03 15:00:58
+Finished (UTC): 2026-04-03 15:02:32
+Duration (s): 94
+Coins: 1
+Strategies compared per coin: baseline + challengers (frama_cross, dual_thrust, ema_band_rejection, ema_cross_volume)
+
+1. BTCUSDT
+  live_profile=FRAMA Cross (15m)
+  live_profile_json={"breakeven_activation_pct": 5.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "15m", "stop_loss_pct": 3.0, "strategy_name": "frama_cross", "strategy_params": {"frama_fast_period": 13.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}, "take_profit_pct": 7.5, "trailing_activation_pct": 5.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=82.06 pf=1.08 wr=35.13% tr=316
+  baseline_best_profile={"frama_fast_period": 13.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}
+  best_challenger=EMA Band Rejection (1h) pnl=60.26 pf=1.28 wr=33.33% tr=48
+  challenger_best_profile={"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.05, "min_slow_slope_pct": 0.0, "pullback_requires_outer_band_touch": 1.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 1.0, "signal_cooldown_bars": 0.0, "slope_lookback": 5.0, "use_atr_stop_buffer": 0.0, "use_rejection_quality_filter": 1.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 1.0, "use_volume_filter": 1.0, "volume_ma_length": 20.0, "volume_multiplier": 1.0}
+  delta=fitness=-21.80 pnl=-21.80 pf=+0.20
+  verdict=BLEIBT
+  progress=4/4
+
+Summary
+  BLEIBT: 1
+  ERSETZEN: 0
+  BEOBACHTEN: 0

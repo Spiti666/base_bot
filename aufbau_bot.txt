@@ -1,0 +1,730 @@
+# AUFBAU LIVE-BOT + BACKTESTER FUER 100+ COINS (NEUAUFBAU, EMPFOHLEN)
+
+Datei: `aufbau_bot_100plus_final.txt`
+Stand: 2026-04-02
+
+## WICHTIGER HINWEIS
+
+Dieses Zielbild ist auf:
+
+* **mindestens 100 Coins**
+* **eine gemeinsame App**
+* **saubere Trennung von Live und Backtest**
+* **2560x1440 als Standard-GUI**
+* **maximale praktische Performance auf 9950X3D + RTX 5070 Ti + 64 GB RAM**
+
+ausgelegt.
+
+Es gibt **kein Readiness-Konzept mehr**.
+Es gibt **keine 100 Coin-Karten als Hauptansicht**.
+Es gibt **keine getrennten Rechenwahrheiten** zwischen Optimizer und Final-Backtest.
+
+---
+
+# 1) ZIEL DES SYSTEMS
+
+Das System hat drei klar getrennte Arbeitszonen:
+
+## A) Live-Zone
+
+* Echtzeit-Candles
+* Signalprüfung
+* Risiko- und Positionslogik
+* Paper-Execution
+* Live-Monitoring
+
+## B) Backtest-Zone
+
+* historische Simulation
+* Einzeltests
+* Batchtests
+* Ergebnisvergleich
+* Persistenz
+
+## C) Optimizer-Zone
+
+* Parameterraum
+* Kandidatensuche
+* Verifikation
+* Winner-Speicherung
+
+## Leitprinzip
+
+**Live, Backtest und Optimizer benutzen denselben Rechenkern für Entries, Exits, Gebühren, Slippage und Risiko.**
+
+---
+
+# 2) DIE RICHTIGE PERFORMANCE-STRATEGIE FUER DEIN SYSTEM
+
+## 2.1 CPU ist der Hauptmotor
+
+Dein Ryzen 9 9950X3D ist für diesen Bot der Hauptrechenkern:
+
+* 16 Kerne / 32 Threads
+* große Caches
+* AVX-512
+* starke Eignung für parallele CPU-Workloads ([AMD][1])
+
+### Deshalb gilt
+
+Der schnellste sinnvolle Bot-Pfad ist:
+
+* Daten lesen und vorbereiten auf der CPU
+* Signale auf der CPU
+* Trade-Simulation auf der CPU
+* Profile parallel über Prozesse
+
+---
+
+## 2.2 GPU ist Zusatzmotor, nicht Hauptmotor
+
+Die RTX 5070 Ti ist sehr stark für:
+
+* ML
+* CUDA
+* Tensor-Operationen
+* AMP
+* Modelltraining / Inferenz ([NVIDIA][2])
+
+### Aber
+
+Für klassische Backtests mit:
+
+* Candle-für-Candle-Entscheidungen
+* Stop/TP/Trailing
+* zustandsabhängigen Exits
+* pfadabhängiger Simulation
+
+ist die GPU meistens **nicht** der beste Hauptpfad.
+
+### Deshalb
+
+* **Backtest-/Live-Kern = CPU**
+* **ML/AI-Teil = GPU**
+
+---
+
+## 2.3 Schnellste empfohlene Methoden
+
+### Datenhaltung
+
+* DuckDB
+* möglichst parquet-/spaltenfreundlicher Import
+* vektorisierte Lese- und Filterpfade ([DuckDB][3])
+
+### Datenvorbereitung
+
+* Polars Lazy als Standard
+* Streaming nur dort, wo es wirklich hilft oder die Datenmenge groß wird
+* keine pandas-First-Pipeline im Rechenkern ([docs.pola.rs][4])
+
+### Signal- und Simulationskern
+
+* NumPy Arrays
+* Numba `nopython`
+* wo sinnvoll `parallel=True`
+* JIT-Cache aktivieren ([numba.readthedocs.io][5])
+
+### Parallelisierung
+
+* Prozessbasiert
+* Startwert: **16 Worker**
+* nur nach Benchmark höher
+* UI und OS nie aushungern ([Python documentation][6])
+
+### ML / KI
+
+* PyTorch mit CUDA
+* AMP aktiv
+* GPU nur für dafür passende Workloads ([docs.pytorch.org][7])
+
+---
+
+# 3) GUI-GRUNDSATZ FUER 100+ COINS
+
+Bei 100 Coins ist diese Idee falsch:
+
+* ein Coin = eine Hauptkarte
+* alles gleichzeitig groß sichtbar
+* Readiness-Balken für alle
+
+## Die richtige Lösung:
+
+Die GUI bekommt **3 Ebenen**:
+
+### Ebene 1: Universe-Control-Center
+
+Hauptansicht für alle Coins als **schnelle Tabelle**
+
+### Ebene 2: Fokus-Monitor
+
+Nur relevante Coins:
+
+* offene Positionen
+* neue Signale
+* Fehler
+* manuell gepinnte Coins
+
+### Ebene 3: Coin-Detailpanel
+
+Beim Klick auf einen Coin:
+
+* Profil
+* Strategie
+* Risiko
+* Live-Status
+* Backtest-Historie
+* letzte Signale
+* Aktionen
+
+---
+
+# 4) GUI-AUFLÖSUNG
+
+## Zielauflösung
+
+Die GUI soll standardmäßig für **2560x1440** gebaut werden.
+
+## Regeln dafür
+
+* Standardfenster auf 2560×1440 setzen, wenn Bildschirm groß genug ist
+* bei kleineren Monitoren automatisch auf verfügbare Größe zurückfallen
+* Tabellen und Splitter statt fester Pixelwüsten
+* skalierbare Panels
+* keine UI, die nur auf Full HD gut aussieht
+
+## Layout-Prinzip
+
+* horizontale Splitter
+* vertikale Splitter
+* breite Tabellen
+* rechter Detailbereich oder Drawer
+* unterer Logbereich
+* obere KPI-Leiste
+
+---
+
+# 5) LIVE UND BACKTEST IN EINER APP, ABER IN GETRENNTEN DATEIEN
+
+## Ziel
+
+Eine Oberfläche, aber intern klar getrennt.
+
+## Festlegung
+
+### `main_window.py`
+
+* Hauptfenster
+* enthält den Live-Bereich
+* bindet `live_tab.py` ein
+* bindet `live_runner.py` an
+* enthält die globale App-Struktur
+
+### `backtest_tab.py`
+
+* kompletter Backtest-Bereich
+* Coin-Auswahl
+* Strategie-Auswahl
+* Timeframes
+* Run-Buttons
+* Ergebnis-Karten
+* Backtest-Logs
+* Zusammenfassungen
+* bindet `backtest_runner.py` an
+
+### Wichtige Regel
+
+* `main_window.py` enthält **nicht** die Backtest-Kernlogik
+* `backtest_tab.py` enthält **nicht** WebSocket-/Live-Kernlogik
+
+---
+
+# 6) ZIEL-ORDNERSTRUKTUR
+
+```text id="w8kl2v"
+project_root/
+│
+├─ app.py
+├─ requirements.txt
+├─ README.md
+├─ .env
+│
+├─ config/
+│  ├─ __init__.py
+│  ├─ base.py
+│  ├─ live_profiles.py
+│  ├─ backtest_defaults.py
+│  ├─ optimizer_defaults.py
+│  ├─ strategy_templates.py
+│  ├─ group_profiles.py
+│  ├─ symbol_profiles.py
+│  ├─ ui_defaults.py
+│  └─ validation.py
+│
+├─ core/
+│  ├─ __init__.py
+│  ├─ models.py
+│  ├─ enums.py
+│  ├─ types.py
+│  ├─ exceptions.py
+│  │
+│  ├─ db/
+│  │  ├─ __init__.py
+│  │  ├─ database.py
+│  │  ├─ schema.py
+│  │  └─ migrations.py
+│  │
+│  ├─ repositories/
+│  │  ├─ __init__.py
+│  │  ├─ candles_repo.py
+│  │  ├─ trades_repo.py
+│  │  ├─ signals_repo.py
+│  │  ├─ backtests_repo.py
+│  │  ├─ optimizer_repo.py
+│  │  └─ profiles_repo.py
+│  │
+│  ├─ data/
+│  │  ├─ __init__.py
+│  │  ├─ loader.py
+│  │  ├─ normalizer.py
+│  │  ├─ pipeline.py
+│  │  ├─ warmup.py
+│  │  └─ cache.py
+│  │
+│  ├─ api/
+│  │  ├─ __init__.py
+│  │  ├─ exchange_rest.py
+│  │  ├─ exchange_ws.py
+│  │  ├─ reconnect.py
+│  │  └─ rate_limits.py
+│  │
+│  ├─ runtime/
+│  │  ├─ __init__.py
+│  │  ├─ state_store.py
+│  │  ├─ runtime_settings.py
+│  │  ├─ event_bus.py
+│  │  └─ locks.py
+│  │
+│  └─ logging/
+│     ├─ __init__.py
+│     ├─ logger.py
+│     ├─ formatters.py
+│     └─ paths.py
+│
+├─ strategies/
+│  ├─ __init__.py
+│  ├─ base.py
+│  ├─ registry.py
+│  ├─ strategy_context.py
+│  │
+│  ├─ families/
+│  │  ├─ __init__.py
+│  │  ├─ frama_cross.py
+│  │  ├─ ema_cross_volume.py
+│  │  ├─ dual_thrust.py
+│  │  └─ ema_band_rejection.py
+│  │
+│  └─ jit/
+│     ├─ __init__.py
+│     ├─ jit_registry.py
+│     ├─ jit_indicators.py
+│     └─ jit_signals.py
+│
+├─ engine/
+│  ├─ __init__.py
+│  ├─ signal_engine.py
+│  ├─ signal_state.py
+│  ├─ risk_engine.py
+│  ├─ execution_engine.py
+│  ├─ metrics_engine.py
+│  ├─ cost_model.py
+│  ├─ exit_logic.py
+│  ├─ compiled_core.py
+│  └─ consistency_checks.py
+│
+├─ live/
+│  ├─ __init__.py
+│  ├─ live_runner.py
+│  ├─ market_stream.py
+│  ├─ candle_router.py
+│  ├─ profile_router.py
+│  ├─ signal_router.py
+│  ├─ live_cycle.py
+│  ├─ candidate_guard.py
+│  └─ live_persistence.py
+│
+├─ backtest/
+│  ├─ __init__.py
+│  ├─ backtest_runner.py
+│  ├─ batch_runner.py
+│  ├─ period_selector.py
+│  ├─ result_builder.py
+│  ├─ report_writer.py
+│  └─ backtest_persistence.py
+│
+├─ optimizer/
+│  ├─ __init__.py
+│  ├─ grid_builder.py
+│  ├─ constraints.py
+│  ├─ sampler.py
+│  ├─ evaluator.py
+│  ├─ verifier.py
+│  ├─ ranker.py
+│  ├─ worker_payloads.py
+│  ├─ worker_pool.py
+│  ├─ strategy_spaces.py
+│  └─ optimizer_persistence.py
+│
+├─ filters/
+│  ├─ __init__.py
+│  ├─ setup_gate.py
+│  ├─ volatility_filter.py
+│  ├─ volume_filter.py
+│  ├─ candle_quality_filter.py
+│  └─ regime_filter.py
+│
+├─ ui/
+│  ├─ __init__.py
+│  ├─ main_window.py
+│  ├─ live_tab.py
+│  ├─ backtest_tab.py
+│  ├─ app_controller.py
+│  │
+│  ├─ widgets/
+│  │  ├─ __init__.py
+│  │  ├─ universe_table.py
+│  │  ├─ signal_badge.py
+│  │  ├─ position_status_badge.py
+│  │  ├─ log_panel.py
+│  │  ├─ metrics_panel.py
+│  │  ├─ focus_card.py
+│  │  ├─ profile_card.py
+│  │  └─ controls_panel.py
+│  │
+│  ├─ dialogs/
+│  │  ├─ __init__.py
+│  │  ├─ profile_dialog.py
+│  │  ├─ run_dialog.py
+│  │  └─ confirm_dialog.py
+│  │
+│  └─ themes/
+│     ├─ __init__.py
+│     ├─ colors.py
+│     ├─ fonts.py
+│     └─ stylesheets.py
+│
+├─ reports/
+│  ├─ backtests/
+│  ├─ optimizer/
+│  └─ exports/
+│
+├─ logs/
+│  ├─ app.log
+│  ├─ live.log
+│  ├─ backtest.log
+│  ├─ optimizer.log
+│  ├─ debug.log
+│  └─ crash.log
+│
+├─ data/
+│  ├─ market_data.duckdb
+│  ├─ paper_trades.json
+│  ├─ cache/
+│  └─ tmp/
+│
+└─ tests/
+   ├─ __init__.py
+   ├─ test_strategies.py
+   ├─ test_signal_engine.py
+   ├─ test_execution_engine.py
+   ├─ test_backtest_runner.py
+   ├─ test_optimizer_consistency.py
+   ├─ test_profile_routing.py
+   └─ test_cost_model.py
+```
+
+---
+
+# 7) DIE WICHTIGSTEN DATEIEN UND IHRE ROLLE
+
+## `main_window.py`
+
+* Hauptfenster
+* Standardgröße 2560×1440, mit Fallback wenn Monitor kleiner ist
+* enthält Live-Bereich
+* bindet `live_tab.py` ein
+* bindet `live_runner.py` an
+* enthält Universe-Hauptlayout
+
+## `live_tab.py`
+
+* Signal-Monitor
+* offene Positionen
+* Fokus-Karten
+* Live-Logs
+* Universe-Filteransicht
+
+## `backtest_tab.py`
+
+* Coin-Auswahl
+* Strategie-Auswahl
+* Timeframes
+* Run-Buttons
+* Ergebnis-Karten
+* Backtest-Logs
+* Zusammenfassungen
+* Job-/Queue-Anzeige
+
+## `live_runner.py`
+
+* WebSocket-Lauf
+* Candle-Close-Verarbeitung
+* Signalfluss
+* Engine-Aufrufe
+* Statusrückgabe an UI
+
+## `backtest_runner.py`
+
+* Einzel- und Batch-Backtests
+* Historie laden
+* dieselbe Engine wie live
+* Ergebnisse und Persistenz
+
+---
+
+# 8) DIE GUI FUER 100+ COINS
+
+## 8.1 Hauptansicht = Universe-Tabelle
+
+Jeder Coin ist eine Zeile.
+
+### Spalten
+
+* Aktiv
+* Symbol
+* Gruppe
+* Strategie
+* Intervall
+* Leverage
+* letzter Signalstatus
+* offene Position
+* PnL rolling
+* PF rolling
+* DD rolling
+* letzter Backtest-Status
+* Fehlerstatus
+* Kommentar
+
+### Funktionen
+
+* Suche
+* Filter
+* Sortierung
+* Mehrfachauswahl
+* Bulk-Aktionen
+* schnelles Gruppieren
+
+---
+
+## 8.2 Fokus-Monitor
+
+Nur relevante Coins:
+
+* offene Positionen
+* neue Signale
+* Fehler
+* gepinnte Coins
+
+---
+
+## 8.3 Coin-Detailpanel
+
+Beim Klick auf einen Coin:
+
+* aktuelles Live-Profil
+* Risk-Parameter
+* letzter verifizierter Winner
+* letzte Runs
+* letzter Signalverlauf
+* letzte Trades
+* direkte Aktionen
+
+---
+
+# 9) LIVE-ABLAUF
+
+1. Config laden
+2. Live-Profile laden
+3. Warmup-Historie sicherstellen
+4. WebSocket starten
+5. geschlossene Candle an `signal_engine.py`
+6. Signalstatus berechnen
+7. `risk_engine.py` prüfen
+8. `execution_engine.py` ausführen
+9. Persistenz schreiben
+10. UI aktualisieren
+
+Es gibt dabei nur noch klare Status:
+
+* kein Signal
+* Long-Signal
+* Short-Signal
+* offene Position
+* pausiert
+* Fehler
+
+---
+
+# 10) BACKTEST-ABLAUF
+
+1. Auswahl in `backtest_tab.py`
+2. Historie laden
+3. gleiche Strategie-Schnittstelle wie live
+4. gleiche Engine wie live
+5. gleiche Gebühren und Slippage
+6. Metriken bauen
+7. Ergebnis speichern
+8. UI-Tabelle und Summary aktualisieren
+
+---
+
+# 11) OPTIMIZER-ABLAUF
+
+1. Grid bauen
+2. ungültige Kombinationen früh filtern
+3. Kandidaten parallel rechnen
+4. Sieger ranken
+5. Sieger final verifizieren
+6. Candidate vs Final prüfen
+7. Winner speichern
+
+## Pflichtregel
+
+Wenn Candidate und Final stark auseinanderlaufen, darf das Profil nicht still als Gewinner gelten.
+
+---
+
+# 12) PROFILE-SYSTEM FUER 100+ COINS
+
+Bei 100 Coins wird nicht alles coinweise von Hand gepflegt.
+
+## Ebenen
+
+### Basisprofil
+
+globale Defaults
+
+### Strategie-Template
+
+Vorlage je Strategiefamilie
+
+### Gruppenprofil
+
+z. B. Majors, Midcaps, Memes, Candidates
+
+### Coin-Override
+
+nur wenn wirklich nötig
+
+## Vorteil
+
+Keine 100 Einzelprofile von Hand pflegen.
+
+---
+
+# 13) WAS VERSION 1 NICHT BRAUCHT
+
+* Readiness
+* 100 Coin-Karten
+* HMM gleich am Anfang
+* komplizierte Sondermodi
+* zu viele Fallback-Pfade
+* GPU-Backtest als Pflichtpfad
+* King-of-the-Hill als Kernmechanik
+
+---
+
+# 14) WAS VERSION 1 ZWINGEND BRAUCHT
+
+* DuckDB
+* Polars Lazy
+* NumPy Arrays
+* Numba-JIT
+* Prozessbasierte Parallelisierung
+* identische Live-/Backtest-Engine
+* Universe-Tabelle
+* Fokus-Monitor
+* Coin-Detailpanel
+* sauber getrennte Dateien
+* 2560×1440-taugliche GUI
+
+---
+
+# 15) EMPFOHLENE BAUREIHENFOLGE
+
+## Phase 1
+
+* Datenmodell
+* DB
+* Loader
+* Strategie-Interface
+* Execution-Engine
+
+## Phase 2
+
+* Backtest-Kern
+* Kostenmodell
+* Metriken
+* Persistenz
+
+## Phase 3
+
+* `main_window.py`
+* `live_tab.py`
+* `live_runner.py`
+* Universe-Tabelle
+
+## Phase 4
+
+* `backtest_tab.py`
+* `backtest_runner.py`
+* Ergebnis- und Jobansicht
+
+## Phase 5
+
+* Optimizer
+* Verifikation
+* Winner-Speicherung
+
+## Phase 6
+
+* Numba-Finetuning
+* Worker-Finetuning
+* Caches
+* GPU nur für ML-Teile
+
+---
+
+# 16) ERGEBNIS
+
+Der empfohlene Neubau ist:
+
+* skalierbar für 100+ Coins
+* GUI-seitig sauber
+* ohne Readiness-Ballast
+* CPU-first für Backtest/Live
+* GPU-first nur für ML/AI
+* reproduzierbar
+* modular
+* gut wartbar
+
+**Zielbild:**
+Eine gemeinsame App mit Live und Backtest in einer Oberfläche, aber mit klar getrennten Dateien, einer großen Universe-Tabelle, einem Fokus-Monitor, einem Detailpanel und einem gemeinsamen, verlässlichen Rechenkern.
+
+[1]: https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-9-9950x3d.html "AMD Ryzen™ 9 9950X3D Gaming and Content Creation Processor"
+[2]: https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5070-family/ "GeForce RTX 5070 Family Graphics Cards | NVIDIA"
+[3]: https://duckdb.org/docs/current/internals/vector.html?utm_source=chatgpt.com "Execution Format"
+[4]: https://docs.pola.rs/py-polars/html/reference/lazyframe/index.html?utm_source=chatgpt.com "LazyFrame — Polars documentation"
+[5]: https://numba.readthedocs.io/en/stable/user/performance-tips.html?utm_source=chatgpt.com "Performance Tips - Numba documentation - Read the Docs"
+[6]: https://docs.python.org/3/library/concurrent.futures.html?utm_source=chatgpt.com "concurrent.futures — Launching parallel tasks — Python 3.14 ..."
+[7]: https://docs.pytorch.org/docs/stable/accelerator/amp.html?utm_source=chatgpt.com "Automatic Mixed Precision"

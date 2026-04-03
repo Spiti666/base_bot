@@ -73,6 +73,7 @@ class PaperTradingEngine:
         self._persistence_path = Path(persistence_path)
         self.active_trades: list[PaperTrade] = []
         self._restored_trade_count = 0
+        self._dynamic_risk_overrides: dict[int, tuple[float | None, float | None]] = {}
 
         if self._fee_pct_override is not None and self._fee_pct_override < 0.0:
             raise ValueError("fee_pct_override must be greater than or equal to 0.")
@@ -117,6 +118,8 @@ class PaperTradingEngine:
         *,
         leverage_scale: float = 1.0,
         risk_multiplier: float = 1.0,
+        dynamic_stop_loss_pct: float | None = None,
+        dynamic_take_profit_pct: float | None = None,
     ) -> int | None:
         self._validate_signal_direction(signal_direction)
         self._validate_price(current_price)
@@ -180,6 +183,16 @@ class PaperTradingEngine:
             high_water_mark=current_price,
         )
         trade_id = self._db.insert_trade(trade)
+        resolved_dynamic_stop_loss_pct = self._resolve_dynamic_live_pct(dynamic_stop_loss_pct)
+        resolved_dynamic_take_profit_pct = self._resolve_dynamic_live_pct(dynamic_take_profit_pct)
+        if (
+            resolved_dynamic_stop_loss_pct is not None
+            or resolved_dynamic_take_profit_pct is not None
+        ):
+            self._dynamic_risk_overrides[int(trade_id)] = (
+                resolved_dynamic_stop_loss_pct,
+                resolved_dynamic_take_profit_pct,
+            )
         self._refresh_active_trade_storage()
         return trade_id
 
@@ -190,6 +203,10 @@ class PaperTradingEngine:
         exit_time = self._now()
         persistence_dirty = False
         for trade in self._db.fetch_open_trades(symbol=symbol):
+            dynamic_stop_loss_pct = None
+            dynamic_take_profit_pct = None
+            if trade.id in self._dynamic_risk_overrides:
+                dynamic_stop_loss_pct, dynamic_take_profit_pct = self._dynamic_risk_overrides[trade.id]
             new_high_water_mark = self._calculate_high_water_mark(trade, current_price)
             if new_high_water_mark != trade.high_water_mark:
                 self._db.update_trade(
@@ -199,7 +216,12 @@ class PaperTradingEngine:
                 trade = self._replace_high_water_mark(trade, new_high_water_mark)
                 persistence_dirty = True
 
-            close_status, exit_price = self._resolve_live_exit(trade, current_price)
+            close_status, exit_price = self._resolve_live_exit(
+                trade,
+                current_price,
+                dynamic_stop_loss_pct=dynamic_stop_loss_pct,
+                dynamic_take_profit_pct=dynamic_take_profit_pct,
+            )
             if close_status is None or exit_price is None:
                 continue
 
@@ -219,6 +241,7 @@ class PaperTradingEngine:
             )
             if was_updated:
                 closed_trade_ids.append(trade.id)
+                self._dynamic_risk_overrides.pop(trade.id, None)
                 persistence_dirty = True
         if persistence_dirty:
             self._refresh_active_trade_storage()
@@ -253,6 +276,7 @@ class PaperTradingEngine:
             ),
         )
         if was_updated:
+            self._dynamic_risk_overrides.pop(trade.id, None)
             self._refresh_active_trade_storage()
             return trade.id
         return None
@@ -674,10 +698,29 @@ class PaperTradingEngine:
 
         return (self._now() - last_closed_trade.exit_time) < cooldown_interval
 
-    def _resolve_live_exit(self, trade: PaperTrade, current_price: float) -> tuple[str | None, float | None]:
+    def _resolve_live_exit(
+        self,
+        trade: PaperTrade,
+        current_price: float,
+        *,
+        dynamic_stop_loss_pct: float | None = None,
+        dynamic_take_profit_pct: float | None = None,
+    ) -> tuple[str | None, float | None]:
         trade_settings = self._resolve_trade_settings(trade.symbol)
-        stop_source, stop_price = self._get_protective_stop(trade)
-        take_profit_ratio = trade_settings.take_profit_pct / 100.0
+        stop_source, stop_price = self._get_protective_stop(
+            trade,
+            stop_loss_pct_override=dynamic_stop_loss_pct,
+        )
+        resolved_take_profit_pct = (
+            float(dynamic_take_profit_pct)
+            if (
+                dynamic_take_profit_pct is not None
+                and math.isfinite(float(dynamic_take_profit_pct))
+                and float(dynamic_take_profit_pct) > 0.0
+            )
+            else float(trade_settings.take_profit_pct)
+        )
+        take_profit_ratio = resolved_take_profit_pct / 100.0
 
         if trade.side == "LONG":
             if stop_price is not None and current_price <= stop_price:
@@ -1098,6 +1141,18 @@ class PaperTradingEngine:
             return None
         return resolved_value
 
+    @staticmethod
+    def _resolve_dynamic_live_pct(value: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            resolved_value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(resolved_value) or resolved_value <= 0.0:
+            return None
+        return resolved_value
+
     def _resolve_trade_settings(self, symbol: str | None) -> TradeRuntimeSettings:
         profile = None if symbol is None else self._trading_settings.coin_profiles.get(symbol)
 
@@ -1321,9 +1376,15 @@ class PaperTradingEngine:
         return restored_count
 
     def _refresh_active_trade_storage(self) -> None:
+        self.active_trades = self._db.fetch_open_trades()
+        open_trade_ids = {int(trade.id) for trade in self.active_trades}
+        self._dynamic_risk_overrides = {
+            int(trade_id): (stop_loss_pct, take_profit_pct)
+            for trade_id, (stop_loss_pct, take_profit_pct) in self._dynamic_risk_overrides.items()
+            if int(trade_id) in open_trade_ids
+        }
         if not self._enable_persistence:
             return
-        self.active_trades = self._db.fetch_open_trades()
         save_paper_trades(self.active_trades, self._persistence_path)
 
     @staticmethod

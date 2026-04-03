@@ -1,0 +1,540 @@
+AUFBAU LIVE-BOT + BACKTESTER (ANONYMISIERT)
+Datei: aufbau_bot.txt
+Stand: 2026-04-02
+
+WICHTIGER HINWEIS
+- Diese Dokumentation beschreibt den kompletten technischen Aufbau, die Ablauflogik, Variablenfamilien, UI-Basis und die verwendeten Techniken.
+- Es werden absichtlich keine konkreten Coin-Listen und keine konkreten Strategie-Namen aufgefuehrt.
+- Alles ist auf Architektur-, Pipeline-, Risiko-, UI- und Runtime-Ebene erklaert.
+
+=====================================================================
+1) SYSTEMZIEL UND TRENNUNG
+=====================================================================
+
+Das System besteht aus zwei strikt getrennten Betriebszonen:
+
+1. Live-Zone
+- Echtzeit-Candles per WebSocket
+- Signalerzeugung, Readiness, Risiko-Regeln
+- Paper-Execution (simulierte Ausfuehrung)
+- Laufende UI-Anzeige fuer Monitoring
+
+2. Backtest-/Optimizer-Zone
+- Historische Daten aus lokaler DB
+- Simulations- und Optimierungslaeufe
+- Batch-Orchestrierung ueber Coin x Strategie x Intervall
+- Kompakte Ergebnisreports und Ergebnis-Persistenz
+
+Architekturprinzip:
+- Gemeinsame technische Basis (Datenmodell, Engine-Kern, UI-Rahmen)
+- Saubere Trennung von Live-Flow und Backtest-Flow
+- Reproduzierbarkeit von Ergebnissen als Leitprinzip
+
+=====================================================================
+2) MODULE UND VERANTWORTUNG
+=====================================================================
+
+A) Konfiguration
+- config.py
+- config_sections/*
+
+Aufgaben:
+- Basiswerte, Defaults, Runtime-Settings, Validierungen
+- Produktionsprofile (Live)
+- Backtest-/Optimizer-Defaults
+- Coin-spezifische Profile (aber in dieser Doku anonymisiert)
+
+B) Orchestrierung
+- main_engine.py
+
+Aufgaben:
+- Live-Thread und Backtest-Thread
+- Signalpfad, Optimizer-Pfad, Validierungspfade
+- Multiprocessing, Worker-Tasks, Caching, Konsistenzchecks
+- Logging, Status, Persistenz-Trigger
+
+C) GUI
+- gui.py
+
+Aufgaben:
+- Bedienung Live und Backtest
+- Auswahlmatrix (Coins/Strategien/Intervalle)
+- Kacheln, Readiness-Balken, Logs, Statusleisten
+- Quiet/Standard/Debug Log-Ausgabe im Frontend
+
+D) Datenhaltung
+- core/data/db.py
+
+Aufgaben:
+- DuckDB-Verwaltung
+- Candle-Store, Trade-Store, Backtest-Run-Store
+- Upserts, Abfragen, Inserts
+
+E) Datenpipeline
+- core/data_pipeline.py
+
+Aufgaben:
+- Polars-basierter Loader
+- Spaltennormalisierung
+- NumPy-Array-Ausgabe fuer schnelle Worker-Pfade
+
+F) Marktanbindung
+- core/api/websocket.py
+- core/api/bitunix.py
+
+Aufgaben:
+- Stream-Subscribe je Symbol/Intervall
+- Candle-Update + Candle-Close-Dispatch
+- Reconnect und Gap-Recovery-Hooks
+
+G) Regeln/Filter
+- core/patterns/setup_gate.py
+- core/regime/hmm_regime_detector.py
+
+Aufgaben:
+- Setup-Qualitaetsgate (Konfidenz, Volatilitaet, Volumen, Candle-Qualitaet)
+- Optionales Regime-Filtering
+
+H) Ausfuehrungsengine
+- core/paper_trading/engine.py
+
+Aufgaben:
+- Positionsmanagement
+- SL/TP/Trailing/BE/Ausstiegsprioritaet
+- Gebühren + Slippage-Penalty
+- Backtest-Lauf inkl. Metrikaggregation
+
+I) Performance-Kern
+- engine/compiled_core.py
+- strategies/jit_indicators.py
+
+Aufgaben:
+- Numba-JIT Handelsschleife
+- Numba-JIT Indikator-/Signalfunktionen
+- Fast-Path fuer grosse Grid-Laeufe
+
+=====================================================================
+3) DATENMODELL (DB)
+=====================================================================
+
+DuckDB-Tabellen:
+
+1. candles
+- symbol, interval, open_time, open, high, low, close, volume
+- Primarschluessel: (symbol, interval, open_time)
+- Upsert faehig
+
+2. paper_trades
+- id, symbol, side, entry/exit, qty, leverage, status, pnl, fees, high_water_mark
+- Offene Positionen und Historie
+
+3. live_signals
+- id, symbol, timeframe, signal_time, signal_type, price
+- Signalprotokoll
+
+4. backtest_runs
+- id, created_at, symbol, strategy_name, interval, optimization_mode, leverage,
+  min_confidence_pct, total_pnl_usd, win_rate_pct, profit_factor, total_trades,
+  evaluated_profiles, best_profile_json, summary_json
+
+Persistenzprinzip:
+- Live- und Backtest-Laeufe schreiben strukturierte Summaries
+- Kompakte Reportdateien werden zusaetzlich erzeugt
+
+=====================================================================
+4) KONFIGURATION: ZENTRALE VARIABLENFAMILIEN
+=====================================================================
+
+4.1 API/REQUEST
+- base_url
+- timeframes
+- request_limits:
+  - public_requests_per_second
+  - private_requests_per_second
+  - candles_per_request
+  - request_timeout_seconds
+
+4.2 LIVE
+- default_interval
+- available_symbols
+
+4.3 TRADING-BASIS
+- interval
+- backtest_history_start_utc
+- optimizer_history_start_utc
+- start_capital
+- risk_per_trade_pct
+- taker_fee_pct
+- use_setup_gate
+- use_hmm_regime_filter
+- hmm_allowed_regimes
+- min_confidence_pct
+- take_profit_pct
+- stop_loss_pct
+- chandelier_period
+- chandelier_multiplier
+- use_trailing_stop
+- trailing_activation_pct
+- trailing_distance_pct
+- min_leverage
+- max_leverage
+- default_leverage
+- max_open_positions
+
+4.4 OPTIMIZER-BASIS
+- optimization_take_profit_pct_options
+- optimization_stop_loss_pct_options
+- optimization_trailing_activation_pct_options
+- optimization_trailing_distance_pct_options
+- optimization_max_sample_profiles
+- random_search_samples
+- optimization_search_window_candles
+- optimization_validation_top_n
+- optimizer_progress_print_modulo
+
+4.5 UNIVERSAL RISK GRID
+- universal_stop_loss_pct_options
+- universal_take_profit_pct_options
+- universal_trailing_activation_pct_options
+- universal_trailing_distance_pct_options
+- universal_chandelier_period_options
+- universal_chandelier_multiplier_options
+
+4.6 STRATEGIE-SETTINGS (ANONYMISIERT)
+- Globale Standardparameter je Familie (periods, multipliers, lookbacks)
+- Verfuegbare Strategien
+- Default-Strategie
+- Coin->Strategie Mapping
+- Coin->Strategieparameter Mapping
+
+Hinweis:
+- Konkrete Namen der Strategie-Familien sind absichtlich nicht aufgelistet.
+- Technisch existieren mehrere Familien mit jeweils eigenen Fast/Slow/Threshold/K-Parametern.
+
+=====================================================================
+5) LIVE-ABLAUF END-TO-END
+=====================================================================
+
+5.1 Start
+- GUI startet Live-Thread
+- Runtime-Settings werden geladen
+- Historienfenster fuer Warmup wird sichergestellt
+
+5.2 WebSocket
+- Pro Symbol/Intervall werden Kanaele abonniert
+- Jedes Tick/Kline-Update aktualisiert die letzte Candle
+- Beim Wechsel auf neue Candle wird die alte Candle als geschlossen verarbeitet
+
+5.3 Signal + Gate
+- Signal aus aktiver Coin-Konfiguration
+- Optional Setup-Gate:
+  - Trend-/Lagecheck
+  - Volumencheck
+  - Volatilitaetscheck
+  - Candle-Qualitaetscheck
+- Ergebnis: approved / blocked
+
+5.4 Readiness
+- Je Coin wird readiness_score berechnet
+- Readiness nutzt strategieabhaengige Eingangswerte + Coin-Profile
+- Statusstates: nicht bereit / vorbereitet / ready
+
+5.5 Trade-Ausfuehrung
+- Nur wenn keine Sperre und kein Konflikt mit Positionslimits
+- Positionsgroesse aus equity * risk_per_trade_pct * leverage
+- Entry-Fee direkt eingebucht
+
+5.6 Positionspflege
+- Pro Candle:
+  - Hard-SL / TP
+  - Chandelier / Strategy-Exit
+  - Trailing-Stop-Stufen
+  - Breakeven-Umstellung
+- Exit schreibt PnL und Fees zuruueck
+
+5.7 Live-Status und Schutz
+- Laufende Kennzahlen je Coin
+- Optional Kandidatenmodus mit Schutzlogik:
+  - Verlustserie
+  - DD-Schwelle
+  - Rolling PF
+  - Fill/Slippage-Qualitaet
+
+=====================================================================
+6) BACKTEST-ABLAUF END-TO-END
+=====================================================================
+
+6.1 Trigger aus GUI
+- Einzelrun oder Batchrun
+- Auswahl: Coin(s), Strategie(n), Intervall(e)
+- Auto-Mode kann parallel mit expliziten Strategien laufen
+
+6.2 Queue-Bau
+- Batchqueue wird aus Selektion gebaut
+- Optional je Queue-Eintrag Auto-Flag
+- Reihenfolge: strikt nacheinander
+
+6.3 Historie laden
+- DB-Lesezugriff, ggf. inkrementelles Sync-Fenster
+- Warmup-Sicherung (mind. benoetigte Kerzen)
+- Optional Date-Range-Fenster fuer gezielte Runs
+
+6.4 Signalpfad
+- Vektorisiert oder JIT
+- Optional Regime-Maske
+- Setup-Gate auf Candleindex-Basis
+
+6.5 Simulationslauf
+- Gleiche Engine wie im strukturierten Ausfuehrungskern
+- Kostenmodell aktiv (Fee + Slippage)
+- Ergebnis: Trades, PnL, DD, PF, WR, RRR, Nebenmetriken
+
+6.6 Persistenz + Summary
+- Ergebnis in DB
+- Kompakte Summary-Datei
+- Kachel-Update im UI
+
+=====================================================================
+7) OPTIMIZER-ABLAUF
+=====================================================================
+
+7.1 Grid-Erzeugung
+- Strategie-Familien erhalten feste oder konditionale Parameterraeume
+- Harte Gueltigkeitsregeln filtern ungueltige Profile
+
+7.2 Sampling/Scan-Modi
+- Full-Scan oder Sampling (konfigurierbar)
+- 1-Stage oder 2-Stage (Exploration -> Verification)
+
+7.3 Worker-Pipeline
+- Multiprocessing-Pool
+- Task-Payloads enthalten:
+  - Profil
+  - Candlepayload
+  - optional precomputed signal cache key
+  - Gate- und Regime-Infos
+
+7.4 Bewertungsmetrik
+- Kernmetriken: PnL, PF, WR, Trades, DD, RRR
+- Zusatzhuerden:
+  - Mindesttrades (intervallabhaengig)
+  - Breakeven-Stabilitaetsregel (strategieabhaengig)
+  - avg_profit_per_trade_net_pct
+
+7.5 Stage-Diagnostik
+- fail_min_trades
+- fail_breakeven
+- fail_avg_profit
+- fail_multi
+- eligible
+
+7.6 Final-Verify und Konsistenz
+- Bester Kandidat wird final verifiziert
+- Candidate-Metriken und Final-Metriken werden verglichen
+- Bei starker Abweichung: explizite Warnung
+
+=====================================================================
+8) PERFORMANCE-TECHNIKEN
+=====================================================================
+
+8.1 Polars-Datenlayer
+- Spaltenorientierte Vorverarbeitung
+- Typnormalisierung
+- Direkte NumPy-Ausgabe
+
+8.2 Numba JIT
+- Kompilierte Indikatorfunktionen
+- Kompilierter Simulationskern
+- Runtime-Warmup vor Poolstart
+
+8.3 Multiprocessing
+- Worker-Cap, RAM-Guard, max_tasks_per_child
+- Batchweises Tasking
+- Kompakte Payloads statt schwerer Objekte
+
+8.4 Signal-Cache
+- Strategie-Varianten koennen vorab signalisiert werden
+- Packing/Unpacking fuer speicherschonende Weitergabe
+
+8.5 Logging-Reduktion
+- QUIET fuer kleine Einzelruns
+- STANDARD fuer Batch
+- DEBUG fuer tiefe Forensik
+
+=====================================================================
+9) RISIKO- UND KOSTENMODELL
+=====================================================================
+
+Aktive Kostenkomponenten:
+- Taker-Fee pro Seite
+- Slippage-Penalty pro Seite
+- Roundtrip-Kosten im Reporting
+
+Trade-Management-Reihenfolge (vereinfacht):
+1. Hard Stop Loss
+2. Strategischer Exit / Chandelier-Exit
+3. Take Profit
+4. Trailing-Eskalation
+5. Breakeven-Umschaltung
+
+Metriken:
+- total_pnl_usd
+- win_rate_pct
+- profit_factor
+- total_trades
+- max_drawdown_pct
+- real_rrr
+- average_trade_cost_usd
+- average_win_to_cost_ratio
+
+=====================================================================
+10) UI/OPTISCHE GRUNDAUSRICHTUNG
+=====================================================================
+
+10.0 GUI-Technikstack (explizit)
+- Framework: PyQt6
+- Basisobjekte: QMainWindow, QWidget, QFrame
+- Struktur: QTabWidget, QSplitter, QScrollArea, Grid-/VBox-/HBox-Layouts
+- Styling: Qt-Stylesheets (setStyleSheet / QSS) + QPalette
+- Rendering/UX: Custom-Painting fuer Readiness-Bars, Statusfarben, Badge-System
+- Asynchrone UI-Anbindung: QThread-Signale fuer Live-/Backtest-Updates
+
+10.1 Designsystem (Dark, kontraststark)
+- APP_BACKGROUND = #0a0a0a
+- PANEL_BACKGROUND = #161616
+- SURFACE_BACKGROUND = #101010
+- TEXT_PRIMARY = #e0e0e0
+- TEXT_MUTED = #9e9e9e
+- ACCENT_PRIMARY = #0078d4
+- ACCENT_PROFIT = #2e7d32
+- ACCENT_DANGER = #c62828
+- ACCENT_WARNING = #ef6c00
+- BORDER_COLOR = #2b2b2b
+
+10.2 Typografie
+- Globaler App-Font mit klarer Lesbarkeit
+- Log-/Metrikbereiche in Monospace (Consolas/Courier New)
+- Klare Hierarchie:
+  - Titel fett
+  - Subtitel mutet
+  - KPI-Werte gross/fett
+
+10.3 Layoutstruktur
+- Tab-basiert
+- Mehrere QSplitter (horizontal + vertikal)
+- Kachelraster fuer Coinkarten
+- Scrollbereiche fuer grosse Universe-Ansichten
+
+10.4 Kachelprinzip
+- Einheitliche Kartenhoehe/-stil
+- Statusfarben + Badges
+- Kompaktmodus fuer Backtestkarten
+- Deploy-/State-Button mit klaren visuellen Zustandswechseln
+
+10.5 Readiness-Visualisierung
+- Balken mit farbcodierten Stufen
+- Optional ETA-Anzeige in Candles
+- Farbwechsel je Naehe zum Trigger
+
+10.6 Logging im UI
+- Backtestlog in separatem Bereich
+- Quiet-Mode reduziert technische Spamzeilen
+- Debug-Details optional in Datei
+
+10.7 Bedienlogik
+- Multi-Select fuer Coin/Strategie/Intervall
+- Einheitliche Buttonbreiten in Auswahlgittern
+- "Clear Cards" zum Zuruecksetzen ohne Neustart
+
+=====================================================================
+11) TECHNIKEN FUER STABILITAET UND WARTBARKEIT
+=====================================================================
+
+- Dataclasses mit __post_init__-Validierung
+- Typisierte Settings und Runtime-Snapshots
+- Defensives Parsing von numerischen Inputs
+- Isolierte DB fuer parallele Live+Backtest-Betriebe
+- Crash-/Runtime-/Faulthandler-Logs
+- Konsistenzchecks zwischen Optimizer und Final-Verify
+- Optionaler Fallback auf strategie-konsistenten Pfad bei Abweichungen
+
+=====================================================================
+12) WICHTIGE RUNTIME-KONSTANTEN (AUSZUG)
+=====================================================================
+
+System/Engine:
+- MAX_BACKTEST_CANDLES
+- MAX_OPTIMIZATION_WORKERS
+- OPTIMIZER_WORKER_MAX_TASKS_PER_CHILD
+- OPTIMIZER_MEMORY_RESERVE_GB
+- OPTIMIZER_MEMORY_PER_WORKER_GB
+- FORCE_MAX_OPTIMIZATION_WORKERS
+- OPTIMIZER_SAMPLE_RANDOM_SEED
+- OPTIMIZER_INTERMEDIATE_CACHE_MIN_PROFILES
+
+Kosten/Stress:
+- BACKTEST_FEE_STRESS_MULTIPLIER
+- LIVE_TAKER_FEE_PCT_STRESS
+- BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE
+- BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE
+
+Qualitaet/Gates:
+- OPTIMIZER_MIN_TOTAL_TRADES
+- OPTIMIZER_MIN_BREAKEVEN_ACTIVATION_PCT
+- OPTIMIZER_MIN_AVERAGE_WIN_TO_COST_RATIO
+- OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT
+- OPTIMIZER_SORT_PROFIT_FACTOR_CAP
+- RANKING_MIN_PROFIT_FACTOR
+- RANKING_MAX_DRAWDOWN_PCT
+
+Optimizer-Modi:
+- OPTIMIZER_TWO_STAGE_DEFAULT_ENABLED
+- OPTIMIZER_TWO_STAGE_STAGE1_TARGET_PROFILES_DEFAULT
+- OPTIMIZER_TWO_STAGE_STAGE2_TOP_N_DEFAULT
+- OPTIMIZER_TWO_STAGE_STAGE1_SEARCH_WINDOW_CANDLES_DEFAULT
+- OPTIMIZER_TWO_STAGE_STAGE2_SEARCH_WINDOW_CANDLES_DEFAULT
+- OPTIMIZER_WORKER_CAP_BY_STRATEGY_DEFAULT
+- OPTIMIZER_FORCE_FULL_VERIFICATION_FOR_WINNER_DEFAULT
+
+UI/Log:
+- _BACKTEST_LOG_MODE_QUIET
+- _BACKTEST_LOG_MODE_STANDARD
+- _BACKTEST_LOG_MODE_DEBUG
+- GUI_RUNTIME_LOG_PATH
+- GUI_CRASH_LOG_PATH
+- GUI_FAULTHANDLER_LOG_PATH
+- GUI_BACKTEST_DEBUG_LOG_PATH
+
+=====================================================================
+13) KLARE ABLAUFKETTE (KOMPAKT)
+=====================================================================
+
+Live:
+1. Config laden -> Thread starten
+2. Historie/Warmup sicherstellen
+3. WebSocket streamt Candles
+4. Signal + Gate + Readiness
+5. Entry/Exit ueber Paper-Engine
+6. Persistenz + UI-Update + Monitoring
+
+Backtest:
+1. Selektion aus GUI -> Queue bauen
+2. Historie laden/neiden (Date-Range + Warmup)
+3. Profile evaluieren (1- oder 2-stage)
+4. Bester Kandidat final verifizieren
+5. Konsistenzcheck Candidate vs Final
+6. Speichern + Kacheln + Summary
+
+=====================================================================
+14) ERGEBNIS
+=====================================================================
+
+Der Bot ist als modularer, performanter und reproduzierbarer Stack aufgebaut:
+- klare Trennung von Live und Backtest
+- starke Konfigurierbarkeit ueber dataclass-basierte Settings
+- schneller Optimizer durch Polars + NumPy + Numba + Multiprocessing
+- robustes Risikomodell mit Kostenrealismus
+- konsistente UI mit dunklem, metrischem Dashboard-Design
+- saubere Logging-Ebenen fuer Betrieb und Forensik
+
+(Anonymisierte Fassung: keine konkrete Coinliste, keine konkrete Strategieliste.)

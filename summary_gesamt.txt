@@ -1,124 +1,132 @@
 Live Strategy vs Backtest Performance (summary_gesamt.txt)
-Generated (UTC): 2026-04-02
+Generated (UTC): 2026-04-03
 Source of live truth: config.PRODUCTION_PROFILE_REGISTRY
-Backtest rows scanned: 1069
-Live profiles scanned: 19
+Backtest rows scanned: 0
+Live profiles scanned: 20
+Hinweis: keine Backtest-Compact-Dateien gefunden (backtest_compact_summary_*.txt).
+Die Live-Profile werden ohne Backtest-Match ausgewiesen.
 
-01. 1000PEPEUSDT | FRAMA Cross | 15m | live_leverage=25
-  Backtest match: NEAREST_PROFILE | source=backtest_compact_summary_20260330_163543.txt
-  Metrics: PnL=775.06 | PF=1.85 | WR=38.41% | Trades=151 | MaxDD=3.46% | RRR=2.97
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 2.5, 'chandelier_period': 30.0, 'frama_fast_period': 12.0, 'frama_slow_period': 200.0, 'stop_loss_pct': 3.0, 'take_profit_pct': 3.5, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.2, 'volume_multiplier': 2.5}
-  live_profile={'strategy_params': {'frama_fast_period': 28.0, 'frama_slow_period': 300.0, 'volume_multiplier': 2.5, 'chandelier_period': 30.0, 'chandelier_multiplier': 2.5}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 3.5, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.2, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+01. 1000PEPEUSDT | EMA Band Rejection | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 3.0, 'min_ema_spread_pct': 0.08, 'min_slow_slope_pct': 0.02, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 0.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 1.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 0.0, 'use_volume_filter': 0.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.0, 'use_atr_stop_buffer': 0.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 3.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.0, 'breakeven_buffer_pct': 0.2}}
 
-02. 1000SHIBUSDT | EMA Cross + Volume | 15m | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=14.06 | PF=1.30 | WR=53.85% | Trades=13 | MaxDD=1.64% | RRR=1.11
-  best_profile={'ema_fast_period': 11.0, 'ema_slow_period': 390.0, 'volume_multiplier': 2.75}
-  live_profile={'strategy_params': {'ema_fast_period': 11.0, 'ema_slow_period': 390.0, 'volume_multiplier': 2.75, 'chandelier_period': 14.0, 'chandelier_multiplier': 2.5}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 10.0, 'trailing_distance_pct': 1.0, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+02. 1000SHIBUSDT | EMA Band Rejection | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 3.0, 'min_ema_spread_pct': 0.05, 'min_slow_slope_pct': 0.0, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 1.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 1.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 0.0, 'use_volume_filter': 0.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.0, 'use_atr_stop_buffer': 1.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.0, 'breakeven_buffer_pct': 0.2}}
 
-03. ADAUSDT | Dual Thrust | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260331_131631.txt
-  Metrics: PnL=1397.48 | PF=2.77 | WR=32.24% | Trades=152 | MaxDD=3.41% | RRR=5.81
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 1.5, 'chandelier_period': 30.0, 'dual_thrust_k1': 1.8, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 34.0, 'stop_loss_pct': 2.0, 'take_profit_pct': 15.0, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'trailing_activation_pct': 8.0, 'trailing_distance_pct': 0.15}
-  live_profile={'strategy_params': {'dual_thrust_k1': 1.8, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 34.0, 'chandelier_period': 30.0, 'chandelier_multiplier': 1.5}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 15.0, 'trailing_activation_pct': 8.0, 'trailing_distance_pct': 0.15, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+03. AAVEUSDT | EMA Cross + Volume | 15m | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast_period': 9.0, 'ema_slow_period': 300.0, 'volume_multiplier': 3.0}, 'risk': {'stop_loss_pct': 1.0, 'take_profit_pct': 10.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.1, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-04. ARBUSDT | Dual Thrust | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260331_131631.txt
-  Metrics: PnL=1072.22 | PF=2.67 | WR=34.86% | Trades=109 | MaxDD=3.35% | RRR=4.98
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 4.0, 'chandelier_period': 30.0, 'dual_thrust_k1': 0.5, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 55.0, 'stop_loss_pct': 1.5, 'take_profit_pct': 10.0, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'trailing_activation_pct': 8.0, 'trailing_distance_pct': 0.15}
-  live_profile={'strategy_params': {'dual_thrust_k1': 0.5, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 55.0, 'chandelier_period': 30.0, 'chandelier_multiplier': 4.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 10.0, 'trailing_activation_pct': 8.0, 'trailing_distance_pct': 0.15, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+04. ADAUSDT | EMA Band Rejection | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 5.0, 'min_ema_spread_pct': 0.08, 'min_slow_slope_pct': 0.0, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 0.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 0.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 0.0, 'use_volume_filter': 1.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.0, 'use_atr_stop_buffer': 0.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 1.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.5, 'breakeven_buffer_pct': 0.2}}
 
-05. AVAXUSDT | FRAMA Cross | 15m | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=23.09 | PF=1.39 | WR=30.00% | Trades=10 | MaxDD=1.40% | RRR=3.24
-  best_profile={'frama_fast_period': 12.0, 'frama_slow_period': 200.0, 'volume_multiplier': 2.5}
-  live_profile={'strategy_params': {'frama_fast_period': 12.0, 'frama_slow_period': 200.0, 'volume_multiplier': 2.5, 'chandelier_period': 40.0, 'chandelier_multiplier': 2.5}, 'risk': {'stop_loss_pct': 3.0, 'take_profit_pct': 3.5, 'trailing_activation_pct': 4.5, 'trailing_distance_pct': 0.2, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+05. ARBUSDT | Dual Thrust | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'dual_thrust_k1': 0.5, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 55.0, 'chandelier_period': 30.0, 'chandelier_multiplier': 4.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 10.0, 'trailing_activation_pct': 8.0, 'trailing_distance_pct': 0.15, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-06. BCHUSDT | FRAMA Cross | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=8.32 | PF=1.12 | WR=25.00% | Trades=12 | MaxDD=1.29% | RRR=3.36
-  best_profile={'frama_fast_period': 28.0, 'frama_slow_period': 90.0, 'volume_multiplier': 1.75}
-  live_profile={'strategy_params': {'frama_fast_period': 28.0, 'frama_slow_period': 90.0, 'volume_multiplier': 1.75, 'chandelier_period': 40.0, 'chandelier_multiplier': 3.5}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 5.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+06. AVAXUSDT | Dual Thrust | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'dual_thrust_k1': 0.2, 'dual_thrust_k2': 0.2, 'dual_thrust_period': 200.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 3.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 5.0, 'breakeven_buffer_pct': 0.2}}
 
-07. BNBUSDT | FRAMA Cross | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=23.50 | PF=3.36 | WR=50.00% | Trades=4 | MaxDD=0.39% | RRR=3.36
-  best_profile={'frama_fast_period': 38.0, 'frama_slow_period': 60.0, 'volume_multiplier': 1.75}
+07. BCHUSDT | Dual Thrust | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'dual_thrust_k1': 0.2, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 200.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 3.0, 'trailing_activation_pct': 5.0, 'trailing_distance_pct': 0.3, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 5.0, 'breakeven_buffer_pct': 0.2}}
+
+08. BNBUSDT | FRAMA Cross | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
   live_profile={'strategy_params': {'frama_fast_period': 38.0, 'frama_slow_period': 60.0, 'volume_multiplier': 1.75, 'chandelier_period': 14.0, 'chandelier_multiplier': 2.5}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 3.5, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-08. BTCUSDT | FRAMA Cross | 1h | live_leverage=25
-  Backtest match: NEAREST_PROFILE | source=backtest_compact_summary_20260331_131631.txt
-  Metrics: PnL=-69.02 | PF=0.97 | WR=34.73% | Trades=550 | MaxDD=7.54% | RRR=1.82
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 3.5, 'chandelier_period': 40.0, 'frama_fast_period': 20.0, 'frama_slow_period': 40.0, 'stop_loss_pct': 1.5, 'take_profit_pct': 10.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.2, 'volume_multiplier': 2.5}
-  live_profile={'strategy_params': {'frama_fast_period': 6.0, 'frama_slow_period': 40.0, 'volume_multiplier': 2.5, 'chandelier_period': 14.0, 'chandelier_multiplier': 2.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 3.5, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+09. BTCUSDT | FRAMA Cross | 15m | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'frama_fast_period': 13.0, 'frama_slow_period': 200.0, 'volume_multiplier': 2.5}, 'risk': {'stop_loss_pct': 3.0, 'take_profit_pct': 7.5, 'trailing_activation_pct': 5.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 5.0, 'breakeven_buffer_pct': 0.2}}
 
-09. DOGEUSDT | EMA Cross + Volume | 1h | live_leverage=25
-  Backtest match: NEAREST_PROFILE | source=backtest_compact_summary_20260331_004710.txt
-  Metrics: PnL=143.85 | PF=1.67 | WR=30.43% | Trades=46 | MaxDD=1.22% | RRR=3.81
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 3.0, 'chandelier_period': 30.0, 'ema_fast_period': 5.0, 'ema_slow_period': 180.0, 'stop_loss_pct': 1.0, 'take_profit_pct': 10.0, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'trailing_activation_pct': 4.5, 'trailing_distance_pct': 0.3, 'volume_multiplier': 2.25}
-  live_profile={'strategy_params': {'ema_fast_period': 5.0, 'ema_slow_period': 250.0, 'volume_multiplier': 2.25, 'chandelier_period': 14.0, 'chandelier_multiplier': 3.0}, 'risk': {'stop_loss_pct': 1.0, 'take_profit_pct': 3.5, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+10. DOGEUSDT | Dual Thrust | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'dual_thrust_k1': 0.5, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 100.0}, 'risk': {'stop_loss_pct': 1.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-10. DOTUSDT | Dual Thrust | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260331_131631.txt
-  Metrics: PnL=1125.27 | PF=3.29 | WR=42.16% | Trades=102 | MaxDD=4.32% | RRR=4.51
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 4.0, 'chandelier_period': 30.0, 'dual_thrust_k1': 1.0, 'dual_thrust_k2': 0.2, 'dual_thrust_period': 233.0, 'stop_loss_pct': 1.5, 'take_profit_pct': 5.0, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'trailing_activation_pct': 6.0, 'trailing_distance_pct': 0.15}
-  live_profile={'strategy_params': {'dual_thrust_k1': 1.0, 'dual_thrust_k2': 0.2, 'dual_thrust_period': 233.0, 'chandelier_period': 30.0, 'chandelier_multiplier': 4.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 5.0, 'trailing_activation_pct': 6.0, 'trailing_distance_pct': 0.15, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+11. DOTUSDT | Dual Thrust | 5m | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'dual_thrust_k1': 0.2, 'dual_thrust_k2': 0.2, 'dual_thrust_period': 400.0}, 'risk': {'stop_loss_pct': 0.5, 'take_profit_pct': 10.0, 'trailing_activation_pct': 5.0, 'trailing_distance_pct': 0.3, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-11. ETHUSDT | Dual Thrust | 5m | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=9.76 | PF=1.05 | WR=38.46% | Trades=65 | MaxDD=1.61% | RRR=1.69
-  best_profile={'dual_thrust_k1': 0.9, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 55.0}
-  live_profile={'strategy_params': {'dual_thrust_k1': 0.9, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 55.0}, 'risk': {'stop_loss_pct': 8.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 6.0, 'trailing_distance_pct': 2.0, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+12. ETHUSDT | FRAMA Cross | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'frama_fast_period': 21.0, 'frama_slow_period': 60.0, 'volume_multiplier': 1.0}, 'risk': {'stop_loss_pct': 0.5, 'take_profit_pct': 3.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-12. FILUSDT | EMA Band Rejection | 1h | live_leverage=5
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260401_224957.txt
-  Metrics: PnL=17238.97 | PF=1.56 | WR=54.06% | Trades=1356 | MaxDD=8.60% | RRR=1.32
-  best_profile={'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'breakeven_activation_pct': 2.5, 'breakeven_buffer_pct': 0.2, 'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'min_ema_spread_pct': 0.05, 'min_slow_slope_pct': 0.0, 'pullback_requires_outer_band_touch': 0.0, 'rejection_body_min_ratio': 0.2, 'rejection_wick_min_ratio': 0.35, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'rsi_midline_margin': 1.0, 'signal_cooldown_bars': 0.0, 'slope_lookback': 5.0, 'stop_loss_pct': 1.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'use_atr_stop_buffer': 1.0, 'use_rejection_quality_filter': 0.0, 'use_rsi_cross_filter': 0.0, 'use_rsi_filter': 1.0, 'use_volume_filter': 1.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.25}
+13. FILUSDT | EMA Band Rejection | 1h | live_leverage=5
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
   live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 5.0, 'min_ema_spread_pct': 0.05, 'min_slow_slope_pct': 0.0, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 0.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 1.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 1.0, 'use_volume_filter': 1.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.25, 'use_atr_stop_buffer': 1.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 1.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.5, 'breakeven_buffer_pct': 0.2}}
 
-13. LINKUSDT | FRAMA Cross | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=111.03 | PF=2.42 | WR=56.25% | Trades=16 | MaxDD=2.21% | RRR=1.88
-  best_profile={'frama_fast_period': 20.0, 'frama_slow_period': 40.0, 'volume_multiplier': 1.75}
-  live_profile={'strategy_params': {'frama_fast_period': 20.0, 'frama_slow_period': 40.0, 'volume_multiplier': 1.75, 'chandelier_period': 40.0, 'chandelier_multiplier': 2.5}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 3.5, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+14. LINKUSDT | EMA Band Rejection | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 3.0, 'min_ema_spread_pct': 0.05, 'min_slow_slope_pct': 0.02, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 1.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 1.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 1.0, 'use_volume_filter': 0.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.0, 'use_atr_stop_buffer': 1.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 3.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.5, 'breakeven_buffer_pct': 0.2}}
 
-14. LTCUSDT | EMA Cross + Volume | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=20.55 | PF=1.30 | WR=30.77% | Trades=13 | MaxDD=1.52% | RRR=2.92
-  best_profile={'ema_fast_period': 5.0, 'ema_slow_period': 180.0, 'volume_multiplier': 2.25}
-  live_profile={'strategy_params': {'ema_fast_period': 5.0, 'ema_slow_period': 180.0, 'volume_multiplier': 2.25, 'chandelier_period': 14.0, 'chandelier_multiplier': 3.5}, 'risk': {'stop_loss_pct': 1.0, 'take_profit_pct': 3.5, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+15. LTCUSDT | FRAMA Cross | 5m | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'frama_fast_period': 21.0, 'frama_slow_period': 100.0, 'volume_multiplier': 2.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 5.0, 'trailing_activation_pct': 5.0, 'trailing_distance_pct': 0.5, 'breakeven_activation_pct': 5.0, 'breakeven_buffer_pct': 0.2}}
 
-15. NEARUSDT | EMA Cross + Volume | 1h | live_leverage=25
-  Backtest match: NEAREST_PROFILE | source=backtest_compact_summary_20260331_004710.txt
-  Metrics: PnL=259.26 | PF=1.93 | WR=17.02% | Trades=47 | MaxDD=2.51% | RRR=9.39
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 3.0, 'chandelier_period': 30.0, 'ema_fast_period': 5.0, 'ema_slow_period': 150.0, 'stop_loss_pct': 1.0, 'take_profit_pct': 10.0, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'trailing_activation_pct': 8.0, 'trailing_distance_pct': 0.3, 'volume_multiplier': 2.25}
-  live_profile={'strategy_params': {'ema_fast_period': 5.0, 'ema_slow_period': 180.0, 'volume_multiplier': 2.25, 'chandelier_period': 14.0, 'chandelier_multiplier': 3.0}, 'risk': {'stop_loss_pct': 1.0, 'take_profit_pct': 15.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+16. NEARUSDT | EMA Band Rejection | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 5.0, 'min_ema_spread_pct': 0.08, 'min_slow_slope_pct': 0.02, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 0.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 0.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 0.0, 'use_volume_filter': 1.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.25, 'use_atr_stop_buffer': 0.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 3.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.0, 'breakeven_buffer_pct': 0.2}}
 
-16. SOLUSDT | Dual Thrust | 15m | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=270.95 | PF=2.03 | WR=45.90% | Trades=61 | MaxDD=2.56% | RRR=2.39
-  best_profile={'dual_thrust_k1': 0.8, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 55.0}
-  live_profile={'strategy_params': {'dual_thrust_k1': 0.8, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 55.0, 'chandelier_period': 30.0, 'chandelier_multiplier': 3.5}, 'risk': {'stop_loss_pct': 8.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 6.0, 'trailing_distance_pct': 0.15, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+17. SOLUSDT | EMA Band Rejection | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 5.0, 'min_ema_spread_pct': 0.05, 'min_slow_slope_pct': 0.02, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 0.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 1.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 0.0, 'use_volume_filter': 0.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.0, 'use_atr_stop_buffer': 1.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 3.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.0, 'breakeven_buffer_pct': 0.2}}
 
-17. SUIUSDT | Dual Thrust | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260331_004710.txt
-  Metrics: PnL=1335.91 | PF=2.22 | WR=37.27% | Trades=110 | MaxDD=3.45% | RRR=3.74
-  best_profile={'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2, 'chandelier_multiplier': 4.0, 'chandelier_period': 30.0, 'dual_thrust_k1': 1.5, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 34.0, 'stop_loss_pct': 3.0, 'take_profit_pct': 5.0, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'trailing_activation_pct': 6.0, 'trailing_distance_pct': 0.15}
-  live_profile={'strategy_params': {'dual_thrust_k1': 1.5, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 34.0, 'chandelier_period': 30.0, 'chandelier_multiplier': 4.0}, 'risk': {'stop_loss_pct': 3.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 6.0, 'trailing_distance_pct': 0.15, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+18. SUIUSDT | Dual Thrust | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'dual_thrust_k1': 1.5, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 34.0, 'chandelier_period': 30.0, 'chandelier_multiplier': 4.0}, 'risk': {'stop_loss_pct': 3.0, 'take_profit_pct': 5.0, 'trailing_activation_pct': 6.0, 'trailing_distance_pct': 0.15, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-18. TRXUSDT | Dual Thrust | 15m | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=-5.84 | PF=0.76 | WR=40.00% | Trades=15 | MaxDD=0.43% | RRR=1.15
-  best_profile={'dual_thrust_k1': 0.1, 'dual_thrust_k2': 1.2, 'dual_thrust_period': 610.0}
-  live_profile={'strategy_params': {'dual_thrust_k1': 0.1, 'dual_thrust_k2': 1.2, 'dual_thrust_period': 610.0, 'chandelier_period': 14.0, 'chandelier_multiplier': 3.0}, 'risk': {'stop_loss_pct': 6.0, 'take_profit_pct': 15.0, 'trailing_activation_pct': 8.0, 'trailing_distance_pct': 0.5, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+19. TRXUSDT | Dual Thrust | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'dual_thrust_k1': 0.2, 'dual_thrust_k2': 0.5, 'dual_thrust_period': 100.0}, 'risk': {'stop_loss_pct': 0.5, 'take_profit_pct': 3.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 0.3, 'tight_trailing_activation_pct': 8.0, 'tight_trailing_distance_pct': 0.3, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
 
-19. XRPUSDT | FRAMA Cross | 1h | live_leverage=25
-  Backtest match: EXACT_PROFILE | source=backtest_compact_summary_20260330_180756.txt
-  Metrics: PnL=22.75 | PF=2.05 | WR=66.67% | Trades=6 | MaxDD=0.43% | RRR=1.02
-  best_profile={'frama_fast_period': 16.0, 'frama_slow_period': 180.0, 'volume_multiplier': 1.75}
-  live_profile={'strategy_params': {'frama_fast_period': 16.0, 'frama_slow_period': 180.0, 'volume_multiplier': 1.75, 'chandelier_period': 40.0, 'chandelier_multiplier': 2.0}, 'risk': {'stop_loss_pct': 1.5, 'take_profit_pct': 2.0, 'trailing_activation_pct': 3.0, 'trailing_distance_pct': 1.0, 'breakeven_activation_pct': 3.5, 'breakeven_buffer_pct': 0.2}}
+20. XRPUSDT | EMA Band Rejection | 1h | live_leverage=25
+  Backtest match: MISSING_PROFILE | source=-
+  Metrics: -
+  best_profile={}
+  live_profile={'strategy_params': {'ema_fast': 5.0, 'ema_mid': 10.0, 'ema_slow': 20.0, 'slope_lookback': 5.0, 'min_ema_spread_pct': 0.05, 'min_slow_slope_pct': 0.02, 'pullback_requires_outer_band_touch': 0.0, 'use_rejection_quality_filter': 0.0, 'rejection_wick_min_ratio': 0.35, 'rejection_body_min_ratio': 0.2, 'use_rsi_filter': 1.0, 'rsi_length': 14.0, 'rsi_midline': 50.0, 'use_rsi_cross_filter': 0.0, 'rsi_midline_margin': 0.0, 'use_volume_filter': 1.0, 'volume_ma_length': 20.0, 'volume_multiplier': 1.0, 'use_atr_stop_buffer': 0.0, 'atr_length': 14.0, 'atr_stop_buffer_mult': 0.5, 'signal_cooldown_bars': 0.0}, 'risk': {'stop_loss_pct': 2.0, 'take_profit_pct': 3.0, 'trailing_activation_pct': 2.0, 'trailing_distance_pct': 0.1, 'breakeven_activation_pct': 2.0, 'breakeven_buffer_pct': 0.2}}
 
 Summary
-Matched coins: 19/19
-Exact param matches: 15/19
-Missing matches: none
+Matched coins: 0/20
+Exact param matches: 0/20
+Missing matches: 1000PEPEUSDT, 1000SHIBUSDT, AAVEUSDT, ADAUSDT, ARBUSDT, AVAXUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOGEUSDT, DOTUSDT, ETHUSDT, FILUSDT, LINKUSDT, LTCUSDT, NEARUSDT, SOLUSDT, SUIUSDT, TRXUSDT, XRPUSDT

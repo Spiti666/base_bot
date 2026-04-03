@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from copy import deepcopy
 import ctypes
 import gc
 import hashlib
@@ -49,7 +48,6 @@ from engine.compiled_core import run_fast_backtest_loop, run_fast_backtest_loop_
 from strategies.python.dual_thrust_breakout import (
     build_dual_thrust_signal_frame,
     run_python_dual_thrust,
-    run_python_dual_thrust_breakout,
     should_exit_python_dual_thrust_breakout,
 )
 from strategies.python.ema_cross_volume import (
@@ -4991,15 +4989,30 @@ class BotEngineThread(QThread):
                     return
 
             execution_price = float(self._latest_market_prices.get(symbol, candle.close))
-            signal_direction = self._evaluate_live_signal_direction(
+            (
+                signal_direction,
+                dynamic_stop_loss_pct,
+                dynamic_take_profit_pct,
+            ) = self._evaluate_live_signal_direction(
                 strategy_name=resolved_strategy_name,
                 candles_dataframe=candles_dataframe,
                 strategy_profile=strategy_profile,
                 required_candle_count=required_candle_count,
             )
             signal_name = "LONG" if signal_direction > 0 else "SHORT" if signal_direction < 0 else "NEUTRAL"
+            dynamic_risk_parts: list[str] = []
+            if dynamic_stop_loss_pct is not None:
+                dynamic_risk_parts.append(f"dyn_sl={dynamic_stop_loss_pct:.4f}%")
+            if dynamic_take_profit_pct is not None:
+                dynamic_risk_parts.append(f"dyn_tp={dynamic_take_profit_pct:.4f}%")
+            dynamic_risk_text = (
+                " | " + " ".join(dynamic_risk_parts)
+                if dynamic_risk_parts
+                else ""
+            )
             self.log_message.emit(
                 f"Signal evaluation: {signal_name} on {symbol} {candle.interval} via {resolved_strategy_name}"
+                f"{dynamic_risk_text}"
             )
             if self._is_live_candidate_symbol(symbol):
                 self.log_message.emit(
@@ -5024,6 +5037,8 @@ class BotEngineThread(QThread):
                 signal_direction=signal_direction,
                 leverage_scale=leverage_scale,
                 risk_multiplier=risk_multiplier,
+                dynamic_stop_loss_pct=dynamic_stop_loss_pct,
+                dynamic_take_profit_pct=dynamic_take_profit_pct,
             )
             if trade_id is None:
                 return
@@ -5678,7 +5693,7 @@ class BotEngineThread(QThread):
         candles_dataframe: pd.DataFrame,
         strategy_profile: OptimizationProfile | None,
         required_candle_count: int,
-    ) -> int:
+    ) -> tuple[int, float | None, float | None]:
         if strategy_name == "ema_band_rejection":
             payload = _build_vectorized_strategy_cache_payload(
                 candles_dataframe,
@@ -5692,14 +5707,37 @@ class BotEngineThread(QThread):
                 signals_payload = payload.get("signals")
                 if isinstance(signals_payload, Sequence) and len(signals_payload) > 0:
                     with suppress(Exception):
-                        return int(signals_payload[-1])
-            return 0
-        return int(
-            _evaluate_strategy_signal(
-                strategy_name,
-                candles_dataframe,
-                strategy_profile=strategy_profile,
-            )
+                        signal_direction = int(signals_payload[-1])
+                        dynamic_stop_loss_pct: float | None = None
+                        if signal_direction != 0:
+                            dynamic_stop_loss_series = payload.get("precomputed_dynamic_stop_loss_pcts")
+                            if (
+                                isinstance(dynamic_stop_loss_series, Sequence)
+                                and len(dynamic_stop_loss_series) > 0
+                            ):
+                                with suppress(Exception):
+                                    candidate_dynamic_stop_loss_pct = float(
+                                        dynamic_stop_loss_series[-1]
+                                    )
+                                    if (
+                                        math.isfinite(candidate_dynamic_stop_loss_pct)
+                                        and candidate_dynamic_stop_loss_pct > 0.0
+                                    ):
+                                        dynamic_stop_loss_pct = float(
+                                            candidate_dynamic_stop_loss_pct
+                                        )
+                        return signal_direction, dynamic_stop_loss_pct, None
+            return 0, None, None
+        return (
+            int(
+                _evaluate_strategy_signal(
+                    strategy_name,
+                    candles_dataframe,
+                    strategy_profile=strategy_profile,
+                )
+            ),
+            None,
+            None,
         )
 
     def _symbols_for_interval(self, interval: str) -> list[str]:
@@ -5743,6 +5781,7 @@ class BacktestThread(QThread):
         strategy_name: str,
         auto_from_config: bool = False,
         allow_auto_interval_override: bool = True,
+        enforce_interval_fairness: bool = False,
         leverage: int | None = None,
         min_confidence_pct: float | None = None,
         optimize_profile: bool = False,
@@ -5763,6 +5802,7 @@ class BacktestThread(QThread):
         )
         self._auto_from_config = bool(auto_from_config)
         self._allow_auto_interval_override = bool(allow_auto_interval_override)
+        self._enforce_interval_fairness = bool(enforce_interval_fairness)
         self._configured_leverage = (
             settings.trading.default_leverage
             if leverage is None
@@ -5846,6 +5886,8 @@ class BacktestThread(QThread):
         return int(settings.trading.default_leverage)
 
     def _resolve_backtest_interval_for_symbol(self, symbol: str) -> tuple[str, str]:
+        if self._enforce_interval_fairness:
+            return self._interval, "live_vs_challenger fairness lock"
         if not self._auto_from_config:
             return self._interval, "configured interval"
         if not self._allow_auto_interval_override:
@@ -6137,7 +6179,13 @@ class BacktestThread(QThread):
                 resolved_interval, interval_source = self._resolve_backtest_interval_for_symbol(
                     self._symbol
                 )
-                if resolved_interval != self._interval:
+                if self._enforce_interval_fairness:
+                    self.log_message.emit(
+                        "Live vs Challenger interval fairness lock active: "
+                        f"{self._symbol} fixed to {resolved_interval} "
+                        f"(source={interval_source})."
+                    )
+                elif resolved_interval != self._interval:
                     self.log_message.emit(
                         "Auto interval routing active: "
                         f"{self._symbol} -> {resolved_interval} "
@@ -6161,6 +6209,7 @@ class BacktestThread(QThread):
                 if (
                     not self._optimize_profile
                     and resolved_strategy_name == "ema_band_rejection"
+                    and not self._enforce_interval_fairness
                 ):
                     resolved_winner_profile = resolve_ema_band_rejection_1h_winner_profile(
                         self._symbol
@@ -6185,6 +6234,15 @@ class BacktestThread(QThread):
                             "EMA Band Rejection winner preset skipped: "
                             f"{self._symbol} is excluded from the fixed 1h winner list."
                         )
+                elif (
+                    not self._optimize_profile
+                    and resolved_strategy_name == "ema_band_rejection"
+                    and self._enforce_interval_fairness
+                ):
+                    self.log_message.emit(
+                        "Live vs Challenger interval fairness lock active: "
+                        "EMA Band Rejection fixed winner preset disabled for this run."
+                    )
                 self._last_runtime_trace = None
                 self._last_strategy_diagnostics = None
                 shared_history_db: Database | None = None
