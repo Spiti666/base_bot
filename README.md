@@ -176,6 +176,21 @@ Lokale Laufzeitdaten:
 - `paper_trades.json`
 - `logs/*.log`
 
+## Datenbank (aktuell)
+
+Verwendet wird eine lokale eingebettete `DuckDB`-Datei:
+
+- DB-Typ: `DuckDB` (file-based, keine separate Server-Instanz)
+- Hauptdatei: `data/paper_trading.duckdb`
+- Laufzeitdateien: `data/paper_trading.duckdb.wal`, `data/paper_trading.duckdb.shm`
+
+Wichtige Tabellen:
+
+- `candles` (historische OHLCV-Daten)
+- `paper_trades` (Paper-Positionen und Exits)
+- `live_signals` (geloggte Live-Signale)
+- `backtest_runs` (Backtest-/Optimizer-Ergebnisse)
+
 ## Setup und Start
 
 ### Voraussetzungen
