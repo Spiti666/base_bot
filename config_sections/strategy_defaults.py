@@ -5,7 +5,6 @@ AVAILABLE_STRATEGIES: tuple[str, ...] = (
     "ema_band_rejection",
     "frama_cross",
     "dual_thrust",
-    "supertrend_ema",
 )
 
 DEFAULT_STRATEGY_NAME = "ema_cross_volume"
@@ -45,6 +44,5 @@ DEFAULT_COIN_STRATEGY_PARAMS: dict[str, dict[str, float]] = {
 DEFAULT_SCAN_STRATEGIES: tuple[str, ...] = (
     "dual_thrust",
     "frama_cross",
-    "supertrend_ema",
     "ema_cross_volume",
 )

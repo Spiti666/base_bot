@@ -62,10 +62,6 @@ from strategies.python.frama_cross import (
     build_frama_cross_signal_frame,
     run_python_frama_cross,
 )
-from strategies.python.supertrend_ema import (
-    run_python_supertrend_ema,
-    should_exit_python_supertrend_ema,
-)
 from strategies.jit_indicators import (
     compute_ema_band_rejection_signals,
     generate_strategy_signals,
@@ -82,7 +78,6 @@ STRATEGY_RUNNERS: dict[str, StrategyRunner] = {
     "ema_band_rejection": run_python_ema_band_rejection,
     "frama_cross": run_python_frama_cross,
     "dual_thrust": run_python_dual_thrust,
-    "supertrend_ema": run_python_supertrend_ema,
 }
 BACKTEST_EXECUTION_STRATEGIES: frozenset[str] = frozenset(
     {
@@ -1299,12 +1294,6 @@ def _required_candle_count_for_strategy(strategy_name: str, *, use_setup_gate: b
         required_count = 64
     elif strategy_name == "frama_cross":
         required_count = max(settings.strategy.frama_slow_period + 1, 6)
-    elif strategy_name == "supertrend_ema":
-        required_count = max(
-            int(settings.strategy.supertrend_ema_ema_length) + 2,
-            int(settings.strategy.supertrend_ema_supertrend_length) + 3,
-            6,
-        )
     elif strategy_name == "dual_thrust":
         required_count = max(settings.strategy.dual_thrust_period + 2, 6)
     else:
@@ -2180,7 +2169,6 @@ def get_strategy_badge(
         "ema_band_rejection",
         "frama_cross",
         "dual_thrust",
-        "supertrend_ema",
     }:
         return "TREND"
     return strategy_name.upper()
@@ -2195,8 +2183,6 @@ def _should_exit_strategy_position(
     strategy_name = _validate_strategy_name(strategy_name)
     if strategy_name == "dual_thrust":
         return should_exit_python_dual_thrust_breakout(candles_dataframe, side)
-    if strategy_name == "supertrend_ema":
-        return should_exit_python_supertrend_ema(candles_dataframe, side)
     return False
 
 

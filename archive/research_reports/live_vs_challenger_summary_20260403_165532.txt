@@ -1,0 +1,232 @@
+Live vs Challenger Summary
+Status: completed
+Started (UTC): 2026-04-03 16:32:43
+Finished (UTC): 2026-04-03 16:55:32
+Duration (s): 1369
+Coins: 20
+Strategies compared per coin: baseline + challengers (frama_cross, dual_thrust, ema_band_rejection, ema_cross_volume)
+
+1. BTCUSDT
+  live_profile=FRAMA Cross (15m)
+  live_profile_json={"breakeven_activation_pct": 5.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "15m", "stop_loss_pct": 3.0, "strategy_name": "frama_cross", "strategy_params": {"frama_fast_period": 13.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}, "take_profit_pct": 7.5, "trailing_activation_pct": 5.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=39.84 pf=1.30 wr=45.24% tr=42
+  baseline_best_profile={"frama_fast_period": 13.0, "frama_slow_period": 200.0, "volume_multiplier": 2.5}
+  best_challenger=EMA Cross + Volume (15m) pnl=-100.28 pf=0.69 wr=33.33% tr=96
+  challenger_best_profile={"ema_fast_period": 9.0, "ema_slow_period": 21.0, "volume_multiplier": 2.5}
+  delta=fitness=-140.12 pnl=-140.12 pf=-0.60
+  verdict=BLEIBT
+  progress=4/4
+
+2. ETHUSDT
+  live_profile=FRAMA Cross (1h)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 0.5, "strategy_name": "frama_cross", "strategy_params": {"frama_fast_period": 21.0, "frama_slow_period": 60.0, "volume_multiplier": 1.0}, "take_profit_pct": 3.0, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=65.88 pf=1.44 wr=23.26% tr=43
+  baseline_best_profile={"frama_fast_period": 21.0, "frama_slow_period": 60.0, "volume_multiplier": 1.0}
+  best_challenger=EMA Band Rejection (1h) pnl=176.95 pf=1.14 wr=27.35% tr=234
+  challenger_best_profile={"volume_multiplier": 1.0}
+  delta=fitness=111.07 pnl=+111.07 pf=-0.31
+  verdict=ERSETZEN
+  progress=4/4
+
+3. SOLUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 1.5, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.05, "min_slow_slope_pct": 0.02, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 0.0, "signal_cooldown_bars": 0.0, "slope_lookback": 5.0, "use_atr_stop_buffer": 1.0, "use_rejection_quality_filter": 0.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 1.0, "use_volume_filter": 0.0, "volume_ma_length": 20.0, "volume_multiplier": 1.0}, "take_profit_pct": 3.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=469.64 pf=1.33 wr=40.87% tr=252
+  baseline_best_profile={"volume_multiplier": 1.0}
+  best_challenger=Dual Thrust (1h) pnl=257.66 pf=1.17 wr=39.38% tr=292
+  challenger_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 4.0}
+  delta=fitness=-211.98 pnl=-211.98 pf=-0.16
+  verdict=BLEIBT
+  progress=4/4
+
+4. XRPUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 2.0, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.05, "min_slow_slope_pct": 0.02, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 0.0, "signal_cooldown_bars": 0.0, "slope_lookback": 5.0, "use_atr_stop_buffer": 0.0, "use_rejection_quality_filter": 0.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 1.0, "use_volume_filter": 1.0, "volume_ma_length": 20.0, "volume_multiplier": 1.0}, "take_profit_pct": 3.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=358.19 pf=1.25 wr=40.00% tr=265
+  baseline_best_profile={"volume_multiplier": 1.0}
+  best_challenger=FRAMA Cross (1h) pnl=27.18 pf=1.11 wr=45.24% tr=42
+  challenger_best_profile={"frama_fast_period": 16.0, "frama_slow_period": 55.0, "volume_multiplier": 1.0}
+  delta=fitness=-331.01 pnl=-331.01 pf=-0.14
+  verdict=BLEIBT
+  progress=4/4
+
+5. ADAUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 1.0, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.08, "min_slow_slope_pct": 0.0, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 0.0, "signal_cooldown_bars": 0.0, "slope_lookback": 5.0, "use_atr_stop_buffer": 0.0, "use_rejection_quality_filter": 0.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 0.0, "use_volume_filter": 1.0, "volume_ma_length": 20.0, "volume_multiplier": 1.0}, "take_profit_pct": 5.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=541.62 pf=1.33 wr=42.18% tr=275
+  baseline_best_profile={"volume_multiplier": 1.0}
+  best_challenger=Dual Thrust (1h) pnl=55.98 pf=1.04 wr=32.89% tr=301
+  challenger_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 4.0}
+  delta=fitness=-485.64 pnl=-485.64 pf=-0.29
+  verdict=BLEIBT
+  progress=4/4
+
+6. DOGEUSDT
+  live_profile=Dual Thrust (1h)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 1.0, "strategy_name": "dual_thrust", "strategy_params": {"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.3, "dual_thrust_period": 100.0}, "take_profit_pct": 5.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.3}
+  baseline_metrics=pnl=174.64 pf=3.70 wr=50.00% tr=16
+  baseline_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.3, "dual_thrust_period": 100.0}
+  best_challenger=EMA Band Rejection (1h) pnl=270.67 pf=1.18 wr=32.92% tr=243
+  challenger_best_profile={"volume_multiplier": 1.0}
+  delta=fitness=96.03 pnl=+96.03 pf=-2.53
+  verdict=ERSETZEN
+  progress=4/4
+
+7. 1000PEPEUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 2.0, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.08, "min_slow_slope_pct": 0.02, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 0.0, "signal_cooldown_bars": 0.0, "slope_lookback": 3.0, "use_atr_stop_buffer": 0.0, "use_rejection_quality_filter": 0.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 1.0, "use_volume_filter": 0.0, "volume_ma_length": 20.0, "volume_multiplier": 1.0}, "take_profit_pct": 3.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=888.27 pf=1.45 wr=47.55% tr=286
+  baseline_best_profile={"volume_multiplier": 1.0}
+  best_challenger=Dual Thrust (1h) pnl=590.85 pf=1.32 wr=44.67% tr=300
+  challenger_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 4.0}
+  delta=fitness=-297.43 pnl=-297.43 pf=-0.14
+  verdict=BLEIBT
+  progress=4/4
+
+8. 1000SHIBUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 2.0, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.05, "min_slow_slope_pct": 0.0, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 0.0, "signal_cooldown_bars": 0.0, "slope_lookback": 3.0, "use_atr_stop_buffer": 1.0, "use_rejection_quality_filter": 1.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 1.0, "use_volume_filter": 0.0, "volume_ma_length": 20.0, "volume_multiplier": 1.0}, "take_profit_pct": 5.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=410.74 pf=1.27 wr=42.75% tr=262
+  baseline_best_profile={"volume_multiplier": 1.0}
+  best_challenger=Dual Thrust (1h) pnl=259.86 pf=1.18 wr=40.58% tr=276
+  challenger_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 4.0}
+  delta=fitness=-150.88 pnl=-150.88 pf=-0.09
+  verdict=BLEIBT
+  progress=4/4
+
+9. BNBUSDT
+  live_profile=FRAMA Cross (1h)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 2.0, "strategy_name": "frama_cross", "strategy_params": {"chandelier_multiplier": 2.5, "chandelier_period": 14.0, "frama_fast_period": 38.0, "frama_slow_period": 60.0, "volume_multiplier": 1.75}, "take_profit_pct": 3.5, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.3}
+  baseline_metrics=pnl=61.81 pf=2.19 wr=50.00% tr=12
+  baseline_best_profile={"frama_fast_period": 38.0, "frama_slow_period": 60.0, "volume_multiplier": 1.75}
+  best_challenger=EMA Band Rejection (1h) pnl=216.54 pf=1.25 wr=32.61% tr=184
+  challenger_best_profile={"volume_multiplier": 1.75}
+  delta=fitness=154.73 pnl=+154.73 pf=-0.94
+  verdict=ERSETZEN
+  progress=4/4
+
+10. AVAXUSDT
+  live_profile=Dual Thrust (1h)
+  live_profile_json={"breakeven_activation_pct": 5.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 1.5, "strategy_name": "dual_thrust", "strategy_params": {"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.2, "dual_thrust_period": 200.0}, "take_profit_pct": 3.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.3}
+  baseline_metrics=pnl=52.54 pf=1.42 wr=40.00% tr=20
+  baseline_best_profile={"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.2, "dual_thrust_period": 200.0}
+  best_challenger=EMA Band Rejection (1h) pnl=418.67 pf=1.28 wr=33.88% tr=242
+  challenger_best_profile={"volume_multiplier": 1.0}
+  delta=fitness=366.13 pnl=+366.13 pf=-0.14
+  verdict=ERSETZEN
+  progress=4/4
+
+11. NEARUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 2.0, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.08, "min_slow_slope_pct": 0.02, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 0.0, "signal_cooldown_bars": 0.0, "slope_lookback": 5.0, "use_atr_stop_buffer": 0.0, "use_rejection_quality_filter": 0.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 0.0, "use_volume_filter": 1.0, "volume_ma_length": 20.0, "volume_multiplier": 1.25}, "take_profit_pct": 3.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=552.81 pf=1.28 wr=44.13% tr=315
+  baseline_best_profile={"volume_multiplier": 1.25}
+  best_challenger=Dual Thrust (1h) pnl=142.98 pf=1.08 wr=43.88% tr=278
+  challenger_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 4.0}
+  delta=fitness=-409.83 pnl=-409.83 pf=-0.20
+  verdict=BLEIBT
+  progress=4/4
+
+12. DOTUSDT
+  live_profile=Dual Thrust (5m)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "5m", "stop_loss_pct": 0.5, "strategy_name": "dual_thrust", "strategy_params": {"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.2, "dual_thrust_period": 400.0}, "take_profit_pct": 10.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 5.0, "trailing_distance_pct": 0.3}
+  baseline_metrics=pnl=138.86 pf=1.33 wr=20.35% tr=113
+  baseline_best_profile={"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.2, "dual_thrust_period": 400.0}
+  best_challenger=FRAMA Cross (5m) pnl=-510.48 pf=0.42 wr=15.51% tr=303
+  challenger_best_profile={"frama_fast_period": 16.0, "frama_slow_period": 55.0, "volume_multiplier": 1.0}
+  delta=fitness=-649.34 pnl=-649.34 pf=-0.91
+  verdict=BLEIBT
+  progress=4/4
+
+13. ARBUSDT
+  live_profile=Dual Thrust (1h)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 1.5, "strategy_name": "dual_thrust", "strategy_params": {"chandelier_multiplier": 4.0, "chandelier_period": 30.0, "dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 55.0}, "take_profit_pct": 10.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 8.0, "trailing_distance_pct": 0.15}
+  baseline_metrics=pnl=69.04 pf=2.28 wr=30.00% tr=10
+  baseline_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 55.0}
+  best_challenger=EMA Band Rejection (1h) pnl=64.35 pf=1.05 wr=20.51% tr=195
+  challenger_best_profile={"volume_multiplier": 1.0}
+  delta=fitness=-4.70 pnl=-4.70 pf=-1.23
+  verdict=BLEIBT
+  progress=4/4
+
+14. SUIUSDT
+  live_profile=Dual Thrust (1h)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 3.0, "strategy_name": "dual_thrust", "strategy_params": {"chandelier_multiplier": 4.0, "chandelier_period": 30.0, "dual_thrust_k1": 1.5, "dual_thrust_k2": 0.3, "dual_thrust_period": 34.0}, "take_profit_pct": 5.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 6.0, "trailing_distance_pct": 0.15}
+  baseline_metrics=pnl=187.87 pf=1.46 wr=32.00% tr=50
+  baseline_best_profile={"dual_thrust_k1": 1.5, "dual_thrust_k2": 0.3, "dual_thrust_period": 34.0}
+  best_challenger=EMA Band Rejection (1h) pnl=189.56 pf=1.12 wr=21.70% tr=212
+  challenger_best_profile={"volume_multiplier": 1.0}
+  delta=fitness=1.69 pnl=+1.69 pf=-0.34
+  verdict=ERSETZEN
+  progress=4/4
+
+15. LTCUSDT
+  live_profile=FRAMA Cross (5m)
+  live_profile_json={"breakeven_activation_pct": 5.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "5m", "stop_loss_pct": 1.5, "strategy_name": "frama_cross", "strategy_params": {"frama_fast_period": 21.0, "frama_slow_period": 100.0, "volume_multiplier": 2.0}, "take_profit_pct": 5.0, "trailing_activation_pct": 5.0, "trailing_distance_pct": 0.5}
+  baseline_metrics=pnl=272.08 pf=1.55 wr=29.46% tr=129
+  baseline_best_profile={"frama_fast_period": 21.0, "frama_slow_period": 100.0, "volume_multiplier": 2.0}
+  best_challenger=EMA Cross + Volume (5m) pnl=-427.03 pf=0.58 wr=22.47% tr=365
+  challenger_best_profile={"ema_fast_period": 9.0, "ema_slow_period": 21.0, "volume_multiplier": 2.0}
+  delta=fitness=-699.10 pnl=-699.10 pf=-0.96
+  verdict=BLEIBT
+  progress=4/4
+
+16. BCHUSDT
+  live_profile=Dual Thrust (1h)
+  live_profile_json={"breakeven_activation_pct": 5.0, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 1.5, "strategy_name": "dual_thrust", "strategy_params": {"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.3, "dual_thrust_period": 200.0}, "take_profit_pct": 3.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 5.0, "trailing_distance_pct": 0.3}
+  baseline_metrics=pnl=-5.58 pf=0.97 wr=28.00% tr=25
+  baseline_best_profile={"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.3, "dual_thrust_period": 200.0}
+  best_challenger=EMA Cross + Volume (1h) pnl=-30.23 pf=0.92 wr=30.51% tr=59
+  challenger_best_profile={"ema_fast_period": 9.0, "ema_slow_period": 21.0, "volume_multiplier": 1.0}
+  delta=fitness=-24.65 pnl=-24.65 pf=-0.05
+  verdict=BLEIBT
+  progress=4/4
+
+17. LINKUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 1.5, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.05, "min_slow_slope_pct": 0.02, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 1.0, "signal_cooldown_bars": 0.0, "slope_lookback": 3.0, "use_atr_stop_buffer": 1.0, "use_rejection_quality_filter": 1.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 1.0, "use_volume_filter": 0.0, "volume_ma_length": 20.0, "volume_multiplier": 1.0}, "take_profit_pct": 3.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=-19.36 pf=0.99 wr=36.20% tr=279
+  baseline_best_profile={"volume_multiplier": 1.0}
+  best_challenger=FRAMA Cross (1h) pnl=-22.53 pf=0.89 wr=38.89% tr=36
+  challenger_best_profile={"frama_fast_period": 16.0, "frama_slow_period": 55.0, "volume_multiplier": 1.0}
+  delta=fitness=-3.17 pnl=-3.17 pf=-0.09
+  verdict=BLEIBT
+  progress=4/4
+
+18. TRXUSDT
+  live_profile=Dual Thrust (1h)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "1h", "stop_loss_pct": 0.5, "strategy_name": "dual_thrust", "strategy_params": {"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.5, "dual_thrust_period": 100.0}, "take_profit_pct": 3.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.3}
+  baseline_metrics=pnl=8.55 pf=1.21 wr=40.00% tr=15
+  baseline_best_profile={"dual_thrust_k1": 0.2, "dual_thrust_k2": 0.5, "dual_thrust_period": 100.0}
+  best_challenger=EMA Cross + Volume (1h) pnl=-13.56 pf=0.92 wr=29.03% tr=62
+  challenger_best_profile={"ema_fast_period": 9.0, "ema_slow_period": 21.0, "volume_multiplier": 1.0}
+  delta=fitness=-22.10 pnl=-22.10 pf=-0.29
+  verdict=BLEIBT
+  progress=4/4
+
+19. FILUSDT
+  live_profile=EMA Band Rejection (1h)
+  live_profile_json={"breakeven_activation_pct": 2.5, "breakeven_buffer_pct": 0.2, "default_leverage": 5, "interval": "1h", "stop_loss_pct": 1.0, "strategy_name": "ema_band_rejection", "strategy_params": {"atr_length": 14.0, "atr_stop_buffer_mult": 0.5, "ema_fast": 5.0, "ema_mid": 10.0, "ema_slow": 20.0, "min_ema_spread_pct": 0.05, "min_slow_slope_pct": 0.0, "pullback_requires_outer_band_touch": 0.0, "rejection_body_min_ratio": 0.2, "rejection_wick_min_ratio": 0.35, "rsi_length": 14.0, "rsi_midline": 50.0, "rsi_midline_margin": 1.0, "signal_cooldown_bars": 0.0, "slope_lookback": 5.0, "use_atr_stop_buffer": 1.0, "use_rejection_quality_filter": 0.0, "use_rsi_cross_filter": 0.0, "use_rsi_filter": 1.0, "use_volume_filter": 1.0, "volume_ma_length": 20.0, "volume_multiplier": 1.25}, "take_profit_pct": 5.0, "trailing_activation_pct": 2.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=1435.43 pf=1.57 wr=43.88% tr=294
+  baseline_best_profile={"volume_multiplier": 1.25}
+  best_challenger=Dual Thrust (1h) pnl=837.52 pf=1.54 wr=37.88% tr=293
+  challenger_best_profile={"dual_thrust_k1": 0.5, "dual_thrust_k2": 0.5, "dual_thrust_period": 4.0}
+  delta=fitness=-597.91 pnl=-597.91 pf=-0.03
+  verdict=BLEIBT
+  progress=4/4
+
+20. AAVEUSDT
+  live_profile=EMA Cross + Volume (15m)
+  live_profile_json={"breakeven_activation_pct": 3.5, "breakeven_buffer_pct": 0.2, "default_leverage": 25, "interval": "15m", "stop_loss_pct": 1.0, "strategy_name": "ema_cross_volume", "strategy_params": {"ema_fast_period": 9.0, "ema_slow_period": 300.0, "volume_multiplier": 3.0}, "take_profit_pct": 10.0, "tight_trailing_activation_pct": 8.0, "tight_trailing_distance_pct": 0.3, "trailing_activation_pct": 3.0, "trailing_distance_pct": 0.1}
+  baseline_metrics=pnl=121.22 pf=4.75 wr=54.55% tr=11
+  baseline_best_profile={"ema_fast_period": 9.0, "ema_slow_period": 300.0, "volume_multiplier": 3.0}
+  best_challenger=FRAMA Cross (15m) pnl=145.91 pf=4.95 wr=58.33% tr=12
+  challenger_best_profile={"frama_fast_period": 16.0, "frama_slow_period": 55.0, "volume_multiplier": 3.0}
+  delta=fitness=24.69 pnl=+24.69 pf=+0.20
+  verdict=ERSETZEN
+  progress=4/4
+
+Summary
+  BLEIBT: 14
+  ERSETZEN: 6
+  BEOBACHTEN: 0

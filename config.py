@@ -67,14 +67,37 @@ PRODUCTION_PROFILE_REGISTRY: dict[str, dict[str, object]] = {'BTCUSDT': {'strate
              'trailing_distance_pct': 0.1,
              'breakeven_activation_pct': 5.0,
              'breakeven_buffer_pct': 0.2},
- 'ETHUSDT': {'strategy_name': 'frama_cross',
+ 'ETHUSDT': {'strategy_name': 'ema_band_rejection',
              'interval': '1h',
-             'strategy_params': {'frama_fast_period': 21.0, 'frama_slow_period': 60.0, 'volume_multiplier': 1.0},
+             'strategy_params': {'ema_fast': 5.0,
+                                 'ema_mid': 10.0,
+                                 'ema_slow': 20.0,
+                                 'slope_lookback': 5.0,
+                                 'min_ema_spread_pct': 0.05,
+                                 'min_slow_slope_pct': 0.0,
+                                 'pullback_requires_outer_band_touch': 0.0,
+                                 'use_rejection_quality_filter': 0.0,
+                                 'rejection_wick_min_ratio': 0.35,
+                                 'rejection_body_min_ratio': 0.2,
+                                 'use_rsi_filter': 0.0,
+                                 'rsi_length': 14.0,
+                                 'rsi_midline': 50.0,
+                                 'use_rsi_cross_filter': 0.0,
+                                 'rsi_midline_margin': 0.0,
+                                 'use_volume_filter': 0.0,
+                                 'volume_ma_length': 20.0,
+                                 'volume_multiplier': 1.0,
+                                 'use_atr_stop_buffer': 0.0,
+                                 'atr_length': 14.0,
+                                 'atr_stop_buffer_mult': 0.5,
+                                 'signal_cooldown_bars': 0.0},
              'default_leverage': 25,
              'stop_loss_pct': 0.5,
              'take_profit_pct': 3.0,
              'trailing_activation_pct': 3.0,
              'trailing_distance_pct': 0.1,
+             'tight_trailing_activation_pct': 0.0,
+             'tight_trailing_distance_pct': 0.0,
              'breakeven_activation_pct': 3.5,
              'breakeven_buffer_pct': 0.2},
  'SOLUSDT': {'strategy_name': 'ema_band_rejection',
@@ -170,9 +193,30 @@ PRODUCTION_PROFILE_REGISTRY: dict[str, dict[str, object]] = {'BTCUSDT': {'strate
              'trailing_distance_pct': 0.1,
              'breakeven_activation_pct': 2.5,
              'breakeven_buffer_pct': 0.2},
- 'DOGEUSDT': {'strategy_name': 'dual_thrust',
+ 'DOGEUSDT': {'strategy_name': 'ema_band_rejection',
               'interval': '1h',
-              'strategy_params': {'dual_thrust_k1': 0.5, 'dual_thrust_k2': 0.3, 'dual_thrust_period': 100.0},
+              'strategy_params': {'ema_fast': 5.0,
+                                  'ema_mid': 10.0,
+                                  'ema_slow': 20.0,
+                                  'slope_lookback': 5.0,
+                                  'min_ema_spread_pct': 0.05,
+                                  'min_slow_slope_pct': 0.0,
+                                  'pullback_requires_outer_band_touch': 0.0,
+                                  'use_rejection_quality_filter': 0.0,
+                                  'rejection_wick_min_ratio': 0.35,
+                                  'rejection_body_min_ratio': 0.2,
+                                  'use_rsi_filter': 0.0,
+                                  'rsi_length': 14.0,
+                                  'rsi_midline': 50.0,
+                                  'use_rsi_cross_filter': 0.0,
+                                  'rsi_midline_margin': 0.0,
+                                  'use_volume_filter': 0.0,
+                                  'volume_ma_length': 20.0,
+                                  'volume_multiplier': 1.0,
+                                  'use_atr_stop_buffer': 0.0,
+                                  'atr_length': 14.0,
+                                  'atr_stop_buffer_mult': 0.5,
+                                  'signal_cooldown_bars': 0.0},
               'default_leverage': 25,
               'stop_loss_pct': 1.0,
               'take_profit_pct': 5.0,
@@ -258,9 +302,30 @@ PRODUCTION_PROFILE_REGISTRY: dict[str, dict[str, object]] = {'BTCUSDT': {'strate
              'breakeven_buffer_pct': 0.2,
              'trailing_activation_pct': 3.0,
              'trailing_distance_pct': 0.3},
- 'AVAXUSDT': {'strategy_name': 'dual_thrust',
+ 'AVAXUSDT': {'strategy_name': 'ema_band_rejection',
               'interval': '1h',
-              'strategy_params': {'dual_thrust_k1': 0.2, 'dual_thrust_k2': 0.2, 'dual_thrust_period': 200.0},
+              'strategy_params': {'ema_fast': 5.0,
+                                  'ema_mid': 10.0,
+                                  'ema_slow': 20.0,
+                                  'slope_lookback': 5.0,
+                                  'min_ema_spread_pct': 0.05,
+                                  'min_slow_slope_pct': 0.0,
+                                  'pullback_requires_outer_band_touch': 0.0,
+                                  'use_rejection_quality_filter': 0.0,
+                                  'rejection_wick_min_ratio': 0.35,
+                                  'rejection_body_min_ratio': 0.2,
+                                  'use_rsi_filter': 0.0,
+                                  'rsi_length': 14.0,
+                                  'rsi_midline': 50.0,
+                                  'use_rsi_cross_filter': 0.0,
+                                  'rsi_midline_margin': 0.0,
+                                  'use_volume_filter': 0.0,
+                                  'volume_ma_length': 20.0,
+                                  'volume_multiplier': 1.0,
+                                  'use_atr_stop_buffer': 0.0,
+                                  'atr_length': 14.0,
+                                  'atr_stop_buffer_mult': 0.5,
+                                  'signal_cooldown_bars': 0.0},
               'default_leverage': 25,
               'stop_loss_pct': 1.5,
               'take_profit_pct': 3.0,
@@ -800,31 +865,33 @@ EMA_BAND_REJECTION_1H_WINNERS: dict[str, dict[str, object]] = {
             "ema_mid": 10,
             "ema_slow": 20,
             "slope_lookback": 5,
-            "min_ema_spread_pct": 0.08,
+            "min_ema_spread_pct": 0.05,
             "min_slow_slope_pct": 0.00,
             "pullback_requires_outer_band_touch": 0,
-            "use_rejection_quality_filter": 1,
+            "use_rejection_quality_filter": 0,
             "rejection_wick_min_ratio": 0.35,
             "rejection_body_min_ratio": 0.20,
-            "use_rsi_filter": 1,
+            "use_rsi_filter": 0,
             "rsi_length": 14,
             "rsi_midline": 50.0,
             "use_rsi_cross_filter": 0,
-            "rsi_midline_margin": 1.0,
-            "use_volume_filter": 1,
+            "rsi_midline_margin": 0.0,
+            "use_volume_filter": 0,
             "volume_ma_length": 20,
             "volume_multiplier": 1.0,
-            "use_atr_stop_buffer": 1,
+            "use_atr_stop_buffer": 0,
             "atr_length": 14,
             "atr_stop_buffer_mult": 0.5,
             "signal_cooldown_bars": 0,
         },
         "risk": {
-            "stop_loss_pct": 1.5,
-            "take_profit_pct": 5.0,
-            "trailing_activation_pct": 2.0,
+            "stop_loss_pct": 0.5,
+            "take_profit_pct": 3.0,
+            "trailing_activation_pct": 3.0,
             "trailing_distance_pct": 0.1,
-            "breakeven_activation_pct": 2.0,
+            "tight_trailing_activation_pct": 0.0,
+            "tight_trailing_distance_pct": 0.0,
+            "breakeven_activation_pct": 3.5,
             "breakeven_buffer_pct": 0.2,
         },
     },
@@ -944,9 +1011,9 @@ EMA_BAND_REJECTION_1H_WINNERS: dict[str, dict[str, object]] = {
             "ema_mid": 10,
             "ema_slow": 20,
             "slope_lookback": 5,
-            "min_ema_spread_pct": 0.08,
-            "min_slow_slope_pct": 0.02,
-            "pullback_requires_outer_band_touch": 1,
+            "min_ema_spread_pct": 0.05,
+            "min_slow_slope_pct": 0.00,
+            "pullback_requires_outer_band_touch": 0,
             "use_rejection_quality_filter": 0,
             "rejection_wick_min_ratio": 0.35,
             "rejection_body_min_ratio": 0.20,
@@ -955,20 +1022,22 @@ EMA_BAND_REJECTION_1H_WINNERS: dict[str, dict[str, object]] = {
             "rsi_midline": 50.0,
             "use_rsi_cross_filter": 0,
             "rsi_midline_margin": 0.0,
-            "use_volume_filter": 1,
+            "use_volume_filter": 0,
             "volume_ma_length": 20,
-            "volume_multiplier": 1.25,
+            "volume_multiplier": 1.0,
             "use_atr_stop_buffer": 0,
             "atr_length": 14,
             "atr_stop_buffer_mult": 0.5,
             "signal_cooldown_bars": 0,
         },
         "risk": {
-            "stop_loss_pct": 2.0,
-            "take_profit_pct": 3.0,
-            "trailing_activation_pct": 2.0,
-            "trailing_distance_pct": 0.1,
-            "breakeven_activation_pct": 2.5,
+            "stop_loss_pct": 1.0,
+            "take_profit_pct": 5.0,
+            "trailing_activation_pct": 3.0,
+            "trailing_distance_pct": 0.3,
+            "tight_trailing_activation_pct": 8.0,
+            "tight_trailing_distance_pct": 0.3,
+            "breakeven_activation_pct": 3.5,
             "breakeven_buffer_pct": 0.2,
         },
     },
@@ -1052,21 +1121,21 @@ EMA_BAND_REJECTION_1H_WINNERS: dict[str, dict[str, object]] = {
             "ema_mid": 10,
             "ema_slow": 20,
             "slope_lookback": 5,
-            "min_ema_spread_pct": 0.08,
+            "min_ema_spread_pct": 0.05,
             "min_slow_slope_pct": 0.00,
             "pullback_requires_outer_band_touch": 0,
-            "use_rejection_quality_filter": 1,
+            "use_rejection_quality_filter": 0,
             "rejection_wick_min_ratio": 0.35,
             "rejection_body_min_ratio": 0.20,
-            "use_rsi_filter": 1,
+            "use_rsi_filter": 0,
             "rsi_length": 14,
             "rsi_midline": 50.0,
             "use_rsi_cross_filter": 0,
-            "rsi_midline_margin": 1.0,
-            "use_volume_filter": 1,
+            "rsi_midline_margin": 0.0,
+            "use_volume_filter": 0,
             "volume_ma_length": 20,
             "volume_multiplier": 1.0,
-            "use_atr_stop_buffer": 1,
+            "use_atr_stop_buffer": 0,
             "atr_length": 14,
             "atr_stop_buffer_mult": 0.5,
             "signal_cooldown_bars": 0,
@@ -1074,9 +1143,11 @@ EMA_BAND_REJECTION_1H_WINNERS: dict[str, dict[str, object]] = {
         "risk": {
             "stop_loss_pct": 1.5,
             "take_profit_pct": 3.0,
-            "trailing_activation_pct": 2.0,
-            "trailing_distance_pct": 0.1,
-            "breakeven_activation_pct": 2.5,
+            "trailing_activation_pct": 3.0,
+            "trailing_distance_pct": 0.3,
+            "tight_trailing_activation_pct": 8.0,
+            "tight_trailing_distance_pct": 0.3,
+            "breakeven_activation_pct": 5.0,
             "breakeven_buffer_pct": 0.2,
         },
     },
@@ -1496,12 +1567,6 @@ class StrategySettings:
     frama_slow_options: tuple[int, ...] = tuple(
         int(value) for value in STRATEGY_GRID_DEFAULTS["frama_slow_options"]
     )
-    supertrend_ema_supertrend_length: int = 10
-    supertrend_ema_supertrend_multiplier: float = 3.0
-    supertrend_ema_ema_length: int = 100
-    supertrend_ema_supertrend_length_options: tuple[int, ...] = (7, 10, 14)
-    supertrend_ema_supertrend_multiplier_options: tuple[float, ...] = (2.0, 3.0, 4.0)
-    supertrend_ema_ema_length_options: tuple[int, ...] = (50, 100, 200)
     volume_sma_period: int = 20
     volume_multiplier: float = 1.0
     volume_multiplier_options: tuple[float, ...] = (1.0, 1.25, 1.5)
@@ -1518,11 +1583,6 @@ class StrategySettings:
             symbol: dict(params)
             for symbol, params in self.coin_strategy_params.items()
         }
-        strategy_param_aliases = {
-            "supertrend_length": "supertrend_ema_supertrend_length",
-            "supertrend_multiplier": "supertrend_ema_supertrend_multiplier",
-            "ema_length": "supertrend_ema_ema_length",
-        }
         for symbol, profile in PRODUCTION_PROFILE_REGISTRY.items():
             strategy_name = str(profile.get("strategy_name", profile.get("strategy", "")))
             strategy_name = PRODUCTION_STRATEGY_ALIASES.get(strategy_name, strategy_name)
@@ -1530,7 +1590,7 @@ class StrategySettings:
             if not isinstance(raw_strategy_params, dict):
                 raw_strategy_params = {}
             strategy_params = {
-                str(strategy_param_aliases.get(str(param_name), str(param_name))): float(param_value)
+                str(param_name): float(param_value)
                 for param_name, param_value in raw_strategy_params.items()
             }
             production_coin_strategies[symbol] = strategy_name
@@ -1655,24 +1715,6 @@ class StrategySettings:
             raise ValueError("frama_slow_options must not be empty.")
         if any(value <= 1 for value in self.frama_slow_options):
             raise ValueError("frama_slow_options must contain only values greater than 1.")
-        if self.supertrend_ema_supertrend_length <= 1:
-            raise ValueError("supertrend_ema_supertrend_length must be greater than 1.")
-        if self.supertrend_ema_supertrend_multiplier <= 0.0:
-            raise ValueError("supertrend_ema_supertrend_multiplier must be positive.")
-        if self.supertrend_ema_ema_length <= 1:
-            raise ValueError("supertrend_ema_ema_length must be greater than 1.")
-        if not self.supertrend_ema_supertrend_length_options:
-            raise ValueError("supertrend_ema_supertrend_length_options must not be empty.")
-        if any(value <= 1 for value in self.supertrend_ema_supertrend_length_options):
-            raise ValueError("supertrend_ema_supertrend_length_options must contain values greater than 1.")
-        if not self.supertrend_ema_supertrend_multiplier_options:
-            raise ValueError("supertrend_ema_supertrend_multiplier_options must not be empty.")
-        if any(value <= 0.0 for value in self.supertrend_ema_supertrend_multiplier_options):
-            raise ValueError("supertrend_ema_supertrend_multiplier_options must contain only positive values.")
-        if not self.supertrend_ema_ema_length_options:
-            raise ValueError("supertrend_ema_ema_length_options must not be empty.")
-        if any(value <= 1 for value in self.supertrend_ema_ema_length_options):
-            raise ValueError("supertrend_ema_ema_length_options must contain values greater than 1.")
         if self.volume_sma_period <= 0:
             raise ValueError("volume_sma_period must be positive.")
         if self.volume_multiplier <= 0:

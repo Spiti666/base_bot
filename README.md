@@ -37,7 +37,7 @@ Wichtig zur Einordnung:
 
 - Diese drei Blöcke werden aus den aktuell zugewiesenen Coin-Profilen in `config.PRODUCTION_PROFILE_REGISTRY` gelesen.
 - Sie zeigen also nur, was live wirklich geroutet wird (Coin-Zuordnung, Strategie-Zuordnung, Intervall-Zuordnung).
-- Strategien können im Code vorhanden sein, ohne in dieser Statistik aufzutauchen (z. B. `supertrend_ema`), wenn aktuell kein Coin darauf gemappt ist.
+- Strategien können im Code vorhanden sein, ohne in dieser Statistik aufzutauchen, wenn aktuell kein Coin darauf gemappt ist.
 
 ## Aktive Strategien
 
@@ -47,10 +47,6 @@ Aktiv genutzter Kern (Live + Backtest-Ausfuehrung):
 - `dual_thrust`
 - `ema_band_rejection`
 - `ema_cross_volume`
-
-Hinweis:
-
-- `supertrend_ema` existiert weiterhin im Code (`strategies/python/supertrend_ema.py`) und im Runner-Mapping, ist aber nicht Teil der aktiven Backtest-Ausfuehrungsmenge in der GUI.
 
 ## Live-Bot (Runtime)
 
@@ -187,7 +183,7 @@ Lokale Laufzeitdaten:
 Verwendet wird eine lokale eingebettete `DuckDB`-Datei:
 
 - DB-Typ: `DuckDB` (file-based, keine separate Server-Instanz)
-- Hauptdatei: `data/paper_trading.duckdb`
+- Hauptdatei: `data/paper_trading.duckdb` (wegen Dateigröße nicht im Repository enthalten; lokal erzeugt/gefüllt)
 - Laufzeitdateien: `data/paper_trading.duckdb.wal`, `data/paper_trading.duckdb.shm`
 
 Wichtige Tabellen:
