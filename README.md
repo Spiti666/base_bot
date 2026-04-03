@@ -33,6 +33,12 @@ Intervallverteilung:
 - `15m`: 2
 - `5m`: 2
 
+Wichtig zur Einordnung:
+
+- Diese drei Blöcke werden aus den aktuell zugewiesenen Coin-Profilen in `config.PRODUCTION_PROFILE_REGISTRY` gelesen.
+- Sie zeigen also nur, was live wirklich geroutet wird (Coin-Zuordnung, Strategie-Zuordnung, Intervall-Zuordnung).
+- Strategien können im Code vorhanden sein, ohne in dieser Statistik aufzutauchen (z. B. `supertrend_ema`), wenn aktuell kein Coin darauf gemappt ist.
+
 ## Aktive Strategien
 
 Aktiv genutzter Kern (Live + Backtest-Ausfuehrung):
