@@ -1,93 +1,212 @@
 # Base Bot
 
-Trading-Workspace mit **zwei Kernbereichen**:
+Stand: 2026-04-03
 
-1. **Live-Bot** (Live-Marktdaten + Paper-Execution)
-2. **Backtest/Optimizer** (historische Simulation + Profilsuche)
+Trading-Workspace mit zwei operativen Bereichen:
 
-Die Bedienung läuft zentral über die GUI.
+1. Live-Bot (Live-Marktdaten + Paper-Execution)
+2. Analytics/Backtest (Simulation, Optimizer, Live-vs-Challenger-Vergleich)
 
-## Live-Bot
+Zentraler Einstieg ist die GUI (`gui.py`).
 
-### Was der Live-Bot macht
-- Streamt Candles über WebSocket (Bitunix Public Feed).
-- Routet pro Coin das konfigurierte Intervall und die konfigurierte Strategie.
-- Berechnet Signale und Setup-Freigaben.
-- Führt Trades in der lokalen Paper-Engine aus (inkl. Gebühren-/Risk-Logik).
-- Zeigt in der GUI: Coin-Radar, Trade-Readiness, Open Positions, Live-Logs und Runtime-Profilstatus.
+## Aktueller Produktionsstand
 
-### Live-Strategien (Routing)
+Die produktive Wahrheit liegt in `config.py`:
+
+- `ACTIVE_COINS` (aktuell 20 Coins)
+- `PRODUCTION_PROFILE_REGISTRY` (Strategie, Intervall, Strategie-Parameter, Risk je Coin)
+
+Aktive Live-Coins (20):
+
+- `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `XRPUSDT`, `ADAUSDT`, `DOGEUSDT`, `1000PEPEUSDT`, `1000SHIBUSDT`, `BNBUSDT`, `AVAXUSDT`, `NEARUSDT`, `DOTUSDT`, `ARBUSDT`, `SUIUSDT`, `LTCUSDT`, `BCHUSDT`, `LINKUSDT`, `TRXUSDT`, `FILUSDT`, `AAVEUSDT`
+
+Strategieverteilung in der Live-Registry:
+
+- `ema_band_rejection`: 8
+- `dual_thrust`: 7
+- `frama_cross`: 4
+- `ema_cross_volume`: 1
+
+Intervallverteilung:
+
+- `1h`: 16
+- `15m`: 2
+- `5m`: 2
+
+## Aktive Strategien
+
+Aktiv genutzter Kern (Live + Backtest-Ausfuehrung):
+
 - `frama_cross`
-- `ema_cross_volume`
 - `dual_thrust`
-
-### Live-Konfiguration (wichtig)
-Die zentralen Live-Parameter liegen in `config.py`:
-- `ACTIVE_COINS`
-- `PRODUCTION_PROFILE_REGISTRY` (Strategie + Intervall + Parameter + Risk je Coin)
-- `DEFAULT_COIN_STRATEGIES`
-- `settings.live.default_interval`
-- `settings.trading` (Leverage, Fees, Risk, Gate/HMM etc.)
-
-## Backtest / Optimizer
-
-### Was der Backtest macht
-- Lädt historische Candles aus der lokalen DB.
-- Simuliert Trades inkl. Gebühren, Slippage-Penalty, Trailing, Breakeven, Exit-Regeln.
-- Schreibt Ergebnisse in die DB (`backtest_runs`) und in kompakte TXT-Reports unter `archive/backtest_compact_summaries/`.
-- Unterstützt Batch-Läufe über mehrere Coins/Strategien/Timeframes.
-
-### Optimizer-Fokus
-- Grid-basierte Profilsuche pro Strategie-Familie.
-- Multiprocessing (bis 16 Worker).
-- Sampling/Full-Scan je nach Konfiguration.
-- Validierungslogik mit Robustheitsfiltern (z. B. Trades, PF, Netto-Metriken).
-
-### Backtest-Strategien (ausführbar)
-- `frama_cross`
+- `ema_band_rejection`
 - `ema_cross_volume`
-- `dual_thrust`
 
-## Start
+Hinweis:
 
-### Voraussetzungen
-- Python 3.10+ (empfohlen: aktuelles 3.x)
-- Installierte Pakete: `PyQt6`, `numpy`, `pandas`, `duckdb`, `requests`, `websockets`, `hmmlearn`
+- `supertrend_ema` existiert weiterhin im Code (`strategies/python/supertrend_ema.py`) und im Runner-Mapping, ist aber nicht Teil der aktiven Backtest-Ausfuehrungsmenge in der GUI.
 
-### Installation (Beispiel)
+## Live-Bot (Runtime)
+
+Was live passiert:
+
+- WebSocket-Streaming via Bitunix (`core/api/websocket.py`)
+- Candle-History-Sync via REST (`core/api/bitunix.py`, `core/data/history.py`)
+- Strategieauswertung pro Coin/Intervall (`main_engine.py` + `strategies/python/*`)
+- Setup-Gate und optionales HMM-Regime-Filtering (`core/patterns/setup_gate.py`, `core/regime/hmm_regime_detector.py`)
+- Paper-Trading-Execution inkl. Fees, Trailing, Breakeven (`core/paper_trading/engine.py`)
+- Persistenz in DuckDB + JSON (`core/data/db.py`, `paper_trades.json`)
+
+GUI-Anzeigen:
+
+- Coin-Kacheln/Radar
+- Trade-Readiness
+- Offene/geschlossene Trades
+- Live-Logs und Backtest-Logs
+
+## Analytics/Backtest
+
+Backtest-Engine:
+
+- Thread-Klasse: `BacktestThread`
+- Kanonischer Importpfad: `core/engine/backtest_engine.py` (Implementierung in `main_engine.py`)
+
+Backtest kann:
+
+- Historische Candles laden/synchronisieren
+- Signale berechnen und mit Risk-/Fee-Logik simulieren
+- Single, Selected-Batch und All-Coins-Batch laufen lassen
+- Optimizer-Profillaeufe ausfuehren (Sampling/Full-Scan)
+- Kompaktberichte schreiben nach `archive/backtest_compact_summaries/`
+
+## GUI-Modi im Backtest-Tab
+
+### Standard
+
+- Frei waehlbar: Coin(s), Strategie(n), Timeframe(s), Leverage
+- Enthalten: `Auto (from Config)`
+
+`Auto (from Config)` bedeutet:
+
+- Strategie wird coin-spezifisch aus der aktuellen Konfiguration aufgeloest.
+- Intervall kann coin-spezifisch aus Konfig-/Registry-Daten aufgeloest werden.
+- In Standard-Backtests koennen strategie-spezifische Defaults (z. B. EMA-Band-Winner-Preset fuer non-optimization) greifen.
+
+### Live vs Challenger
+
+Ziel:
+
+- Pro aktivem Live-Coin: Live-Baseline gegen Challenger-Strategien vergleichen.
+
+Logik:
+
+- Baseline = aktuelles Coin-Profil aus `PRODUCTION_PROFILE_REGISTRY`
+- Challenger-Menge = erlaubte 4 aktiven Strategien (`frama_cross`, `dual_thrust`, `ema_band_rejection`, `ema_cross_volume`) ohne die jeweilige Baseline-Strategie
+- Intervall-Fairness-Lock aktiv: Baseline-Intervall wird fuer alle Challenger dieses Coins erzwungen
+- Strategie-/Timeframe-Selector der GUI wird in diesem Modus fuer die Queue ignoriert
+
+Export:
+
+- `archive/research_reports/live_vs_challenger_summary_YYYYMMDD_HHMMSS.txt`
+
+Urteile pro Coin:
+
+- `BLEIBT`
+- `ERSETZEN`
+- `BEOBACHTEN`
+
+## Reports und abgeleitete Dateien
+
+- `archive/backtest_compact_summaries/backtest_compact_summary_*.txt`
+  - Kompaktberichte aus Batch-/Backtest-Sessions
+- `archive/research_reports/live_vs_challenger_summary_*.txt`
+  - Vergleichsberichte fuer Live-vs-Challenger
+- `summary_gesamt.txt`
+  - abgeleitete Statusdatei (Live-Registry gegen Backtest-Compact-Dateien gematcht)
+- `generate_summary_gesamt.py`
+  - Generator fuer `summary_gesamt.txt` aus `config.PRODUCTION_PROFILE_REGISTRY`
+  - sucht Backtest-Compact-Dateien in:
+    - Root: `backtest_compact_summary_*.txt`
+    - Archiv: `archive/backtest_compact_summaries/backtest_compact_summary_*.txt`
+  - ohne Treffer: kein Crash, stattdessen Hinweis im Report
+
+Aufruf:
+
 ```bash
-pip install PyQt6 numpy pandas duckdb requests websockets hmmlearn
+python generate_summary_gesamt.py
 ```
 
-### Start
+Optional:
+
+```bash
+python generate_summary_gesamt.py --out summary_gesamt.txt
+```
+
+## Projektstruktur (aktuell)
+
+Wichtige aktive Dateien:
+
+- `gui.py` - GUI-Entrypoint und komplette Desktop-Oberflaeche
+- `main_engine.py` - Live- und Backtest-Thread-Implementierung, Runner, Optimizer
+- `config.py` - zentrale Runtime-Konfiguration inkl. Live-Registry
+- `generate_summary_gesamt.py` - Summary-Generator
+
+Aktive Pakete:
+
+- `core/api/` - REST/WebSocket
+- `core/data/` - DB-Zugriff und History
+- `core/paper_trading/` - Paper-Execution + Persistenz
+- `core/patterns/` - Setup-Gate
+- `core/regime/` - HMM-Regime-Filter
+- `core/engine/` - kanonische Wrapper-Importpfade
+- `engine/` - numba-optimierte Backtest-Loops
+- `strategies/python/` - Strategie-Implementierungen
+- `strategies/jit_indicators.py` - JIT-Indikator- und Signalhilfen
+- `config_sections/` - Default-/Legacy-Quellsektionen, die in `config.py` uebersteuert werden koennen
+
+Archiv/Legacy:
+
+- `archive/tools_legacy/backup_legacy/` - historische Backup-Dateien (nicht produktiver Kern)
+- `archive/research_reports/` - Research- und Vergleichsreports
+- `archive/backtest_compact_summaries/` - erzeugte Kompaktberichte
+
+Lokale Laufzeitdaten:
+
+- `data/paper_trading.duckdb` (+ WAL/SHM)
+- `paper_trades.json`
+- `logs/*.log`
+
+## Setup und Start
+
+### Voraussetzungen
+
+- Python 3.10+
+- Pakete:
+  - `PyQt6`
+  - `numpy`
+  - `pandas`
+  - `duckdb`
+  - `requests`
+  - `websockets`
+  - `hmmlearn`
+  - `numba`
+  - optional: `polars` (nur fuer `PolarsDataLoader`-Workflows)
+
+Installation (Beispiel):
+
+```bash
+pip install PyQt6 numpy pandas duckdb requests websockets hmmlearn numba polars
+```
+
+Start:
+
 ```bash
 python gui.py
 ```
 
-## Typischer Workflow
+## Wichtige Hinweise
 
-### Live-Bot
-1. Profile in `config.py` prüfen (`PRODUCTION_PROFILE_REGISTRY` / `ACTIVE_COINS`).
-2. GUI starten.
-3. Live-Bot starten.
-4. Coin-Radar, Readiness und Open Positions überwachen.
-
-### Backtest
-1. Coins, Strategien und Timeframes im Backtest-Tab wählen.
-2. `Run Backtest` oder Batch-Lauf starten.
-3. Ergebnis in Kacheln/Logs prüfen.
-4. Reports in `archive/backtest_compact_summaries/` für Vergleich und Dokumentation nutzen.
-
-## Daten & Artefakte
-
-- `data/paper_trading.duckdb` - Candle-Historie, Paper-Trades, Backtest-Runs  
-  Hinweis: Diese Datei ist **nicht im Repository enthalten** (zu groß) und wird lokal erzeugt/gefüllt.
-- `paper_trades.json` - Persistenz offener Paper-Positionen
-- `archive/backtest_compact_summaries/backtest_compact_summary_*.txt` - kompakter Laufreport inkl. Aggregates
-- `archive/research_reports/` - zusammengefasste Reports, Notizen und Research-Artefakte
-- `data/snapshots/` - lokale Snapshot-/Einmal-JSONs
-- `logs/` - GUI- und Runtime-Logs
-
-## Hinweis
-
-Der Live-Bereich arbeitet in dieser Codebasis als **Paper-Trading-Ausführung** mit Live-Marktdaten (keine echte Orderplatzierung an einer Börse im aktuellen Flow).
+- Live-Runtime arbeitet als Paper-Trading auf Live-Marktdaten (keine echte Exchange-Orderplatzierung in diesem Flow).
+- `PRODUCTION_PROFILE_REGISTRY` + `ACTIVE_COINS` sind die produktive Konfigurationswahrheit.
+- Der Backtest-Deploy-Flow kann Konfigurationsdaten in `config.py` persistieren.
+- `summary_gesamt.txt` ist eine abgeleitete Datei und sollte ueber `generate_summary_gesamt.py` erzeugt werden.
