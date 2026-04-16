@@ -1,0 +1,28 @@
+{
+  "challenger_hypotheses": [
+    "Re-evaluate regime fit mapping and challenger fallback for mismatch-heavy pairs (strategy_regime_mismatch, count=2)."
+  ],
+  "generated_at": "2026-04-15T18:32:54.132806",
+  "highlights": [
+    "Weekly pnl: -51.66",
+    "Top error: strategy_regime_mismatch",
+    "Paused rows: 0, paper_only rows: 0"
+  ],
+  "overview": {
+    "closed_trades": 7,
+    "deterioration_events": 1006,
+    "improvement_events": 2368,
+    "paper_only_symbols": 0,
+    "paused_symbols": 0,
+    "review_coverage": 0.285714,
+    "weekly_meta_pnl": -51.662152
+  },
+  "paper_only_rows": [],
+  "paused_rows": [],
+  "report_type": "weekly_meta_report",
+  "top_error_types": {
+    "strategy_regime_mismatch": 2
+  },
+  "window_end": "2026-04-15T18:32:54.127738",
+  "window_start": "2026-04-08T18:32:54.127738"
+}

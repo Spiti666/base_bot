@@ -35,6 +35,13 @@ class PaperTradingEngine:
     TIGHT_TRAILING_DISTANCE_PCT = 0.0
     BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE = 0.05
     BACKTEST_SLIPPAGE_PENALTY_PCT_PER_TRADE = BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE * 2.0
+    INTRABAR_EXIT_STATUS_MAP: dict[str, str] = {
+        "CLOSED_SL": "INTRABAR_SL",
+        "CLOSED_TP": "INTRABAR_TP",
+        "TRAILING_STOP": "INTRABAR_TRAILING",
+        "TIGHT_TRAILING_STOP": "INTRABAR_TRAILING",
+        "BREAKEVEN_STOP": "INTRABAR_BREAKEVEN",
+    }
 
     def __init__(
         self,
@@ -116,10 +123,25 @@ class PaperTradingEngine:
         current_price: float,
         signal_direction: int,
         *,
+        strategy_name: str | None = None,
         leverage_scale: float = 1.0,
         risk_multiplier: float = 1.0,
         dynamic_stop_loss_pct: float | None = None,
         dynamic_take_profit_pct: float | None = None,
+        timeframe: str | None = None,
+        regime_label_at_entry: str | None = None,
+        regime_confidence: float | None = None,
+        session_label: str | None = None,
+        signal_strength: float | None = None,
+        confidence_score: float | None = None,
+        atr_pct_at_entry: float | None = None,
+        volume_ratio_at_entry: float | None = None,
+        spread_estimate: float | None = None,
+        move_already_extended_pct: float | None = None,
+        entry_snapshot_json: str | dict[str, Any] | None = None,
+        lifecycle_snapshot_json: str | dict[str, Any] | None = None,
+        profile_version: str | None = None,
+        review_status: str | None = None,
     ) -> int | None:
         self._validate_signal_direction(signal_direction)
         self._validate_price(current_price)
@@ -181,6 +203,25 @@ class PaperTradingEngine:
             status="OPEN",
             total_fees=entry_fee,
             high_water_mark=current_price,
+            strategy_name=strategy_name,
+            timeframe=(
+                str(timeframe).strip()
+                if timeframe is not None and str(timeframe).strip()
+                else str(trade_settings.interval)
+            ),
+            regime_label_at_entry=regime_label_at_entry,
+            regime_confidence=regime_confidence,
+            session_label=session_label,
+            signal_strength=signal_strength,
+            confidence_score=confidence_score,
+            atr_pct_at_entry=atr_pct_at_entry,
+            volume_ratio_at_entry=volume_ratio_at_entry,
+            spread_estimate=spread_estimate,
+            move_already_extended_pct=move_already_extended_pct,
+            entry_snapshot_json=entry_snapshot_json,
+            lifecycle_snapshot_json=lifecycle_snapshot_json,
+            profile_version=profile_version,
+            review_status=review_status,
         )
         trade_id = self._db.insert_trade(trade)
         resolved_dynamic_stop_loss_pct = self._resolve_dynamic_live_pct(dynamic_stop_loss_pct)
@@ -196,7 +237,13 @@ class PaperTradingEngine:
         self._refresh_active_trade_storage()
         return trade_id
 
-    def update_positions(self, current_price: float, symbol: str | None = None) -> list[int]:
+    def update_positions(
+        self,
+        current_price: float,
+        symbol: str | None = None,
+        *,
+        intrabar: bool = False,
+    ) -> list[int]:
         self._validate_price(current_price)
 
         closed_trade_ids: list[int] = []
@@ -224,6 +271,8 @@ class PaperTradingEngine:
             )
             if close_status is None or exit_price is None:
                 continue
+            if intrabar:
+                close_status = self._to_intrabar_exit_status(close_status)
 
             gross_pnl = self._calculate_gross_pnl(trade, exit_price)
             exit_fee = self._calculate_fee(trade.qty * exit_price)
@@ -523,6 +572,7 @@ class PaperTradingEngine:
                 signal_direction=int(normalized_entry_direction),
                 entry_price=entry_price,
                 current_capital=current_capital,
+                strategy_name=strategy_name,
                 leverage_scale=leverage_scale,
             )
             if opened_trade is None:
@@ -607,10 +657,14 @@ class PaperTradingEngine:
                     current_streak = 0
 
         breakeven_level_hits = sum(
-            1 for trade in closed_trades if str(trade.get("status")) == "BREAKEVEN_STOP"
+            1
+            for trade in closed_trades
+            if str(trade.get("status")) in {"BREAKEVEN_STOP", "INTRABAR_BREAKEVEN"}
         )
         normal_trailing_level_hits = sum(
-            1 for trade in closed_trades if str(trade.get("status")) == "TRAILING_STOP"
+            1
+            for trade in closed_trades
+            if str(trade.get("status")) in {"TRAILING_STOP", "INTRABAR_TRAILING"}
         )
         tight_trailing_level_hits = sum(
             1 for trade in closed_trades if str(trade.get("status")) == "TIGHT_TRAILING_STOP"
@@ -955,6 +1009,7 @@ class PaperTradingEngine:
         signal_direction: int,
         entry_price: float,
         current_capital: float,
+        strategy_name: str | None = None,
         leverage_scale: float = 1.0,
     ) -> PaperTrade | None:
         if signal_direction == 0:
@@ -997,6 +1052,13 @@ class PaperTradingEngine:
             pnl=None,
             total_fees=float(entry_fee),
             high_water_mark=float(entry_price),
+            strategy_name=(
+                str(strategy_name).strip()
+                if strategy_name is not None and str(strategy_name).strip()
+                else None
+            ),
+            timeframe=str(candle_row.get("interval", trade_settings.interval)),
+            review_status="PENDING",
         )
 
     def _close_backtest_trade(
@@ -1257,6 +1319,11 @@ class PaperTradingEngine:
             return "CLOSED_SL"
         return mapping.get(stop_source, "CLOSED_SL")
 
+    @classmethod
+    def _to_intrabar_exit_status(cls, close_status: str) -> str:
+        normalized_status = str(close_status).strip().upper()
+        return str(cls.INTRABAR_EXIT_STATUS_MAP.get(normalized_status, normalized_status))
+
     def _calculate_max_pnl_pct(self, trade: PaperTrade) -> float:
         if trade.side == "LONG":
             return ((trade.high_water_mark / trade.entry_price) - 1.0) * 100.0
@@ -1284,6 +1351,21 @@ class PaperTradingEngine:
             pnl=trade.pnl,
             total_fees=trade.total_fees,
             high_water_mark=high_water_mark,
+            strategy_name=trade.strategy_name,
+            timeframe=trade.timeframe,
+            regime_label_at_entry=trade.regime_label_at_entry,
+            regime_confidence=trade.regime_confidence,
+            session_label=trade.session_label,
+            signal_strength=trade.signal_strength,
+            confidence_score=trade.confidence_score,
+            atr_pct_at_entry=trade.atr_pct_at_entry,
+            volume_ratio_at_entry=trade.volume_ratio_at_entry,
+            spread_estimate=trade.spread_estimate,
+            move_already_extended_pct=trade.move_already_extended_pct,
+            entry_snapshot_json=trade.entry_snapshot_json,
+            lifecycle_snapshot_json=trade.lifecycle_snapshot_json,
+            profile_version=trade.profile_version,
+            review_status=trade.review_status,
         )
 
     @staticmethod
@@ -1369,6 +1451,21 @@ class PaperTradingEngine:
                     status="OPEN",
                     total_fees=trade.total_fees,
                     high_water_mark=trade.high_water_mark,
+                    strategy_name=trade.strategy_name,
+                    timeframe=trade.timeframe,
+                    regime_label_at_entry=trade.regime_label_at_entry,
+                    regime_confidence=trade.regime_confidence,
+                    session_label=trade.session_label,
+                    signal_strength=trade.signal_strength,
+                    confidence_score=trade.confidence_score,
+                    atr_pct_at_entry=trade.atr_pct_at_entry,
+                    volume_ratio_at_entry=trade.volume_ratio_at_entry,
+                    spread_estimate=trade.spread_estimate,
+                    move_already_extended_pct=trade.move_already_extended_pct,
+                    entry_snapshot_json=trade.entry_snapshot_json,
+                    lifecycle_snapshot_json=trade.lifecycle_snapshot_json,
+                    profile_version=trade.profile_version,
+                    review_status=trade.review_status,
                 )
             )
             existing_symbols.add(trade.symbol)

@@ -27,6 +27,12 @@ FRAMA_MAX_ALPHA = 1.0
 FRAMA_CROSS_MIN_GAP_RATIO = 0.0005
 FRAMA_VOLUME_CONFIRM_RATIO = 0.8
 FRAMA_VOLUME_SMA_WINDOW = 20
+DEFAULT_USE_LATE_ENTRY_GUARD = False
+DEFAULT_LATE_ENTRY_MAX_MOVE_1_BAR_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_MOVE_2_BARS_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_MOVE_3_BARS_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_DISTANCE_REF_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_ATR_MULT = 0.0
 
 
 @njit(cache=True)
@@ -333,6 +339,9 @@ def _build_crossover_masks_numba(
     volume_values: np.ndarray,
     warmup_bars: int,
     volume_confirm_ratio: float,
+    min_frama_gap_pct: float,
+    min_frama_slope_pct: float,
+    post_cross_confirmation_bars: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     eps = FRAMA_EPSILON
     length = close_values.shape[0]
@@ -340,6 +349,9 @@ def _build_crossover_masks_numba(
     long_entries = np.zeros(length, dtype=np.bool_)
     short_entries = np.zeros(length, dtype=np.bool_)
     running_sum = 0.0
+    resolved_min_gap_ratio = max(0.0, float(min_frama_gap_pct)) / 100.0
+    resolved_min_slope_pct = max(0.0, float(min_frama_slope_pct))
+    resolved_confirmation_bars = max(0, int(post_cross_confirmation_bars))
 
     for index in range(length):
         close_price = close_values[index]
@@ -383,19 +395,60 @@ def _build_crossover_masks_numba(
             continue
 
         gap_abs = abs(fast_now - slow_now)
-        min_gap = close_price * FRAMA_CROSS_MIN_GAP_RATIO
-        if np.isnan(min_gap) or min_gap <= 0.0:
-            min_gap = close_price * (FRAMA_CROSS_MIN_GAP_RATIO + eps)
-        if gap_abs + eps < min_gap:
+        min_gap = close_price * resolved_min_gap_ratio
+        if np.isnan(min_gap):
+            min_gap = 0.0
+        if min_gap > 0.0 and (gap_abs + eps) < min_gap:
             continue
 
         if current_volume + eps < (sma_value * volume_confirm_ratio):
             continue
 
+        slope_pct = ((slow_now - slow_prev) / (abs(slow_prev) + eps)) * 100.0
         if fast_now > slow_now and fast_prev <= slow_prev:
-            long_entries[index] = True
+            if slope_pct + eps < resolved_min_slope_pct:
+                continue
+            if resolved_confirmation_bars <= 0:
+                long_entries[index] = True
+                continue
+            target_index = index + resolved_confirmation_bars
+            if target_index >= length:
+                continue
+            confirmed = True
+            for check_index in range(index + 1, target_index + 1):
+                fast_check = fast_values[check_index]
+                slow_check = slow_values[check_index]
+                if (
+                    np.isnan(fast_check)
+                    or np.isnan(slow_check)
+                    or fast_check <= slow_check
+                ):
+                    confirmed = False
+                    break
+            if confirmed:
+                long_entries[target_index] = True
         elif fast_now < slow_now and fast_prev >= slow_prev:
-            short_entries[index] = True
+            if slope_pct - eps > -resolved_min_slope_pct:
+                continue
+            if resolved_confirmation_bars <= 0:
+                short_entries[index] = True
+                continue
+            target_index = index + resolved_confirmation_bars
+            if target_index >= length:
+                continue
+            confirmed = True
+            for check_index in range(index + 1, target_index + 1):
+                fast_check = fast_values[check_index]
+                slow_check = slow_values[check_index]
+                if (
+                    np.isnan(fast_check)
+                    or np.isnan(slow_check)
+                    or fast_check >= slow_check
+                ):
+                    confirmed = False
+                    break
+            if confirmed:
+                short_entries[target_index] = True
 
     return volume_sma, long_entries, short_entries
 
@@ -461,7 +514,41 @@ def _sanitize_ohlcv_arrays(
     return sanitized_close, sanitized_high, sanitized_low, sanitized_volume
 
 
-def build_frama_cross_signal_frame(candles_dataframe: Any) -> pd.DataFrame:
+def _calculate_atr_series(
+    high_values: np.ndarray,
+    low_values: np.ndarray,
+    close_values: np.ndarray,
+    length: int = 14,
+) -> pd.Series:
+    resolved_length = max(2, int(length))
+    high_series = pd.Series(high_values, dtype="float64")
+    low_series = pd.Series(low_values, dtype="float64")
+    close_series = pd.Series(close_values, dtype="float64")
+    previous_close = close_series.shift(1)
+    true_range = pd.concat(
+        [
+            (high_series - low_series).abs(),
+            (high_series - previous_close).abs(),
+            (low_series - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return true_range.rolling(window=resolved_length, min_periods=1).mean()
+
+
+def build_frama_cross_signal_frame(
+    candles_dataframe: Any,
+    *,
+    min_frama_gap_pct: float = 0.05,
+    min_frama_slope_pct: float = 0.0,
+    post_cross_confirmation_bars: int = 0,
+    use_late_entry_guard: bool = DEFAULT_USE_LATE_ENTRY_GUARD,
+    late_entry_max_move_1_bar_pct: float = DEFAULT_LATE_ENTRY_MAX_MOVE_1_BAR_PCT,
+    late_entry_max_move_2_bars_pct: float = DEFAULT_LATE_ENTRY_MAX_MOVE_2_BARS_PCT,
+    late_entry_max_move_3_bars_pct: float = DEFAULT_LATE_ENTRY_MAX_MOVE_3_BARS_PCT,
+    late_entry_max_distance_ref_pct: float = DEFAULT_LATE_ENTRY_MAX_DISTANCE_REF_PCT,
+    late_entry_max_atr_mult: float = DEFAULT_LATE_ENTRY_MAX_ATR_MULT,
+) -> pd.DataFrame:
     working_df = _ensure_dataframe(candles_dataframe)
     required_columns = {"close", "high", "low", "volume"}
     missing_columns = required_columns.difference(working_df.columns)
@@ -508,6 +595,15 @@ def build_frama_cross_signal_frame(candles_dataframe: Any) -> pd.DataFrame:
     volume_confirm_ratio = float(settings.strategy.volume_multiplier)
     if not np.isfinite(volume_confirm_ratio) or volume_confirm_ratio <= 0.0:
         volume_confirm_ratio = FRAMA_VOLUME_CONFIRM_RATIO
+    resolved_min_frama_gap_pct = max(0.0, float(min_frama_gap_pct))
+    resolved_min_frama_slope_pct = max(0.0, float(min_frama_slope_pct))
+    resolved_post_cross_confirmation_bars = max(0, int(post_cross_confirmation_bars))
+    resolved_use_late_entry_guard = bool(use_late_entry_guard)
+    resolved_late_entry_max_move_1_bar_pct = max(0.0, float(late_entry_max_move_1_bar_pct))
+    resolved_late_entry_max_move_2_bars_pct = max(0.0, float(late_entry_max_move_2_bars_pct))
+    resolved_late_entry_max_move_3_bars_pct = max(0.0, float(late_entry_max_move_3_bars_pct))
+    resolved_late_entry_max_distance_ref_pct = max(0.0, float(late_entry_max_distance_ref_pct))
+    resolved_late_entry_max_atr_mult = max(0.0, float(late_entry_max_atr_mult))
 
     volume_sma_20, long_entries, short_entries = _build_crossover_masks_numba(
         fast_frama,
@@ -516,18 +612,135 @@ def build_frama_cross_signal_frame(candles_dataframe: Any) -> pd.DataFrame:
         volume_values,
         warmup_end,
         volume_confirm_ratio,
+        resolved_min_frama_gap_pct,
+        resolved_min_frama_slope_pct,
+        resolved_post_cross_confirmation_bars,
     )
 
-    working_df.loc[:, "frama_fast"] = pd.Series(fast_frama, index=working_df.index)
+    close_series = pd.Series(close_values, index=working_df.index, dtype="float64")
+    frama_fast_series = pd.Series(fast_frama, index=working_df.index, dtype="float64")
+    move_last_1_bar_pct = (
+        (close_series - close_series.shift(1))
+        / close_series.shift(1).abs().replace(0.0, np.nan)
+    ) * 100.0
+    move_last_2_bars_pct = (
+        (close_series - close_series.shift(2))
+        / close_series.shift(2).abs().replace(0.0, np.nan)
+    ) * 100.0
+    move_last_3_bars_pct = (
+        (close_series - close_series.shift(3))
+        / close_series.shift(3).abs().replace(0.0, np.nan)
+    ) * 100.0
+    distance_to_reference_pct = (
+        (close_series - frama_fast_series)
+        / frama_fast_series.abs().replace(0.0, np.nan)
+    ) * 100.0
+    atr_series = _calculate_atr_series(high_values, low_values, close_values, length=14)
+    atr_extension_mult = (
+        (close_series - frama_fast_series).abs()
+        / atr_series.replace(0.0, np.nan)
+    )
+
+    long_entry_series = pd.Series(long_entries, index=working_df.index, dtype="bool")
+    short_entry_series = pd.Series(short_entries, index=working_df.index, dtype="bool")
+    late_entry_guard_blocked = pd.Series(False, index=working_df.index, dtype="bool")
+    late_entry_guard_block_reason = pd.Series("", index=working_df.index, dtype="object")
+    if resolved_use_late_entry_guard:
+        long_values = long_entry_series.to_numpy(dtype=bool, copy=False)
+        short_values = short_entry_series.to_numpy(dtype=bool, copy=False)
+        move_1_values = pd.to_numeric(move_last_1_bar_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        move_2_values = pd.to_numeric(move_last_2_bars_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        move_3_values = pd.to_numeric(move_last_3_bars_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        distance_values = pd.to_numeric(distance_to_reference_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        atr_ext_values = pd.to_numeric(atr_extension_mult, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        blocked_values = np.zeros(len(working_df), dtype=bool)
+        reason_values = np.array([""] * len(working_df), dtype=object)
+        for index in range(len(working_df)):
+            is_long = bool(long_values[index])
+            is_short = bool(short_values[index])
+            if not is_long and not is_short:
+                continue
+            reason = ""
+            directional_move_1 = float(move_1_values[index]) if np.isfinite(move_1_values[index]) else 0.0
+            directional_move_2 = float(move_2_values[index]) if np.isfinite(move_2_values[index]) else 0.0
+            directional_move_3 = float(move_3_values[index]) if np.isfinite(move_3_values[index]) else 0.0
+            directional_distance = float(distance_values[index]) if np.isfinite(distance_values[index]) else 0.0
+            directional_atr_extension = float(atr_ext_values[index]) if np.isfinite(atr_ext_values[index]) else 0.0
+            if is_short:
+                directional_move_1 = -directional_move_1
+                directional_move_2 = -directional_move_2
+                directional_move_3 = -directional_move_3
+                directional_distance = -directional_distance
+            if (
+                resolved_late_entry_max_move_3_bars_pct > 0.0
+                and directional_move_3 > resolved_late_entry_max_move_3_bars_pct
+            ):
+                reason = "overextended_last_3_bars"
+            elif (
+                resolved_late_entry_max_move_2_bars_pct > 0.0
+                and directional_move_2 > resolved_late_entry_max_move_2_bars_pct
+            ):
+                reason = "overextended_last_2_bars"
+            elif (
+                resolved_late_entry_max_move_1_bar_pct > 0.0
+                and directional_move_1 > resolved_late_entry_max_move_1_bar_pct
+            ):
+                reason = "overextended_last_1_bar"
+            elif (
+                resolved_late_entry_max_distance_ref_pct > 0.0
+                and directional_distance > resolved_late_entry_max_distance_ref_pct
+            ):
+                reason = "overextended_from_reference"
+            elif (
+                resolved_late_entry_max_atr_mult > 0.0
+                and directional_atr_extension > resolved_late_entry_max_atr_mult
+            ):
+                reason = "late_entry_guard_long" if is_long else "late_entry_guard_short"
+            if reason:
+                blocked_values[index] = True
+                reason_values[index] = reason
+        late_entry_guard_blocked = pd.Series(blocked_values, index=working_df.index, dtype="bool")
+        late_entry_guard_block_reason = pd.Series(reason_values, index=working_df.index, dtype="object")
+        long_entry_series = long_entry_series & ~late_entry_guard_blocked
+        short_entry_series = short_entry_series & ~late_entry_guard_blocked
+
+    working_df.loc[:, "frama_fast"] = frama_fast_series
     working_df.loc[:, "frama_slow"] = pd.Series(slow_frama, index=working_df.index)
     working_df.loc[:, "frama_volume_sma_20"] = pd.Series(volume_sma_20, index=working_df.index)
-    working_df.loc[:, "frama_long_entry"] = pd.Series(long_entries, index=working_df.index)
-    working_df.loc[:, "frama_short_entry"] = pd.Series(short_entries, index=working_df.index)
+    working_df.loc[:, "frama_long_entry"] = long_entry_series
+    working_df.loc[:, "frama_short_entry"] = short_entry_series
+    working_df.loc[:, "frama_move_last_1_bar_pct"] = move_last_1_bar_pct
+    working_df.loc[:, "frama_move_last_2_bars_pct"] = move_last_2_bars_pct
+    working_df.loc[:, "frama_move_last_3_bars_pct"] = move_last_3_bars_pct
+    working_df.loc[:, "frama_distance_to_reference_pct"] = distance_to_reference_pct
+    working_df.loc[:, "frama_atr_extension_mult"] = atr_extension_mult
+    working_df.loc[:, "frama_late_entry_guard_enabled"] = float(resolved_use_late_entry_guard)
+    working_df.loc[:, "frama_late_entry_guard_blocked"] = late_entry_guard_blocked.fillna(False)
+    working_df.loc[:, "frama_late_entry_guard_block_reason"] = late_entry_guard_block_reason
+    working_df.loc[:, "frama_late_entry_guard_blocked_signals"] = float(
+        late_entry_guard_blocked.fillna(False).sum()
+    )
     return working_df
 
 
 def run_python_frama_cross(candles_dataframe: Any) -> int:
-    working_df = build_frama_cross_signal_frame(candles_dataframe)
+    working_df = build_frama_cross_signal_frame(
+        candles_dataframe,
+        use_late_entry_guard=bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+        late_entry_max_move_1_bar_pct=float(
+            getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)
+        ),
+        late_entry_max_move_2_bars_pct=float(
+            getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)
+        ),
+        late_entry_max_move_3_bars_pct=float(
+            getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)
+        ),
+        late_entry_max_distance_ref_pct=float(
+            getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)
+        ),
+        late_entry_max_atr_mult=float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+    )
     required_points = max(int(settings.strategy.frama_slow_period) + 1, 3)
     if len(working_df) < required_points:
         return 0

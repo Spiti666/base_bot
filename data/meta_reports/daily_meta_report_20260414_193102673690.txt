@@ -1,0 +1,22 @@
+# Daily Meta Report
+
+- Generated At: 2026-04-14T19:31:02.673690
+- Report Type: daily_meta_report
+
+## Overview
+- daily_meta_pnl: -20.264293
+- closed_trades: 1
+- healthy_count: 0
+- degraded_count: 0
+- watchlist_count: 20
+- paper_only_count: 0
+- paused_count: 0
+
+## Rows
+| symbol | strategy_name | interval | trade_count | pnl_sum | winrate | late_entry_rate | regime_mismatch_rate | avoidable_loss_rate | health_state | risk_multiplier |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1000SHIBUSDT | ema_band_rejection | 1h | 1 | -20.264293 | 0.0 | 0.0 | 0.0 | 0.0 | watchlist | 1.0 |
+
+## Highlights
+- Worst row pnl: 1000SHIBUSDT ema_band_rejection 1h -> -20.2643
+- Best row pnl: 1000SHIBUSDT ema_band_rejection 1h -> -20.2643

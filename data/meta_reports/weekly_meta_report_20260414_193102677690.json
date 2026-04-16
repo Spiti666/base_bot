@@ -1,0 +1,24 @@
+{
+  "challenger_hypotheses": [],
+  "generated_at": "2026-04-14T19:31:02.677690",
+  "highlights": [
+    "Weekly pnl: -67.24",
+    "Top error: n/a",
+    "Paused rows: 0, paper_only rows: 0"
+  ],
+  "overview": {
+    "closed_trades": 5,
+    "deterioration_events": 901,
+    "improvement_events": 2360,
+    "paper_only_symbols": 0,
+    "paused_symbols": 0,
+    "review_coverage": 0.0,
+    "weekly_meta_pnl": -67.244645
+  },
+  "paper_only_rows": [],
+  "paused_rows": [],
+  "report_type": "weekly_meta_report",
+  "top_error_types": {},
+  "window_end": "2026-04-14T19:31:02.673690",
+  "window_start": "2026-04-07T19:31:02.673690"
+}

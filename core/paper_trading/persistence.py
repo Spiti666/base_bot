@@ -59,6 +59,36 @@ def _serialize_trade(trade: PaperTrade | dict[str, Any]) -> dict[str, Any]:
 
 
 def _deserialize_trade(payload: dict[str, Any]) -> PaperTrade:
+    strategy_name_raw = payload.get("strategy_name")
+    strategy_name = None
+    if strategy_name_raw is not None:
+        normalized_strategy_name = str(strategy_name_raw).strip()
+        strategy_name = normalized_strategy_name or None
+    timeframe_raw = payload.get("timeframe")
+    timeframe = None
+    if timeframe_raw is not None:
+        normalized_timeframe = str(timeframe_raw).strip()
+        timeframe = normalized_timeframe or None
+    regime_label_raw = payload.get("regime_label_at_entry")
+    regime_label_at_entry = None
+    if regime_label_raw is not None:
+        normalized_regime_label = str(regime_label_raw).strip()
+        regime_label_at_entry = normalized_regime_label or None
+    session_label_raw = payload.get("session_label")
+    session_label = None
+    if session_label_raw is not None:
+        normalized_session_label = str(session_label_raw).strip()
+        session_label = normalized_session_label or None
+    profile_version_raw = payload.get("profile_version")
+    profile_version = None
+    if profile_version_raw is not None:
+        normalized_profile_version = str(profile_version_raw).strip()
+        profile_version = normalized_profile_version or None
+    review_status_raw = payload.get("review_status")
+    review_status = None
+    if review_status_raw is not None:
+        normalized_review_status = str(review_status_raw).strip()
+        review_status = normalized_review_status or None
     return PaperTrade(
         id=int(payload.get("id", 0)),
         symbol=str(payload["symbol"]),
@@ -73,6 +103,21 @@ def _deserialize_trade(payload: dict[str, Any]) -> PaperTrade:
         pnl=_deserialize_optional_float(payload.get("pnl")),
         total_fees=float(payload.get("total_fees", 0.0) or 0.0),
         high_water_mark=float(payload.get("high_water_mark", payload["entry_price"])),
+        strategy_name=strategy_name,
+        timeframe=timeframe,
+        regime_label_at_entry=regime_label_at_entry,
+        regime_confidence=_deserialize_optional_float(payload.get("regime_confidence")),
+        session_label=session_label,
+        signal_strength=_deserialize_optional_float(payload.get("signal_strength")),
+        confidence_score=_deserialize_optional_float(payload.get("confidence_score")),
+        atr_pct_at_entry=_deserialize_optional_float(payload.get("atr_pct_at_entry")),
+        volume_ratio_at_entry=_deserialize_optional_float(payload.get("volume_ratio_at_entry")),
+        spread_estimate=_deserialize_optional_float(payload.get("spread_estimate")),
+        move_already_extended_pct=_deserialize_optional_float(payload.get("move_already_extended_pct")),
+        entry_snapshot_json=_deserialize_optional_text(payload.get("entry_snapshot_json")),
+        lifecycle_snapshot_json=_deserialize_optional_text(payload.get("lifecycle_snapshot_json")),
+        profile_version=profile_version,
+        review_status=review_status,
     )
 
 
@@ -94,3 +139,9 @@ def _deserialize_optional_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _deserialize_optional_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)

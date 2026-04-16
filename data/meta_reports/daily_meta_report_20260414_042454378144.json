@@ -1,0 +1,36 @@
+{
+  "date": "2026-04-14",
+  "generated_at": "2026-04-14T04:24:54.378144",
+  "highlights": [
+    "Worst row pnl: BTCUSDT frama_cross 1m -> -420.0000",
+    "Best row pnl: BTCUSDT frama_cross 1m -> -420.0000"
+  ],
+  "overview": {
+    "closed_trades": 1,
+    "daily_meta_pnl": -420.0,
+    "degraded_count": 0,
+    "healthy_count": 0,
+    "paper_only_count": 1,
+    "paused_count": 0,
+    "watchlist_count": 0
+  },
+  "report_type": "daily_meta_report",
+  "rows": [
+    {
+      "avoidable_loss_rate": 1.0,
+      "error_type_distribution": {
+        "strategy_regime_mismatch": 1
+      },
+      "health_state": "paper_only",
+      "interval": "1m",
+      "late_entry_rate": 0.0,
+      "pnl_sum": -420.0,
+      "regime_mismatch_rate": 1.0,
+      "risk_multiplier": 0.35,
+      "strategy_name": "frama_cross",
+      "symbol": "BTCUSDT",
+      "trade_count": 1,
+      "winrate": 0.0
+    }
+  ]
+}

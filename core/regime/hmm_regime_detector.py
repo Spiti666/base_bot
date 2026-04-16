@@ -1,11 +1,39 @@
 from __future__ import annotations
 
+import logging
+import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
+
+_HMM_NON_CONVERGENCE_PREFIX = "Model is not converging."
+_HMM_TRANSMAT_ZERO_SUM_PREFIX = (
+    "Some rows of transmat_ have zero sum because no transition from the state was ever observed."
+)
+
+
+class _SuppressHMMNonConvergenceFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        try:
+            message = str(record.getMessage())
+        except Exception:
+            return True
+        return _HMM_NON_CONVERGENCE_PREFIX not in message
+
+
+@contextmanager
+def _suppress_hmmlearn_non_convergence_logs():
+    logger = logging.getLogger("hmmlearn.base")
+    filter_instance = _SuppressHMMNonConvergenceFilter()
+    logger.addFilter(filter_instance)
+    try:
+        yield
+    finally:
+        logger.removeFilter(filter_instance)
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +42,10 @@ class HMMRegimeDetectionResult:
     regime_labels: list[str]
     allowed_ratio: float
     window_count: int
+    converged: bool
+    non_converged_windows: int
+    non_convergence_events: tuple[dict[str, object], ...]
+    warning_events: tuple[dict[str, object], ...]
 
 
 class HMMRegimeDetector:
@@ -58,12 +90,19 @@ class HMMRegimeDetector:
                 regime_labels=[],
                 allowed_ratio=0.0,
                 window_count=0,
+                converged=True,
+                non_converged_windows=0,
+                non_convergence_events=tuple(),
+                warning_events=tuple(),
             )
 
         warmup = min(self._warmup_candles, length)
         regime_labels = [self.WARMUP] * length
         regime_mask = np.ones(length, dtype=np.int8)
         window_count = 0
+        non_converged_windows = 0
+        non_convergence_events: list[dict[str, object]] = []
+        warning_events: list[dict[str, object]] = []
 
         for apply_start in range(warmup, length, self._apply_window_candles):
             train_end = apply_start
@@ -85,7 +124,55 @@ class HMMRegimeDetector:
             )
             apply_end = min(apply_start + self._apply_window_candles, length)
             try:
-                model.fit(train_features)
+                with warnings.catch_warnings(record=True) as fit_warnings:
+                    warnings.simplefilter("always")
+                    with _suppress_hmmlearn_non_convergence_logs():
+                        model.fit(train_features)
+                for warning_record in fit_warnings:
+                    warning_text = str(getattr(warning_record, "message", "") or "").strip()
+                    if not warning_text:
+                        continue
+                    if _HMM_TRANSMAT_ZERO_SUM_PREFIX not in warning_text:
+                        continue
+                    warning_events.append(
+                        {
+                            "warning_kind": "transmat_zero_sum_no_transition",
+                            "window_index": int(window_count),
+                            "train_start": int(train_start),
+                            "train_end": int(train_end),
+                            "apply_start": int(apply_start),
+                            "apply_end": int(apply_end),
+                            "warning_message": warning_text,
+                        }
+                    )
+                monitor = getattr(model, "monitor_", None)
+                if monitor is not None and not bool(getattr(monitor, "converged", True)):
+                    non_converged_windows += 1
+                    previous_score: float | None = None
+                    current_score: float | None = None
+                    delta_score: float | None = None
+                    history = list(getattr(monitor, "history", []) or [])
+                    if len(history) >= 2:
+                        previous_score = float(history[-2])
+                        current_score = float(history[-1])
+                        delta_score = float(current_score - previous_score)
+                    non_convergence_events.append(
+                        {
+                            "window_index": int(window_count),
+                            "train_start": int(train_start),
+                            "train_end": int(train_end),
+                            "apply_start": int(apply_start),
+                            "apply_end": int(apply_end),
+                            "previous_score": previous_score,
+                            "current_score": current_score,
+                            "delta_score": delta_score,
+                        }
+                    )
+                    for index in range(apply_start, apply_end):
+                        regime_labels[index] = self.UNKNOWN
+                        regime_mask[index] = 1
+                    window_count += 1
+                    continue
                 train_states = model.predict(train_features)
                 state_mapping = self._map_states_from_training(
                     train_states=train_states,
@@ -117,6 +204,10 @@ class HMMRegimeDetector:
             regime_labels=stable_labels,
             allowed_ratio=allowed_ratio,
             window_count=window_count,
+            converged=(non_converged_windows == 0),
+            non_converged_windows=non_converged_windows,
+            non_convergence_events=tuple(non_convergence_events),
+            warning_events=tuple(warning_events),
         )
 
     def _build_feature_matrix(self, candles_dataframe: pd.DataFrame) -> np.ndarray:

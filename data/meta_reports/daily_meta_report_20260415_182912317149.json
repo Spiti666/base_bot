@@ -1,0 +1,52 @@
+{
+  "date": "2026-04-15",
+  "generated_at": "2026-04-15T18:29:12.317149",
+  "highlights": [
+    "Worst row pnl: BNBUSDT ema_band_rejection 1h -> -1.0109",
+    "Best row pnl: ARBUSDT ema_band_rejection 1h -> 16.5934"
+  ],
+  "overview": {
+    "closed_trades": 2,
+    "daily_meta_pnl": 15.582493,
+    "degraded_count": 0,
+    "healthy_count": 20,
+    "paper_only_count": 0,
+    "paused_count": 0,
+    "watchlist_count": 0
+  },
+  "report_type": "daily_meta_report",
+  "rows": [
+    {
+      "avoidable_loss_rate": 1.0,
+      "error_type_distribution": {
+        "strategy_regime_mismatch": 1
+      },
+      "health_state": "healthy",
+      "interval": "1h",
+      "late_entry_rate": 0.0,
+      "pnl_sum": -1.010933,
+      "regime_mismatch_rate": 1.0,
+      "risk_multiplier": 1.0,
+      "strategy_name": "ema_band_rejection",
+      "symbol": "BNBUSDT",
+      "trade_count": 1,
+      "winrate": 0.0
+    },
+    {
+      "avoidable_loss_rate": 0.0,
+      "error_type_distribution": {
+        "strategy_regime_mismatch": 1
+      },
+      "health_state": "healthy",
+      "interval": "1h",
+      "late_entry_rate": 0.0,
+      "pnl_sum": 16.593426,
+      "regime_mismatch_rate": 1.0,
+      "risk_multiplier": 1.0,
+      "strategy_name": "ema_band_rejection",
+      "symbol": "ARBUSDT",
+      "trade_count": 1,
+      "winrate": 100.0
+    }
+  ]
+}

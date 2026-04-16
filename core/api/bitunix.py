@@ -25,6 +25,7 @@ class BitunixClient:
         max_retries: int = 3,
         backoff_factor: float = 0.5,
         min_retry_delay_seconds: float = 10.0,
+        enforce_public_rate_limit: bool = True,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be greater than or equal to 0.")
@@ -40,6 +41,7 @@ class BitunixClient:
         self._max_retries = max_retries
         self._backoff_factor = backoff_factor
         self._min_retry_delay_seconds = min_retry_delay_seconds
+        self._enforce_public_rate_limit = bool(enforce_public_rate_limit)
         self._min_public_request_interval = 1.0 / float(
             self._settings.request_limits.public_requests_per_second
         )
@@ -99,7 +101,8 @@ class BitunixClient:
 
         for attempt in range(self._max_retries + 1):
             try:
-                self._respect_public_rate_limit()
+                if self._enforce_public_rate_limit:
+                    self._respect_public_rate_limit()
                 response = self._session.request(
                     method=method,
                     url=url,

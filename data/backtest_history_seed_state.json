@@ -1,0 +1,437 @@
+{
+  "entries": {
+    "1000PEPEUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 23:06:32.362526",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "1000PEPEUSDT",
+      "updated_at_utc": "2026-04-06 23:06:35.611098"
+    },
+    "1000PEPEUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 23:07:12.254467",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "1000PEPEUSDT",
+      "updated_at_utc": "2026-04-06 23:07:12.645868"
+    },
+    "1000PEPEUSDT|1m": {
+      "interval": "1m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 00:00:00",
+      "seeded_start_utc": "2026-01-01 00:00:00",
+      "symbol": "1000PEPEUSDT",
+      "updated_at_utc": "2026-04-06 17:40:18.628589"
+    },
+    "1000SHIBUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 23:36:55.577576",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "1000SHIBUSDT",
+      "updated_at_utc": "2026-04-06 23:36:59.098084"
+    },
+    "1000SHIBUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 23:37:36.651033",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "1000SHIBUSDT",
+      "updated_at_utc": "2026-04-06 23:37:36.836276"
+    },
+    "AAVEUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "AAVEUSDT",
+      "updated_at_utc": "2026-04-07 05:42:37.635671"
+    },
+    "AAVEUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 20:23:15.963756",
+      "seeded_start_utc": "2024-01-01 00:00:00",
+      "symbol": "AAVEUSDT",
+      "updated_at_utc": "2026-04-04 22:06:47.768359"
+    },
+    "AAVEUSDT|5m": {
+      "interval": "5m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 20:21:12.569233",
+      "seeded_start_utc": "2025-04-01 00:00:00",
+      "symbol": "AAVEUSDT",
+      "updated_at_utc": "2026-04-04 20:22:01.642394"
+    },
+    "ADAUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 22:05:24.365694",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "ADAUSDT",
+      "updated_at_utc": "2026-04-06 22:05:27.779637"
+    },
+    "ADAUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 22:06:05.894431",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "ADAUSDT",
+      "updated_at_utc": "2026-04-06 22:06:06.166555"
+    },
+    "ADAUSDT|1m": {
+      "interval": "1m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 19:20:31.964024",
+      "seeded_start_utc": "2025-10-01 00:00:00",
+      "symbol": "ADAUSDT",
+      "updated_at_utc": "2026-04-04 19:25:05.889416"
+    },
+    "ARBUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "ARBUSDT",
+      "updated_at_utc": "2026-04-07 02:08:06.578583"
+    },
+    "ARBUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "ARBUSDT",
+      "updated_at_utc": "2026-04-07 02:08:46.687883"
+    },
+    "AVAXUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "AVAXUSDT",
+      "updated_at_utc": "2026-04-07 00:37:08.639513"
+    },
+    "AVAXUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "AVAXUSDT",
+      "updated_at_utc": "2026-04-07 00:37:44.946494"
+    },
+    "BCHUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "BCHUSDT",
+      "updated_at_utc": "2026-04-07 03:38:58.675403"
+    },
+    "BCHUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "BCHUSDT",
+      "updated_at_utc": "2026-04-07 03:39:40.472167"
+    },
+    "BCHUSDT|5m": {
+      "interval": "5m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 19:52:55.094526",
+      "seeded_start_utc": "2025-04-01 00:00:00",
+      "symbol": "BCHUSDT",
+      "updated_at_utc": "2026-04-04 19:53:40.188315"
+    },
+    "BNBUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "BNBUSDT",
+      "updated_at_utc": "2026-04-07 00:07:22.905294"
+    },
+    "BNBUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "BNBUSDT",
+      "updated_at_utc": "2026-04-07 00:08:01.805921"
+    },
+    "BTCUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 20:02:16.299564",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "BTCUSDT",
+      "updated_at_utc": "2026-04-06 20:02:16.568750"
+    },
+    "BTCUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 20:03:00.319796",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "BTCUSDT",
+      "updated_at_utc": "2026-04-06 20:03:00.626997"
+    },
+    "BTCUSDT|1m": {
+      "interval": "1m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 18:51:45.166018",
+      "seeded_start_utc": "2025-10-01 00:00:00",
+      "symbol": "BTCUSDT",
+      "updated_at_utc": "2026-04-04 18:51:57.982603"
+    },
+    "DOGEUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 22:36:06.475676",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "DOGEUSDT",
+      "updated_at_utc": "2026-04-06 22:36:09.819442"
+    },
+    "DOGEUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 22:36:47.118600",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "DOGEUSDT",
+      "updated_at_utc": "2026-04-06 22:36:47.383917"
+    },
+    "DOGEUSDT|1m": {
+      "interval": "1m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 00:00:00",
+      "seeded_start_utc": "2026-01-01 00:00:00",
+      "symbol": "DOGEUSDT",
+      "updated_at_utc": "2026-04-06 17:32:13.857132"
+    },
+    "DOTUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "DOTUSDT",
+      "updated_at_utc": "2026-04-07 01:37:35.627262"
+    },
+    "DOTUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "DOTUSDT",
+      "updated_at_utc": "2026-04-07 01:38:15.708643"
+    },
+    "DOTUSDT|5m": {
+      "interval": "5m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-08 15:38:09.806786",
+      "seeded_start_utc": "2025-07-01 00:00:00",
+      "symbol": "DOTUSDT",
+      "updated_at_utc": "2026-04-08 15:38:19.014650"
+    },
+    "ETHUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 20:33:11.843431",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "ETHUSDT",
+      "updated_at_utc": "2026-04-06 20:33:15.025764"
+    },
+    "ETHUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 20:33:53.616016",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "ETHUSDT",
+      "updated_at_utc": "2026-04-06 20:33:53.833633"
+    },
+    "ETHUSDT|1m": {
+      "interval": "1m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 18:54:20.845469",
+      "seeded_start_utc": "2025-10-01 00:00:00",
+      "symbol": "ETHUSDT",
+      "updated_at_utc": "2026-04-04 18:59:54.869642"
+    },
+    "FILUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "FILUSDT",
+      "updated_at_utc": "2026-04-07 05:11:10.600617"
+    },
+    "FILUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "FILUSDT",
+      "updated_at_utc": "2026-04-07 05:11:49.621922"
+    },
+    "FILUSDT|5m": {
+      "interval": "5m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 20:03:08.627712",
+      "seeded_start_utc": "2025-04-01 00:00:00",
+      "symbol": "FILUSDT",
+      "updated_at_utc": "2026-04-04 20:03:58.074864"
+    },
+    "LINKUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "LINKUSDT",
+      "updated_at_utc": "2026-04-07 04:09:14.879682"
+    },
+    "LINKUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "LINKUSDT",
+      "updated_at_utc": "2026-04-07 04:09:53.292409"
+    },
+    "LINKUSDT|5m": {
+      "interval": "5m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 19:30:41.746438",
+      "seeded_start_utc": "2025-10-01 00:00:00",
+      "symbol": "LINKUSDT",
+      "updated_at_utc": "2026-04-04 19:31:22.872704"
+    },
+    "LTCUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "LTCUSDT",
+      "updated_at_utc": "2026-04-07 03:09:02.412101"
+    },
+    "LTCUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "LTCUSDT",
+      "updated_at_utc": "2026-04-07 03:09:42.828512"
+    },
+    "LTCUSDT|5m": {
+      "interval": "5m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-08 15:41:16.716737",
+      "seeded_start_utc": "2025-07-01 00:00:00",
+      "symbol": "LTCUSDT",
+      "updated_at_utc": "2026-04-08 15:41:25.653306"
+    },
+    "NEARUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "NEARUSDT",
+      "updated_at_utc": "2026-04-07 01:07:10.287904"
+    },
+    "NEARUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "NEARUSDT",
+      "updated_at_utc": "2026-04-07 01:07:51.786210"
+    },
+    "SOLUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 21:03:56.639158",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "SOLUSDT",
+      "updated_at_utc": "2026-04-06 21:03:59.757528"
+    },
+    "SOLUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 21:04:39.168938",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "SOLUSDT",
+      "updated_at_utc": "2026-04-06 21:04:39.399009"
+    },
+    "SOLUSDT|1m": {
+      "interval": "1m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 19:02:31.139827",
+      "seeded_start_utc": "2025-10-01 00:00:00",
+      "symbol": "SOLUSDT",
+      "updated_at_utc": "2026-04-04 19:10:53.200546"
+    },
+    "SUIUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "SUIUSDT",
+      "updated_at_utc": "2026-04-07 02:38:40.319480"
+    },
+    "SUIUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "SUIUSDT",
+      "updated_at_utc": "2026-04-07 02:39:18.866845"
+    },
+    "TRXUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "TRXUSDT",
+      "updated_at_utc": "2026-04-07 04:39:41.841156"
+    },
+    "TRXUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-07 00:00:00",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "TRXUSDT",
+      "updated_at_utc": "2026-04-07 04:40:26.497789"
+    },
+    "TRXUSDT|5m": {
+      "interval": "5m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 19:31:39.818656",
+      "seeded_start_utc": "2025-10-01 00:00:00",
+      "symbol": "TRXUSDT",
+      "updated_at_utc": "2026-04-04 19:32:20.352127"
+    },
+    "XRPUSDT|15m": {
+      "interval": "15m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 21:34:39.459800",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "XRPUSDT",
+      "updated_at_utc": "2026-04-06 21:34:42.740209"
+    },
+    "XRPUSDT|1h": {
+      "interval": "1h",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-06 21:35:20.970960",
+      "seeded_start_utc": "2025-01-01 00:00:00",
+      "symbol": "XRPUSDT",
+      "updated_at_utc": "2026-04-06 21:35:21.251840"
+    },
+    "XRPUSDT|1m": {
+      "interval": "1m",
+      "seed_mode": "date_range",
+      "seeded_end_utc": "2026-04-04 19:13:33.897286",
+      "seeded_start_utc": "2025-10-01 00:00:00",
+      "symbol": "XRPUSDT",
+      "updated_at_utc": "2026-04-04 19:17:51.386413"
+    }
+  },
+  "version": 1
+}

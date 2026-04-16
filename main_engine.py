@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import Counter, deque
 import ctypes
 import gc
 import hashlib
@@ -38,7 +38,16 @@ from config import (
 )
 from core.api.bitunix import BitunixClient
 from core.api.websocket import MultiTimeframeWebSocketManager
-from core.data.db import CandleRecord, Database, PaperTrade
+from core.data.db import (
+    AdaptationLogCreate,
+    CandleRecord,
+    Database,
+    PaperTrade,
+    PaperTradeUpdate,
+    RegimeObservationCreate,
+    StrategyHealthSnapshot,
+    TradeReviewCreate,
+)
 from core.data_pipeline import PolarsDataLoader
 from core.data.history import HistoryManager
 from core.patterns.setup_gate import SmartSetupGate
@@ -94,7 +103,12 @@ MAX_OPTIMIZATION_WORKERS = 28
 OPTIMIZER_WORKER_MAX_TASKS_PER_CHILD = 100
 OPTIMIZER_MEMORY_RESERVE_GB = 2.0
 OPTIMIZER_MEMORY_PER_WORKER_GB = 0.75
-FORCE_MAX_OPTIMIZATION_WORKERS = True
+FORCE_MAX_OPTIMIZATION_WORKERS = False
+OPTIMIZER_GUI_DEFAULT_MAX_WORKERS = 12
+OPTIMIZER_1M_RESEARCH_MAX_WORKERS = 8
+OPTIMIZER_1M_RESEARCH_PYTHON_MAX_WORKERS = 6
+OPTIMIZER_SIGNAL_CACHE_MAX_PARENT_BYTES = 512 * 1024 * 1024
+OPTIMIZER_SIGNAL_CACHE_MAX_REPLICATED_BYTES = 2 * 1024 * 1024 * 1024
 OPTIMIZER_SAMPLE_RANDOM_SEED = 20260321
 OPTIMIZER_INCREMENTAL_SYNC_MIN_CANDLES = 10_000
 OPTIMIZER_INTERMEDIATE_CACHE_MIN_PROFILES = 20_000
@@ -157,19 +171,77 @@ OPTIMIZER_JIT_STRATEGY_CONSISTENT_BACKTEST: frozenset[str] = frozenset(
         "frama_cross",
     }
 )
+ENTRY_SNAPSHOT_SCHEMA_VERSION = "entry_snapshot_v1"
+REGIME_ENGINE_VERSION = "regime_engine_v1"
+TRADE_REVIEW_ENGINE_VERSION = "trade_review_v1"
+STRATEGY_HEALTH_ENGINE_VERSION = "strategy_health_v1"
+REGIME_LABEL_UNIVERSE: frozenset[str] = frozenset(
+    {
+        "trend_clean_up",
+        "trend_clean_down",
+        "trend_exhausted",
+        "range_balanced",
+        "range_volatile",
+        "breakout_transition",
+        "compression_pre_breakout",
+        "panic_expansion",
+        "illiquid_noise",
+    }
+)
+REVIEW_ERROR_CATALOG: tuple[str, ...] = (
+    "late_entry_after_expansion",
+    "entry_into_exhaustion",
+    "entry_against_regime",
+    "entry_without_sufficient_confirmation",
+    "stop_too_tight",
+    "stop_too_wide",
+    "tp_too_conservative",
+    "tp_too_ambitious",
+    "strategy_regime_mismatch",
+    "strategy_coin_mismatch",
+    "should_not_have_traded",
+)
+META_REPORTS_DIRECTORY = Path("data/meta_reports")
+META_MAX_DAILY_LOSS_USD = float(settings.trading.start_capital) * 0.05
+META_MAX_SYMBOL_LOSS_STREAK = 5
+META_MAX_STRATEGY_DRAWDOWN_PCT = 12.0
+META_MAX_OPEN_POSITIONS_GUARD = int(max(1, settings.trading.max_open_positions))
+META_MAX_CORRELATED_RISK = 4
+META_MAX_PAUSE_EVENTS_PER_DAY = 12
+META_COOLDOWN_AFTER_PAUSE_MINUTES = 90
+META_MIN_SAMPLE_SIZE_FOR_DEMOTION = 12
+META_MIN_SAMPLE_SIZE_FOR_PROMOTION = 25
+META_OPERATIONAL_ERROR_FAILSAFE_THRESHOLD = 5
+META_OPERATIONAL_ERROR_WINDOW_MINUTES = 30
+META_OPERATIONAL_ERROR_DEDUP_SECONDS = 120
+META_OPERATIONAL_ERROR_MIN_DISTINCT_SYMBOLS = 2
+META_OPERATIONAL_ERROR_MIN_DISTINCT_SIGNATURES = 2
+META_FAILSAFE_AUTO_RECOVER_MINUTES = 60
+REGIME_HMM_NON_CONVERGENCE_WARN_INTERVAL_MINUTES = 30
+META_WARN_HOOK_CHANNELS: tuple[str, ...] = ("log", "email_stub", "telegram_stub")
+META_STATE_ORDER: tuple[str, ...] = (
+    "healthy",
+    "degraded",
+    "watchlist",
+    "paused",
+)
 
 FRAMA_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
     "frama_fast_period": (8, 13, 21),
-    "frama_slow_period": (40, 60, 100, 200, 400),
-    "volume_multiplier": (1.0, 1.5, 2.0, 2.5),
-    "stop_loss_pct": (0.5, 1.0, 1.5, 2.0, 3.0),
-    "take_profit_pct": (1.5, 3.0, 5.0, 7.5, 10.0, 15.0),
-    "trailing_activation_pct": (3.0, 5.0, 7.5, 10.0),
-    "trailing_distance_pct": (0.1, 0.3, 0.5),
-    "breakeven_activation_pct": (2.0, 3.5, 5.0),
+    "frama_slow_period": (60, 100, 150, 200),
+    "volume_multiplier": (1.0, 1.5, 2.5),
+    "chandelier_period": (14, 30),
+    "chandelier_multiplier": (2.5, 3.5),
+    "stop_loss_pct": (0.5, 1.5, 3.0),
+    "take_profit_pct": (3.5, 5.0, 7.5, 10.0),
+    "trailing_activation_pct": (3.0, 5.0, 7.5),
+    "trailing_distance_pct": (0.1, 0.2),
+    "breakeven_activation_pct": (3.5, 5.0),
     "breakeven_buffer_pct": (0.2,),
 }
 FRAMA_GRID_TRIM_ORDER: tuple[str, ...] = (
+    "chandelier_multiplier",
+    "chandelier_period",
     "trailing_distance_pct",
     "trailing_activation_pct",
     "take_profit_pct",
@@ -179,11 +251,11 @@ FRAMA_GRID_TRIM_ORDER: tuple[str, ...] = (
 
 EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
     "ema_fast_period": (9, 13, 21, 55),
-    "ema_slow_period": (100, 200, 300, 600),
+    "ema_slow_period": (100, 200, 300),
     "volume_multiplier": (2.25, 3.0, 4.0),
-    "stop_loss_pct": (0.5, 1.0, 1.5, 2.0, 3.0),
-    "take_profit_pct": (1.5, 3.0, 5.0, 7.5, 10.0, 15.0),
-    "trailing_activation_pct": (3.0, 5.0, 7.5, 10.0),
+    "stop_loss_pct": (0.5, 1.0, 1.5, 3.0),
+    "take_profit_pct": (3.0, 5.0, 7.5, 10.0),
+    "trailing_activation_pct": (3.0, 5.0, 8.0),
     "trailing_distance_pct": (0.1, 0.3, 0.5),
     "breakeven_activation_pct": (2.0, 3.5, 5.0),
     "breakeven_buffer_pct": (0.2,),
@@ -196,6 +268,7 @@ EMA_CROSS_VOLUME_GRID_TRIM_ORDER: tuple[str, ...] = (
     "take_profit_pct",
     "stop_loss_pct",
     "volume_multiplier",
+    "ema_slow_period",
 )
 
 EMA_BAND_REJECTION_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
@@ -222,44 +295,259 @@ EMA_BAND_REJECTION_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
     "atr_stop_buffer_mult": (0.5,),
     "signal_cooldown_bars": (0, 3),
     "stop_loss_pct": (1.0, 1.5, 2.0),
-    "take_profit_pct": (2.0, 3.0, 5.0),
-    "trailing_activation_pct": (2.0, 3.0, 5.0),
+    "take_profit_pct": (3.0, 5.0),
+    "trailing_activation_pct": (2.0, 3.0),
     "trailing_distance_pct": (0.1, 0.3),
-    "breakeven_activation_pct": (1.5, 2.0, 2.5),
+    "breakeven_activation_pct": (2.0, 3.5),
     "breakeven_buffer_pct": (0.2,),
 }
 EMA_BAND_REJECTION_GRID_TRIM_ORDER: tuple[str, ...] = (
     "signal_cooldown_bars",
-    "min_slow_slope_pct",
     "pullback_requires_outer_band_touch",
     "use_rejection_quality_filter",
+    "use_atr_stop_buffer",
+    "use_rsi_filter",
+    "use_volume_filter",
     "trailing_distance_pct",
     "trailing_activation_pct",
     "take_profit_pct",
     "stop_loss_pct",
+    "min_slow_slope_pct",
     "min_ema_spread_pct",
     "slope_lookback",
 )
 
 DUAL_THRUST_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "dual_thrust_k1": (0.2, 0.3, 0.5, 0.8),
-    "dual_thrust_k2": (0.1, 0.2, 0.3, 0.5),
-    "dual_thrust_period": (20, 55, 100, 200, 400, 610),
-    "stop_loss_pct": (0.5, 1.0, 1.5, 2.0, 3.0),
-    "take_profit_pct": (1.5, 3.0, 5.0, 7.5, 10.0, 15.0),
-    "trailing_activation_pct": (3.0, 5.0, 7.5, 10.0),
-    "trailing_distance_pct": (0.1, 0.3, 0.5),
+    "dual_thrust_k1": (0.2, 0.5, 1.2),
+    "dual_thrust_k2": (0.2, 0.3, 0.5),
+    "dual_thrust_period": (34, 55, 89, 144),
+    "chandelier_period": (14, 30),
+    "chandelier_multiplier": (1.5, 2.5),
+    "stop_loss_pct": (0.5, 1.5, 3.0),
+    "take_profit_pct": (3.0, 5.0, 10.0, 15.0),
+    "trailing_activation_pct": (3.0, 6.0, 8.0),
+    "trailing_distance_pct": (0.15, 0.3, 0.5),
     "breakeven_activation_pct": (2.0, 3.5, 5.0),
     "breakeven_buffer_pct": (0.2,),
     "tight_trailing_activation_pct": (8.0,),
     "tight_trailing_distance_pct": (0.3,),
 }
 DUAL_THRUST_GRID_TRIM_ORDER: tuple[str, ...] = (
+    "chandelier_multiplier",
+    "chandelier_period",
     "trailing_distance_pct",
     "trailing_activation_pct",
     "take_profit_pct",
     "stop_loss_pct",
+    "dual_thrust_period",
 )
+
+FRAMA_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
+    "frama_fast_period": (3, 5, 7, 9, 11),
+    "frama_slow_period": (18, 24, 36, 48, 72, 96, 144),
+    "volume_multiplier": (1.0, 1.15, 1.35, 1.6, 2.0),
+    "min_frama_gap_pct": (0.0, 0.01, 0.02, 0.03),
+    "min_frama_slope_pct": (0.0, 0.01, 0.02),
+    "post_cross_confirmation_bars": (0, 1, 2),
+    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0, 1.2),
+    "take_profit_pct": (0.8, 1.2, 1.8, 2.4, 3.2),
+    "trailing_activation_pct": (0.6, 0.9, 1.2, 1.8),
+    "trailing_distance_pct": (0.05, 0.08, 0.12, 0.20),
+    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
+    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
+}
+FRAMA_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
+    "trailing_distance_pct",
+    "trailing_activation_pct",
+    "take_profit_pct",
+    "stop_loss_pct",
+    "breakeven_activation_pct",
+    "breakeven_buffer_pct",
+    "volume_multiplier",
+    "post_cross_confirmation_bars",
+    "min_frama_slope_pct",
+    "min_frama_gap_pct",
+)
+
+EMA_CROSS_VOLUME_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
+    "ema_fast_period": (3, 5, 8, 9, 13, 21),
+    "ema_slow_period": (18, 34, 55, 89, 144, 233, 377),
+    "volume_multiplier": (1.0, 1.15, 1.35, 1.6, 2.0, 2.5, 3.0),
+    "min_ema_gap_pct": (0.0, 0.01, 0.02, 0.03),
+    "cross_confirmation_bars": (0, 1, 2),
+    "max_price_extension_pct": (0.10, 0.20, 0.35, 0.50),
+    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0),
+    "take_profit_pct": (1.0, 1.5, 2.0, 3.0, 4.0),
+    "trailing_activation_pct": (0.8, 1.2, 1.8, 2.5),
+    "trailing_distance_pct": (0.08, 0.12, 0.20, 0.30),
+    "tight_trailing_activation_pct": (2.0, 3.0, 4.0),
+    "tight_trailing_distance_pct": (0.10, 0.20, 0.30),
+    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
+    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
+}
+EMA_CROSS_VOLUME_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
+    "trailing_distance_pct",
+    "trailing_activation_pct",
+    "take_profit_pct",
+    "stop_loss_pct",
+    "breakeven_activation_pct",
+    "breakeven_buffer_pct",
+    "tight_trailing_distance_pct",
+    "tight_trailing_activation_pct",
+    "volume_multiplier",
+    "cross_confirmation_bars",
+    "min_ema_gap_pct",
+    "max_price_extension_pct",
+)
+
+DUAL_THRUST_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
+    "dual_thrust_period": (8, 12, 16, 24, 36, 48, 72, 120),
+    "dual_thrust_k1": (0.15, 0.25, 0.35, 0.50, 0.70, 0.90),
+    "dual_thrust_k2": (0.15, 0.25, 0.35, 0.50, 0.70, 0.90),
+    "breakout_buffer_pct": (0.00, 0.03, 0.05, 0.08),
+    "min_range_pct": (0.05, 0.10, 0.15, 0.20),
+    "cooldown_bars_after_exit": (0, 1, 2, 3),
+    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0),
+    "take_profit_pct": (1.0, 1.5, 2.0, 3.0, 4.0),
+    "trailing_activation_pct": (0.8, 1.2, 1.8, 2.5),
+    "trailing_distance_pct": (0.08, 0.12, 0.20, 0.30),
+    "tight_trailing_activation_pct": (2.0, 3.0, 4.0),
+    "tight_trailing_distance_pct": (0.10, 0.20, 0.30),
+    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
+    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
+}
+DUAL_THRUST_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
+    "trailing_distance_pct",
+    "trailing_activation_pct",
+    "take_profit_pct",
+    "stop_loss_pct",
+    "breakeven_activation_pct",
+    "breakeven_buffer_pct",
+    "tight_trailing_distance_pct",
+    "tight_trailing_activation_pct",
+    "cooldown_bars_after_exit",
+    "min_range_pct",
+    "breakout_buffer_pct",
+)
+
+EMA_BAND_REJECTION_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
+    "ema_fast": (5,),
+    "ema_mid": (10,),
+    "ema_slow": (20,),
+    "slope_lookback": (2, 3, 4, 5, 6, 8),
+    "min_ema_spread_pct": (0.02, 0.03, 0.05, 0.08, 0.12),
+    "min_slow_slope_pct": (0.00, 0.01, 0.02, 0.03),
+    "pullback_requires_outer_band_touch": (0, 1),
+    "use_rejection_quality_filter": (0, 1),
+    "rejection_wick_min_ratio": (0.25, 0.35, 0.45, 0.55),
+    "rejection_body_min_ratio": (0.15, 0.20, 0.30),
+    "use_rsi_filter": (0, 1),
+    "rsi_length": (14,),
+    "rsi_midline": (50.0,),
+    "use_rsi_cross_filter": (0, 1),
+    "rsi_midline_margin": (0.0, 0.5, 1.0, 2.0),
+    "use_volume_filter": (0, 1),
+    "volume_ma_length": (20,),
+    "volume_multiplier": (1.0, 1.15, 1.25, 1.5, 1.75),
+    "use_atr_stop_buffer": (0, 1),
+    "atr_length": (14,),
+    "atr_stop_buffer_mult": (0.5,),
+    "signal_cooldown_bars": (0, 1, 2, 3),
+    "trend_persistence_bars": (1, 2, 3),
+    "max_pullback_bars": (2, 3, 4, 6),
+    "entry_offset_pct": (0.00, 0.02, 0.05),
+    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0, 1.2, 1.5),
+    "take_profit_pct": (1.0, 1.5, 2.0, 3.0, 4.0),
+    "trailing_activation_pct": (0.8, 1.2, 1.8, 2.5),
+    "trailing_distance_pct": (0.05, 0.08, 0.12, 0.20),
+    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
+    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
+}
+EMA_BAND_REJECTION_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
+    "trailing_distance_pct",
+    "trailing_activation_pct",
+    "take_profit_pct",
+    "stop_loss_pct",
+    "breakeven_activation_pct",
+    "breakeven_buffer_pct",
+    "use_rsi_cross_filter",
+    "use_rsi_filter",
+    "use_volume_filter",
+    "use_atr_stop_buffer",
+    "use_rejection_quality_filter",
+    "pullback_requires_outer_band_touch",
+    "signal_cooldown_bars",
+    "rsi_midline_margin",
+    "rejection_body_min_ratio",
+    "rejection_wick_min_ratio",
+    "volume_multiplier",
+    "slope_lookback",
+    "min_slow_slope_pct",
+    "min_ema_spread_pct",
+    "entry_offset_pct",
+    "max_pullback_bars",
+    "trend_persistence_bars",
+)
+
+RESEARCH_1M_GRID_PROFILE_TAG = "1m_research_v1"
+
+RESEARCH_1M_GRID_OPTIONS_BY_STRATEGY: dict[str, dict[str, tuple[float | int, ...]]] = {
+    "frama_cross": FRAMA_1M_RESEARCH_GRID_OPTIONS,
+    "ema_cross_volume": EMA_CROSS_VOLUME_1M_RESEARCH_GRID_OPTIONS,
+    "dual_thrust": DUAL_THRUST_1M_RESEARCH_GRID_OPTIONS,
+    "ema_band_rejection": EMA_BAND_REJECTION_1M_RESEARCH_GRID_OPTIONS,
+}
+RESEARCH_1M_GRID_TRIM_ORDER_BY_STRATEGY: dict[str, tuple[str, ...]] = {
+    "frama_cross": FRAMA_1M_RESEARCH_GRID_TRIM_ORDER,
+    "ema_cross_volume": EMA_CROSS_VOLUME_1M_RESEARCH_GRID_TRIM_ORDER,
+    "dual_thrust": DUAL_THRUST_1M_RESEARCH_GRID_TRIM_ORDER,
+    "ema_band_rejection": EMA_BAND_REJECTION_1M_RESEARCH_GRID_TRIM_ORDER,
+}
+
+
+def _is_1m_research_interval(interval: str | None) -> bool:
+    return str(interval or "").strip().lower() == "1m"
+
+
+def _grid_profile_tag_for_interval(interval: str | None) -> str | None:
+    if _is_1m_research_interval(interval):
+        return RESEARCH_1M_GRID_PROFILE_TAG
+    return None
+
+
+def _dedupe_grid_values(values: Sequence[float | int]) -> tuple[float | int, ...]:
+    deduped_values: list[float | int] = []
+    for value in values:
+        if value in deduped_values:
+            continue
+        deduped_values.append(value)
+    return tuple(deduped_values)
+
+
+def _summarize_profile_grid_bounds(
+    profiles: Sequence[Mapping[str, object]] | None,
+) -> dict[str, dict[str, float]]:
+    if not profiles:
+        return {}
+    bounds: dict[str, dict[str, float]] = {}
+    for profile in profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        for field_name, raw_value in profile.items():
+            with suppress(Exception):
+                numeric_value = float(raw_value)
+                if not math.isfinite(numeric_value):
+                    continue
+                current = bounds.get(str(field_name))
+                if current is None:
+                    bounds[str(field_name)] = {
+                        "min": float(numeric_value),
+                        "max": float(numeric_value),
+                    }
+                else:
+                    current["min"] = float(min(float(current["min"]), numeric_value))
+                    current["max"] = float(max(float(current["max"]), numeric_value))
+    return bounds
 _OPTIMIZER_SETTINGS_LOCK = RLock()
 _WORKER_CANDLES_DF: pd.DataFrame | None = None
 _WORKER_CANDLE_ROWS: list[dict[str, object]] | None = None
@@ -279,6 +567,9 @@ def _resolve_backtest_history_start_utc() -> datetime:
 
 
 BACKTEST_HISTORY_START_UTC = _resolve_backtest_history_start_utc()
+BACKTEST_HISTORY_SEED_STATE_PATH = Path("data/backtest_history_seed_state.json")
+_BACKTEST_HISTORY_SEED_STATE_LOCK = RLock()
+_BACKTEST_HISTORY_SEED_STATE_VERSION = 1
 
 
 def _resolve_optimizer_history_start_utc() -> datetime:
@@ -291,6 +582,124 @@ def _resolve_optimizer_history_start_utc() -> datetime:
 
 
 OPTIMIZER_HISTORY_START_UTC = _resolve_optimizer_history_start_utc()
+
+
+def _history_seed_key(symbol: str, interval: str) -> str:
+    normalized_symbol = str(symbol).strip().upper()
+    normalized_interval = _validate_interval_name(str(interval))
+    return f"{normalized_symbol}|{normalized_interval}"
+
+
+def _history_seed_parse_utc_naive(value: object) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    with suppress(Exception):
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+    return None
+
+
+def _history_seed_load_state() -> dict[str, object]:
+    path = BACKTEST_HISTORY_SEED_STATE_PATH
+    if not path.exists():
+        return {"version": _BACKTEST_HISTORY_SEED_STATE_VERSION, "entries": {}}
+    with suppress(Exception):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            entries = payload.get("entries")
+            if not isinstance(entries, dict):
+                entries = {}
+            return {
+                "version": int(payload.get("version", _BACKTEST_HISTORY_SEED_STATE_VERSION) or _BACKTEST_HISTORY_SEED_STATE_VERSION),
+                "entries": dict(entries),
+            }
+    return {"version": _BACKTEST_HISTORY_SEED_STATE_VERSION, "entries": {}}
+
+
+def _history_seed_save_state(state: Mapping[str, object]) -> None:
+    path = BACKTEST_HISTORY_SEED_STATE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = {
+        "version": int(state.get("version", _BACKTEST_HISTORY_SEED_STATE_VERSION) or _BACKTEST_HISTORY_SEED_STATE_VERSION),
+        "entries": dict(state.get("entries", {})) if isinstance(state.get("entries"), Mapping) else {},
+    }
+    path.write_text(
+        json.dumps(serialized, ensure_ascii=True, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _is_full_history_seed_required(
+    *,
+    symbol: str,
+    interval: str,
+    requested_start_utc: datetime,
+    requested_end_utc: datetime,
+) -> tuple[bool, str]:
+    key = _history_seed_key(symbol, interval)
+    with _BACKTEST_HISTORY_SEED_STATE_LOCK:
+        state = _history_seed_load_state()
+        entries = state.get("entries", {})
+        if not isinstance(entries, Mapping):
+            return True, "seed state invalid"
+        entry = entries.get(key)
+        if not isinstance(entry, Mapping):
+            return True, "no seed state"
+        seeded_start_utc = _history_seed_parse_utc_naive(entry.get("seeded_start_utc"))
+        if seeded_start_utc is None:
+            return True, "seed start missing"
+        interval_seconds = max(_interval_total_seconds(interval), 60)
+        tolerance = timedelta(seconds=interval_seconds * 2)
+        if seeded_start_utc > (requested_start_utc + tolerance):
+            return True, "requested start extends further back than seeded baseline"
+        return False, "seed baseline already available"
+
+
+def _mark_history_seed_completed(
+    *,
+    symbol: str,
+    interval: str,
+    seeded_start_utc: datetime,
+    seeded_end_utc: datetime,
+    mode: str,
+) -> None:
+    key = _history_seed_key(symbol, interval)
+    now_text = datetime.now(tz=UTC).replace(tzinfo=None).isoformat(sep=" ")
+    with _BACKTEST_HISTORY_SEED_STATE_LOCK:
+        state = _history_seed_load_state()
+        entries_raw = state.get("entries", {})
+        entries: dict[str, object] = (
+            dict(entries_raw)
+            if isinstance(entries_raw, Mapping)
+            else {}
+        )
+        existing_entry = entries.get(key)
+        if isinstance(existing_entry, Mapping):
+            existing_seeded_start_utc = _history_seed_parse_utc_naive(
+                existing_entry.get("seeded_start_utc")
+            )
+            existing_seeded_end_utc = _history_seed_parse_utc_naive(
+                existing_entry.get("seeded_end_utc")
+            )
+            if existing_seeded_start_utc is not None:
+                seeded_start_utc = min(seeded_start_utc, existing_seeded_start_utc)
+            if existing_seeded_end_utc is not None:
+                seeded_end_utc = max(seeded_end_utc, existing_seeded_end_utc)
+        entries[key] = {
+            "symbol": str(symbol).strip().upper(),
+            "interval": _validate_interval_name(interval),
+            "seeded_start_utc": seeded_start_utc.isoformat(sep=" "),
+            "seeded_end_utc": seeded_end_utc.isoformat(sep=" "),
+            "seed_mode": str(mode).strip().lower() or "date_range",
+            "updated_at_utc": now_text,
+        }
+        state["entries"] = entries
+        _history_seed_save_state(state)
 
 
 def _history_start_for_mode(*, optimize_profile: bool) -> datetime:
@@ -508,6 +917,8 @@ def _passes_common_risk_profile_guards(
     stop_loss_pct: float,
     trailing_activation_pct: float,
     trailing_distance_pct: float,
+    breakeven_activation_pct: float | None = None,
+    avg_profit_per_trade_net_pct: float | None = None,
 ) -> bool:
     if not (
         math.isfinite(take_profit_pct)
@@ -526,11 +937,57 @@ def _passes_common_risk_profile_guards(
     # Keep trailing distance meaningfully below activation threshold.
     if trailing_distance_pct > (trailing_activation_pct * 0.5):
         return False
+    if breakeven_activation_pct is not None:
+        if not math.isfinite(float(breakeven_activation_pct)):
+            return False
+        if trailing_activation_pct < float(breakeven_activation_pct):
+            return False
+    if avg_profit_per_trade_net_pct is not None:
+        if not math.isfinite(float(avg_profit_per_trade_net_pct)):
+            return False
+        if float(avg_profit_per_trade_net_pct) < float(
+            OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT
+        ):
+            return False
+    return True
+
+
+def _passes_research_1m_risk_profile_guards(
+    *,
+    take_profit_pct: float,
+    stop_loss_pct: float,
+    trailing_activation_pct: float,
+    trailing_distance_pct: float,
+    breakeven_activation_pct: float,
+    tight_trailing_activation_pct: float | None = None,
+) -> bool:
+    if not _passes_common_risk_profile_guards(
+        take_profit_pct=take_profit_pct,
+        stop_loss_pct=stop_loss_pct,
+        trailing_activation_pct=trailing_activation_pct,
+        trailing_distance_pct=trailing_distance_pct,
+    ):
+        return False
+    if not (
+        math.isfinite(breakeven_activation_pct)
+        and breakeven_activation_pct < take_profit_pct
+    ):
+        return False
+    if trailing_activation_pct < breakeven_activation_pct:
+        return False
+    if trailing_distance_pct >= trailing_activation_pct:
+        return False
+    if tight_trailing_activation_pct is not None:
+        if not math.isfinite(float(tight_trailing_activation_pct)):
+            return False
+        if float(tight_trailing_activation_pct) <= trailing_activation_pct:
+            return False
     return True
 
 
 def _passes_ema_band_rejection_exit_profile_guards(
     *,
+    stop_loss_pct: float,
     take_profit_pct: float,
     trailing_activation_pct: float,
     breakeven_activation_pct: float,
@@ -545,6 +1002,25 @@ def _passes_ema_band_rejection_exit_profile_guards(
     if breakeven_activation_pct >= take_profit_pct:
         return False
     if trailing_activation_pct >= take_profit_pct:
+        return False
+    if take_profit_pct < (1.5 * stop_loss_pct):
+        return False
+    return True
+
+
+def _passes_chandelier_profile_guards(
+    *,
+    chandelier_period: float,
+    chandelier_multiplier: float,
+) -> bool:
+    if not (
+        math.isfinite(chandelier_period)
+        and math.isfinite(chandelier_multiplier)
+    ):
+        return False
+    if float(chandelier_period) < 14.0:
+        return False
+    if float(chandelier_multiplier) < 1.5:
         return False
     return True
 
@@ -566,40 +1042,101 @@ def generate_trade_management_optimization_grid() -> list[OptimizationProfile]:
     ]
 
 
-def generate_ema_optimization_grid() -> list[OptimizationProfile]:
+def generate_ema_optimization_grid(
+    *,
+    interval: str | None = None,
+) -> list[OptimizationProfile]:
+    selected_options = EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS
+    selected_trim_order = EMA_CROSS_VOLUME_GRID_TRIM_ORDER
+    use_1m_research_grid = _is_1m_research_interval(interval)
+    if use_1m_research_grid:
+        selected_options = {
+            field_name: _dedupe_grid_values(field_values)
+            for field_name, field_values in EMA_CROSS_VOLUME_1M_RESEARCH_GRID_OPTIONS.items()
+        }
+        selected_trim_order = EMA_CROSS_VOLUME_1M_RESEARCH_GRID_TRIM_ORDER
     return _build_capped_strategy_family_profiles(
         strategy_family_name="ema_cross_volume",
-        base_options=EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS,
-        trim_order=EMA_CROSS_VOLUME_GRID_TRIM_ORDER,
-        profile_builder=_build_ema_cross_volume_profiles,
+        base_options=selected_options,
+        trim_order=selected_trim_order,
+        profile_builder=lambda options: _build_ema_cross_volume_profiles(
+            options,
+            use_research_1m_pruning=use_1m_research_grid,
+        ),
     )
 
 
-def generate_ema_band_rejection_optimization_grid() -> list[OptimizationProfile]:
+def generate_ema_band_rejection_optimization_grid(
+    *,
+    interval: str | None = None,
+) -> list[OptimizationProfile]:
+    selected_options = EMA_BAND_REJECTION_FIXED_GRID_OPTIONS
+    selected_trim_order = EMA_BAND_REJECTION_GRID_TRIM_ORDER
+    use_1m_research_grid = _is_1m_research_interval(interval)
+    if use_1m_research_grid:
+        selected_options = {
+            field_name: _dedupe_grid_values(field_values)
+            for field_name, field_values in EMA_BAND_REJECTION_1M_RESEARCH_GRID_OPTIONS.items()
+        }
+        selected_trim_order = EMA_BAND_REJECTION_1M_RESEARCH_GRID_TRIM_ORDER
     return _build_capped_strategy_family_profiles(
         strategy_family_name="ema_band_rejection",
-        base_options=EMA_BAND_REJECTION_FIXED_GRID_OPTIONS,
-        trim_order=EMA_BAND_REJECTION_GRID_TRIM_ORDER,
-        profile_builder=_build_ema_band_rejection_profiles,
+        base_options=selected_options,
+        trim_order=selected_trim_order,
+        profile_builder=lambda options: _build_ema_band_rejection_profiles(
+            options,
+            use_research_1m_pruning=use_1m_research_grid,
+        ),
     )
 
 
-def generate_frama_optimization_grid() -> list[OptimizationProfile]:
+def generate_frama_optimization_grid(
+    *,
+    interval: str | None = None,
+) -> list[OptimizationProfile]:
+    selected_options = FRAMA_FIXED_GRID_OPTIONS
+    selected_trim_order = FRAMA_GRID_TRIM_ORDER
+    use_1m_research_grid = _is_1m_research_interval(interval)
+    if use_1m_research_grid:
+        selected_options = {
+            field_name: _dedupe_grid_values(field_values)
+            for field_name, field_values in FRAMA_1M_RESEARCH_GRID_OPTIONS.items()
+        }
+        selected_trim_order = FRAMA_1M_RESEARCH_GRID_TRIM_ORDER
     return _build_capped_strategy_family_profiles(
         strategy_family_name="frama_cross",
-        base_options=FRAMA_FIXED_GRID_OPTIONS,
-        trim_order=FRAMA_GRID_TRIM_ORDER,
-        profile_builder=_build_frama_profiles,
+        base_options=selected_options,
+        trim_order=selected_trim_order,
+        profile_builder=lambda options: _build_frama_profiles(
+            options,
+            use_research_1m_pruning=use_1m_research_grid,
+        ),
     )
 
 
-def generate_dual_thrust_optimization_grid(symbol: str | None = None) -> list[OptimizationProfile]:
+def generate_dual_thrust_optimization_grid(
+    symbol: str | None = None,
+    *,
+    interval: str | None = None,
+) -> list[OptimizationProfile]:
     _ = symbol
+    selected_options = DUAL_THRUST_FIXED_GRID_OPTIONS
+    selected_trim_order = DUAL_THRUST_GRID_TRIM_ORDER
+    use_1m_research_grid = _is_1m_research_interval(interval)
+    if use_1m_research_grid:
+        selected_options = {
+            field_name: _dedupe_grid_values(field_values)
+            for field_name, field_values in DUAL_THRUST_1M_RESEARCH_GRID_OPTIONS.items()
+        }
+        selected_trim_order = DUAL_THRUST_1M_RESEARCH_GRID_TRIM_ORDER
     return _build_capped_strategy_family_profiles(
         strategy_family_name="dual_thrust",
-        base_options=DUAL_THRUST_FIXED_GRID_OPTIONS,
-        trim_order=DUAL_THRUST_GRID_TRIM_ORDER,
-        profile_builder=_build_dual_thrust_profiles,
+        base_options=selected_options,
+        trim_order=selected_trim_order,
+        profile_builder=lambda options: _build_dual_thrust_profiles(
+            options,
+            use_research_1m_pruning=use_1m_research_grid,
+        ),
     )
 
 
@@ -624,6 +1161,27 @@ def _build_capped_strategy_family_profiles(
         str(field_name): tuple(values)
         for field_name, values in base_options.items()
     }
+    estimated_profile_count = 1
+    for values in working_options.values():
+        estimated_profile_count *= max(1, len(values))
+    pretrim_limit = int(MAX_STRATEGY_FAMILY_GRID_PROFILES * 64)
+    if estimated_profile_count > pretrim_limit:
+        while estimated_profile_count > pretrim_limit:
+            option_was_trimmed = False
+            for field_name in trim_order:
+                current_values = tuple(working_options.get(field_name, ()))
+                trimmed_values = _trim_outermost_grid_values(current_values)
+                if trimmed_values == current_values:
+                    continue
+                working_options[field_name] = trimmed_values
+                option_was_trimmed = True
+                estimated_profile_count = 1
+                for values in working_options.values():
+                    estimated_profile_count *= max(1, len(values))
+                if estimated_profile_count <= pretrim_limit:
+                    break
+            if not option_was_trimmed:
+                break
     profiles = profile_builder(working_options)
     if len(profiles) <= MAX_STRATEGY_FAMILY_GRID_PROFILES:
         return profiles
@@ -652,12 +1210,33 @@ def _build_capped_strategy_family_profiles(
 
 def _build_frama_profiles(
     options: dict[str, tuple[float | int, ...]],
+    *,
+    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
+    optimize_chandelier = (
+        "chandelier_period" in options or "chandelier_multiplier" in options
+    )
+    chandelier_period_values = options.get(
+        "chandelier_period",
+        (int(settings.trading.chandelier_period),),
+    )
+    chandelier_multiplier_values = options.get(
+        "chandelier_multiplier",
+        (float(settings.trading.chandelier_multiplier),),
+    )
+    min_frama_gap_pct_values = options.get("min_frama_gap_pct", (0.05,))
+    min_frama_slope_pct_values = options.get("min_frama_slope_pct", (0.0,))
+    post_cross_confirmation_bars_values = options.get("post_cross_confirmation_bars", (0,))
     for (
         frama_fast_period,
         frama_slow_period,
         volume_multiplier,
+        chandelier_period,
+        chandelier_multiplier,
+        min_frama_gap_pct,
+        min_frama_slope_pct,
+        post_cross_confirmation_bars,
         stop_loss_pct,
         take_profit_pct,
         trailing_activation_pct,
@@ -668,6 +1247,11 @@ def _build_frama_profiles(
         options["frama_fast_period"],
         options["frama_slow_period"],
         options["volume_multiplier"],
+        chandelier_period_values,
+        chandelier_multiplier_values,
+        min_frama_gap_pct_values,
+        min_frama_slope_pct_values,
+        post_cross_confirmation_bars_values,
         options["stop_loss_pct"],
         options["take_profit_pct"],
         options["trailing_activation_pct"],
@@ -677,37 +1261,75 @@ def _build_frama_profiles(
     ):
         if int(frama_fast_period) >= int(frama_slow_period):
             continue
-        if not _passes_common_risk_profile_guards(
-            take_profit_pct=float(take_profit_pct),
-            stop_loss_pct=float(stop_loss_pct),
-            trailing_activation_pct=float(trailing_activation_pct),
-            trailing_distance_pct=float(trailing_distance_pct),
+        resolved_chandelier_period = float(chandelier_period)
+        resolved_chandelier_multiplier = float(chandelier_multiplier)
+        if optimize_chandelier and not _passes_chandelier_profile_guards(
+            chandelier_period=resolved_chandelier_period,
+            chandelier_multiplier=resolved_chandelier_multiplier,
         ):
             continue
-        profiles.append(
-            {
-                "frama_fast_period": float(frama_fast_period),
-                "frama_slow_period": float(frama_slow_period),
-                "volume_multiplier": float(volume_multiplier),
-                "stop_loss_pct": float(stop_loss_pct),
-                "take_profit_pct": float(take_profit_pct),
-                "trailing_activation_pct": float(trailing_activation_pct),
-                "trailing_distance_pct": float(trailing_distance_pct),
-                "breakeven_activation_pct": float(breakeven_activation_pct),
-                "breakeven_buffer_pct": float(breakeven_buffer_pct),
-            }
-        )
+        resolved_take_profit_pct = float(take_profit_pct)
+        resolved_stop_loss_pct = float(stop_loss_pct)
+        resolved_trailing_activation_pct = float(trailing_activation_pct)
+        resolved_trailing_distance_pct = float(trailing_distance_pct)
+        resolved_breakeven_activation_pct = float(breakeven_activation_pct)
+        if use_research_1m_pruning:
+            if not _passes_research_1m_risk_profile_guards(
+                take_profit_pct=resolved_take_profit_pct,
+                stop_loss_pct=resolved_stop_loss_pct,
+                trailing_activation_pct=resolved_trailing_activation_pct,
+                trailing_distance_pct=resolved_trailing_distance_pct,
+                breakeven_activation_pct=resolved_breakeven_activation_pct,
+            ):
+                continue
+        elif not _passes_common_risk_profile_guards(
+            take_profit_pct=resolved_take_profit_pct,
+            stop_loss_pct=resolved_stop_loss_pct,
+            trailing_activation_pct=resolved_trailing_activation_pct,
+            trailing_distance_pct=resolved_trailing_distance_pct,
+            breakeven_activation_pct=resolved_breakeven_activation_pct,
+        ):
+            continue
+        profile: OptimizationProfile = {
+            "frama_fast_period": float(frama_fast_period),
+            "frama_slow_period": float(frama_slow_period),
+            "volume_multiplier": float(volume_multiplier),
+            "stop_loss_pct": resolved_stop_loss_pct,
+            "take_profit_pct": resolved_take_profit_pct,
+            "trailing_activation_pct": resolved_trailing_activation_pct,
+            "trailing_distance_pct": resolved_trailing_distance_pct,
+            "breakeven_activation_pct": resolved_breakeven_activation_pct,
+            "breakeven_buffer_pct": float(breakeven_buffer_pct),
+        }
+        if "min_frama_gap_pct" in options:
+            profile["min_frama_gap_pct"] = float(min_frama_gap_pct)
+        if "min_frama_slope_pct" in options:
+            profile["min_frama_slope_pct"] = float(min_frama_slope_pct)
+        if "post_cross_confirmation_bars" in options:
+            profile["post_cross_confirmation_bars"] = float(post_cross_confirmation_bars)
+        if optimize_chandelier:
+            profile["chandelier_period"] = resolved_chandelier_period
+            profile["chandelier_multiplier"] = resolved_chandelier_multiplier
+        profiles.append(profile)
     return profiles
 
 
 def _build_ema_cross_volume_profiles(
     options: dict[str, tuple[float | int, ...]],
+    *,
+    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
+    min_ema_gap_pct_values = options.get("min_ema_gap_pct", (0.0,))
+    cross_confirmation_bars_values = options.get("cross_confirmation_bars", (0,))
+    max_price_extension_pct_values = options.get("max_price_extension_pct", (0.0,))
     for (
         ema_fast_period,
         ema_slow_period,
         volume_multiplier,
+        min_ema_gap_pct,
+        cross_confirmation_bars,
+        max_price_extension_pct,
         stop_loss_pct,
         take_profit_pct,
         trailing_activation_pct,
@@ -720,6 +1342,9 @@ def _build_ema_cross_volume_profiles(
         options["ema_fast_period"],
         options["ema_slow_period"],
         options["volume_multiplier"],
+        min_ema_gap_pct_values,
+        cross_confirmation_bars_values,
+        max_price_extension_pct_values,
         options["stop_loss_pct"],
         options["take_profit_pct"],
         options["trailing_activation_pct"],
@@ -731,33 +1356,57 @@ def _build_ema_cross_volume_profiles(
     ):
         if int(ema_fast_period) >= int(ema_slow_period):
             continue
-        if not _passes_common_risk_profile_guards(
-            take_profit_pct=float(take_profit_pct),
-            stop_loss_pct=float(stop_loss_pct),
-            trailing_activation_pct=float(trailing_activation_pct),
-            trailing_distance_pct=float(trailing_distance_pct),
+        resolved_take_profit_pct = float(take_profit_pct)
+        resolved_stop_loss_pct = float(stop_loss_pct)
+        resolved_trailing_activation_pct = float(trailing_activation_pct)
+        resolved_trailing_distance_pct = float(trailing_distance_pct)
+        resolved_breakeven_activation_pct = float(breakeven_activation_pct)
+        resolved_tight_trailing_activation_pct = float(tight_trailing_activation_pct)
+        if use_research_1m_pruning:
+            if not _passes_research_1m_risk_profile_guards(
+                take_profit_pct=resolved_take_profit_pct,
+                stop_loss_pct=resolved_stop_loss_pct,
+                trailing_activation_pct=resolved_trailing_activation_pct,
+                trailing_distance_pct=resolved_trailing_distance_pct,
+                breakeven_activation_pct=resolved_breakeven_activation_pct,
+                tight_trailing_activation_pct=resolved_tight_trailing_activation_pct,
+            ):
+                continue
+        elif not _passes_common_risk_profile_guards(
+            take_profit_pct=resolved_take_profit_pct,
+            stop_loss_pct=resolved_stop_loss_pct,
+            trailing_activation_pct=resolved_trailing_activation_pct,
+            trailing_distance_pct=resolved_trailing_distance_pct,
+            breakeven_activation_pct=resolved_breakeven_activation_pct,
         ):
             continue
-        profiles.append(
-            {
-                "ema_fast_period": float(ema_fast_period),
-                "ema_slow_period": float(ema_slow_period),
-                "volume_multiplier": float(volume_multiplier),
-                "stop_loss_pct": float(stop_loss_pct),
-                "take_profit_pct": float(take_profit_pct),
-                "trailing_activation_pct": float(trailing_activation_pct),
-                "trailing_distance_pct": float(trailing_distance_pct),
-                "breakeven_activation_pct": float(breakeven_activation_pct),
-                "breakeven_buffer_pct": float(breakeven_buffer_pct),
-                "tight_trailing_activation_pct": float(tight_trailing_activation_pct),
-                "tight_trailing_distance_pct": float(tight_trailing_distance_pct),
-            }
-        )
+        profile: OptimizationProfile = {
+            "ema_fast_period": float(ema_fast_period),
+            "ema_slow_period": float(ema_slow_period),
+            "volume_multiplier": float(volume_multiplier),
+            "stop_loss_pct": resolved_stop_loss_pct,
+            "take_profit_pct": resolved_take_profit_pct,
+            "trailing_activation_pct": resolved_trailing_activation_pct,
+            "trailing_distance_pct": resolved_trailing_distance_pct,
+            "breakeven_activation_pct": resolved_breakeven_activation_pct,
+            "breakeven_buffer_pct": float(breakeven_buffer_pct),
+            "tight_trailing_activation_pct": resolved_tight_trailing_activation_pct,
+            "tight_trailing_distance_pct": float(tight_trailing_distance_pct),
+        }
+        if "min_ema_gap_pct" in options:
+            profile["min_ema_gap_pct"] = float(min_ema_gap_pct)
+        if "cross_confirmation_bars" in options:
+            profile["cross_confirmation_bars"] = float(cross_confirmation_bars)
+        if "max_price_extension_pct" in options:
+            profile["max_price_extension_pct"] = float(max_price_extension_pct)
+        profiles.append(profile)
     return profiles
 
 
 def _build_ema_band_rejection_profiles(
     options: dict[str, tuple[float | int, ...]],
+    *,
+    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
     default_rsi_length = int(options["rsi_length"][0])
@@ -770,6 +1419,9 @@ def _build_ema_band_rejection_profiles(
     default_atr_stop_buffer_mult = float(options["atr_stop_buffer_mult"][-1])
     default_rejection_wick_min_ratio = float(options["rejection_wick_min_ratio"][0])
     default_rejection_body_min_ratio = float(options["rejection_body_min_ratio"][0])
+    trend_persistence_bars_values = options.get("trend_persistence_bars", (1,))
+    max_pullback_bars_values = options.get("max_pullback_bars", (0,))
+    entry_offset_pct_values = options.get("entry_offset_pct", (0.0,))
 
     risk_profiles: list[tuple[float, float, float, float, float, float]] = []
     for (
@@ -793,14 +1445,25 @@ def _build_ema_band_rejection_profiles(
         resolved_trailing_distance_pct = float(trailing_distance_pct)
         resolved_breakeven_activation_pct = float(breakeven_activation_pct)
         resolved_breakeven_buffer_pct = float(breakeven_buffer_pct)
-        if not _passes_common_risk_profile_guards(
+        if use_research_1m_pruning:
+            if not _passes_research_1m_risk_profile_guards(
+                take_profit_pct=resolved_take_profit_pct,
+                stop_loss_pct=resolved_stop_loss_pct,
+                trailing_activation_pct=resolved_trailing_activation_pct,
+                trailing_distance_pct=resolved_trailing_distance_pct,
+                breakeven_activation_pct=resolved_breakeven_activation_pct,
+            ):
+                continue
+        elif not _passes_common_risk_profile_guards(
             take_profit_pct=resolved_take_profit_pct,
             stop_loss_pct=resolved_stop_loss_pct,
             trailing_activation_pct=resolved_trailing_activation_pct,
             trailing_distance_pct=resolved_trailing_distance_pct,
+            breakeven_activation_pct=resolved_breakeven_activation_pct,
         ):
             continue
         if not _passes_ema_band_rejection_exit_profile_guards(
+            stop_loss_pct=resolved_stop_loss_pct,
             take_profit_pct=resolved_take_profit_pct,
             trailing_activation_pct=resolved_trailing_activation_pct,
             breakeven_activation_pct=resolved_breakeven_activation_pct,
@@ -939,16 +1602,23 @@ def _build_ema_band_rejection_profiles(
                                                     resolved_atr_stop_buffer_mult = float(atr_stop_buffer_mult)
                                                     for signal_cooldown_bars in options["signal_cooldown_bars"]:
                                                         resolved_signal_cooldown_bars = float(signal_cooldown_bars)
-                                                        for (
-                                                            resolved_stop_loss_pct,
-                                                            resolved_take_profit_pct,
-                                                            resolved_trailing_activation_pct,
-                                                            resolved_trailing_distance_pct,
-                                                            resolved_breakeven_activation_pct,
-                                                            resolved_breakeven_buffer_pct,
-                                                        ) in risk_profiles:
-                                                            profiles.append(
-                                                                {
+                                                        for trend_persistence_bars, max_pullback_bars, entry_offset_pct in product(
+                                                            trend_persistence_bars_values,
+                                                            max_pullback_bars_values,
+                                                            entry_offset_pct_values,
+                                                        ):
+                                                            resolved_trend_persistence_bars = float(trend_persistence_bars)
+                                                            resolved_max_pullback_bars = float(max_pullback_bars)
+                                                            resolved_entry_offset_pct = float(entry_offset_pct)
+                                                            for (
+                                                                resolved_stop_loss_pct,
+                                                                resolved_take_profit_pct,
+                                                                resolved_trailing_activation_pct,
+                                                                resolved_trailing_distance_pct,
+                                                                resolved_breakeven_activation_pct,
+                                                                resolved_breakeven_buffer_pct,
+                                                            ) in risk_profiles:
+                                                                profile: OptimizationProfile = {
                                                                     "ema_fast": float(resolved_ema_fast),
                                                                     "ema_mid": float(resolved_ema_mid),
                                                                     "ema_slow": float(resolved_ema_slow),
@@ -984,18 +1654,45 @@ def _build_ema_band_rejection_profiles(
                                                                     "breakeven_activation_pct": resolved_breakeven_activation_pct,
                                                                     "breakeven_buffer_pct": resolved_breakeven_buffer_pct,
                                                                 }
-                                                            )
+                                                                if "trend_persistence_bars" in options:
+                                                                    profile["trend_persistence_bars"] = resolved_trend_persistence_bars
+                                                                if "max_pullback_bars" in options:
+                                                                    profile["max_pullback_bars"] = resolved_max_pullback_bars
+                                                                if "entry_offset_pct" in options:
+                                                                    profile["entry_offset_pct"] = resolved_entry_offset_pct
+                                                                profiles.append(profile)
     return profiles
 
 
 def _build_dual_thrust_profiles(
     options: dict[str, tuple[float | int, ...]],
+    *,
+    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
+    optimize_chandelier = (
+        "chandelier_period" in options or "chandelier_multiplier" in options
+    )
+    chandelier_period_values = options.get(
+        "chandelier_period",
+        (int(settings.trading.chandelier_period),),
+    )
+    chandelier_multiplier_values = options.get(
+        "chandelier_multiplier",
+        (float(settings.trading.chandelier_multiplier),),
+    )
+    breakout_buffer_pct_values = options.get("breakout_buffer_pct", (0.0,))
+    min_range_pct_values = options.get("min_range_pct", (0.0,))
+    cooldown_bars_after_exit_values = options.get("cooldown_bars_after_exit", (0,))
     for (
         dual_thrust_k1,
         dual_thrust_k2,
         dual_thrust_period,
+        chandelier_period,
+        chandelier_multiplier,
+        breakout_buffer_pct,
+        min_range_pct,
+        cooldown_bars_after_exit,
         stop_loss_pct,
         take_profit_pct,
         trailing_activation_pct,
@@ -1008,6 +1705,11 @@ def _build_dual_thrust_profiles(
         options["dual_thrust_k1"],
         options["dual_thrust_k2"],
         options["dual_thrust_period"],
+        chandelier_period_values,
+        chandelier_multiplier_values,
+        breakout_buffer_pct_values,
+        min_range_pct_values,
+        cooldown_bars_after_exit_values,
         options["stop_loss_pct"],
         options["take_profit_pct"],
         options["trailing_activation_pct"],
@@ -1017,28 +1719,60 @@ def _build_dual_thrust_profiles(
         options["tight_trailing_activation_pct"],
         options["tight_trailing_distance_pct"],
     ):
-        if not _passes_common_risk_profile_guards(
-            take_profit_pct=float(take_profit_pct),
-            stop_loss_pct=float(stop_loss_pct),
-            trailing_activation_pct=float(trailing_activation_pct),
-            trailing_distance_pct=float(trailing_distance_pct),
+        resolved_chandelier_period = float(chandelier_period)
+        resolved_chandelier_multiplier = float(chandelier_multiplier)
+        if optimize_chandelier and not _passes_chandelier_profile_guards(
+            chandelier_period=resolved_chandelier_period,
+            chandelier_multiplier=resolved_chandelier_multiplier,
         ):
             continue
-        profiles.append(
-            {
-                "dual_thrust_k1": float(dual_thrust_k1),
-                "dual_thrust_k2": float(dual_thrust_k2),
-                "dual_thrust_period": float(dual_thrust_period),
-                "stop_loss_pct": float(stop_loss_pct),
-                "take_profit_pct": float(take_profit_pct),
-                "trailing_activation_pct": float(trailing_activation_pct),
-                "trailing_distance_pct": float(trailing_distance_pct),
-                "breakeven_activation_pct": float(breakeven_activation_pct),
-                "breakeven_buffer_pct": float(breakeven_buffer_pct),
-                "tight_trailing_activation_pct": float(tight_trailing_activation_pct),
-                "tight_trailing_distance_pct": float(tight_trailing_distance_pct),
-            }
-        )
+        resolved_take_profit_pct = float(take_profit_pct)
+        resolved_stop_loss_pct = float(stop_loss_pct)
+        resolved_trailing_activation_pct = float(trailing_activation_pct)
+        resolved_trailing_distance_pct = float(trailing_distance_pct)
+        resolved_breakeven_activation_pct = float(breakeven_activation_pct)
+        resolved_tight_trailing_activation_pct = float(tight_trailing_activation_pct)
+        if use_research_1m_pruning:
+            if not _passes_research_1m_risk_profile_guards(
+                take_profit_pct=resolved_take_profit_pct,
+                stop_loss_pct=resolved_stop_loss_pct,
+                trailing_activation_pct=resolved_trailing_activation_pct,
+                trailing_distance_pct=resolved_trailing_distance_pct,
+                breakeven_activation_pct=resolved_breakeven_activation_pct,
+                tight_trailing_activation_pct=resolved_tight_trailing_activation_pct,
+            ):
+                continue
+        elif not _passes_common_risk_profile_guards(
+            take_profit_pct=resolved_take_profit_pct,
+            stop_loss_pct=resolved_stop_loss_pct,
+            trailing_activation_pct=resolved_trailing_activation_pct,
+            trailing_distance_pct=resolved_trailing_distance_pct,
+            breakeven_activation_pct=resolved_breakeven_activation_pct,
+        ):
+            continue
+        profile: OptimizationProfile = {
+            "dual_thrust_k1": float(dual_thrust_k1),
+            "dual_thrust_k2": float(dual_thrust_k2),
+            "dual_thrust_period": float(dual_thrust_period),
+            "stop_loss_pct": resolved_stop_loss_pct,
+            "take_profit_pct": resolved_take_profit_pct,
+            "trailing_activation_pct": resolved_trailing_activation_pct,
+            "trailing_distance_pct": resolved_trailing_distance_pct,
+            "breakeven_activation_pct": resolved_breakeven_activation_pct,
+            "breakeven_buffer_pct": float(breakeven_buffer_pct),
+            "tight_trailing_activation_pct": resolved_tight_trailing_activation_pct,
+            "tight_trailing_distance_pct": float(tight_trailing_distance_pct),
+        }
+        if "breakout_buffer_pct" in options:
+            profile["breakout_buffer_pct"] = float(breakout_buffer_pct)
+        if "min_range_pct" in options:
+            profile["min_range_pct"] = float(min_range_pct)
+        if "cooldown_bars_after_exit" in options:
+            profile["cooldown_bars_after_exit"] = float(cooldown_bars_after_exit)
+        if optimize_chandelier:
+            profile["chandelier_period"] = resolved_chandelier_period
+            profile["chandelier_multiplier"] = resolved_chandelier_multiplier
+        profiles.append(profile)
     return profiles
 
 
@@ -1079,13 +1813,13 @@ def generate_optimization_grid(
         fallback_strategy_name="frama_cross",
     )
     if resolved_strategy == "ema_cross_volume":
-        return generate_ema_optimization_grid()
+        return generate_ema_optimization_grid(interval=interval)
     if resolved_strategy == "ema_band_rejection":
-        return generate_ema_band_rejection_optimization_grid()
+        return generate_ema_band_rejection_optimization_grid(interval=interval)
     if resolved_strategy == "frama_cross":
-        return generate_frama_optimization_grid()
+        return generate_frama_optimization_grid(interval=interval)
     if resolved_strategy == "dual_thrust":
-        return generate_dual_thrust_optimization_grid(symbol=symbol)
+        return generate_dual_thrust_optimization_grid(symbol=symbol, interval=interval)
     return generate_trade_management_optimization_grid()
 
 
@@ -1315,20 +2049,92 @@ def _required_candle_count_for_profile(
     use_setup_gate: bool = False,
 ) -> int:
     strategy_name = _validate_strategy_name(strategy_name)
+    profile_chandelier_period = int(
+        float(
+            strategy_profile.get(
+                "chandelier_period",
+                settings.trading.chandelier_period,
+            )
+            or settings.trading.chandelier_period
+        )
+    )
+    if strategy_name == "ema_cross_volume":
+        ema_slow = int(float(strategy_profile.get("ema_slow_period", settings.strategy.ema_slow_period) or settings.strategy.ema_slow_period))
+        cross_confirmation_bars = int(
+            float(strategy_profile.get("cross_confirmation_bars", 0.0) or 0.0)
+        )
+        required_count = max(
+            ema_slow + cross_confirmation_bars + 2,
+            int(settings.strategy.volume_sma_period) + 2,
+            profile_chandelier_period + 2,
+        )
+        if use_setup_gate:
+            required_count = max(
+                required_count,
+                SmartSetupGate.required_candle_count(),
+                SETUP_GATE_SETTLED_WARMUP_CANDLES,
+            )
+        return int(required_count)
     if strategy_name == "ema_band_rejection":
         ema_slow = int(float(strategy_profile.get("ema_slow", 20.0) or 20.0))
         slope_lookback = int(float(strategy_profile.get("slope_lookback", 5.0) or 5.0))
         rsi_length = int(float(strategy_profile.get("rsi_length", 14.0) or 14.0))
         volume_ma_length = int(float(strategy_profile.get("volume_ma_length", 20.0) or 20.0))
         atr_length = int(float(strategy_profile.get("atr_length", 14.0) or 14.0))
+        trend_persistence_bars = int(
+            float(strategy_profile.get("trend_persistence_bars", 1.0) or 1.0)
+        )
+        max_pullback_bars = int(float(strategy_profile.get("max_pullback_bars", 0.0) or 0.0))
         required_count = max(
-            ema_slow + slope_lookback + 2,
+            ema_slow + slope_lookback + trend_persistence_bars + max_pullback_bars + 2,
             rsi_length + 2,
             volume_ma_length + 2,
             atr_length + 2,
             64,
-            int(settings.trading.chandelier_period) + 2,
+            profile_chandelier_period + 2,
         )
+        if use_setup_gate:
+            required_count = max(
+                required_count,
+                SmartSetupGate.required_candle_count(),
+                SETUP_GATE_SETTLED_WARMUP_CANDLES,
+            )
+        return int(required_count)
+    if strategy_name == "frama_cross":
+        frama_slow = int(
+            float(strategy_profile.get("frama_slow_period", settings.strategy.frama_slow_period) or settings.strategy.frama_slow_period)
+        )
+        post_cross_confirmation_bars = int(
+            float(strategy_profile.get("post_cross_confirmation_bars", 0.0) or 0.0)
+        )
+        required_count = max(
+            frama_slow + post_cross_confirmation_bars + 2,
+            profile_chandelier_period + 2,
+            6,
+        )
+        if bool(float(strategy_profile.get("use_late_entry_guard", 0.0) or 0.0) >= 0.5):
+            required_count = max(required_count, 20)
+        if use_setup_gate:
+            required_count = max(
+                required_count,
+                SmartSetupGate.required_candle_count(),
+                SETUP_GATE_SETTLED_WARMUP_CANDLES,
+            )
+        return int(required_count)
+    if strategy_name == "dual_thrust":
+        dual_thrust_period = int(
+            float(strategy_profile.get("dual_thrust_period", settings.strategy.dual_thrust_period) or settings.strategy.dual_thrust_period)
+        )
+        cooldown_bars_after_exit = int(
+            float(strategy_profile.get("cooldown_bars_after_exit", 0.0) or 0.0)
+        )
+        required_count = max(
+            dual_thrust_period + cooldown_bars_after_exit + 2,
+            profile_chandelier_period + 2,
+            6,
+        )
+        if bool(float(strategy_profile.get("use_late_entry_guard", 0.0) or 0.0) >= 0.5):
+            required_count = max(required_count, 20)
         if use_setup_gate:
             required_count = max(
                 required_count,
@@ -1390,6 +2196,15 @@ def _clear_strategy_indicator_cache(candles_dataframe: pd.DataFrame | None) -> N
         "ema_short_entry",
         "frama_long_entry",
         "frama_short_entry",
+        "frama_move_last_1_bar_pct",
+        "frama_move_last_2_bars_pct",
+        "frama_move_last_3_bars_pct",
+        "frama_distance_to_reference_pct",
+        "frama_atr_extension_mult",
+        "frama_late_entry_guard_enabled",
+        "frama_late_entry_guard_blocked",
+        "frama_late_entry_guard_block_reason",
+        "frama_late_entry_guard_blocked_signals",
         "dual_range",
         "dual_buy_line",
         "dual_sell_line",
@@ -1397,6 +2212,17 @@ def _clear_strategy_indicator_cache(candles_dataframe: pd.DataFrame | None) -> N
         "dual_short_entry",
         "dual_long_exit",
         "dual_short_exit",
+        "dual_move_last_1_bar_pct",
+        "dual_move_last_2_bars_pct",
+        "dual_move_last_3_bars_pct",
+        "dual_distance_to_reference_pct",
+        "dual_atr_extension_mult",
+        "dual_breakout_candle_body_pct",
+        "dual_breakout_candle_range_atr_mult",
+        "dual_late_entry_guard_enabled",
+        "dual_late_entry_guard_blocked",
+        "dual_late_entry_guard_block_reason",
+        "dual_late_entry_guard_blocked_signals",
         "ema_band_ema_fast",
         "ema_band_ema_mid",
         "ema_band_ema_slow",
@@ -1423,6 +2249,18 @@ def _clear_strategy_indicator_cache(candles_dataframe: pd.DataFrame | None) -> N
         "ema_band_signal_direction",
         "ema_band_signal_cooldown_bars",
         "ema_band_cooldown_blocked_signals",
+        "ema_band_move_last_1_bar_pct",
+        "ema_band_move_last_2_bars_pct",
+        "ema_band_move_last_3_bars_pct",
+        "ema_band_distance_fast_ref_pct",
+        "ema_band_distance_mid_ref_pct",
+        "ema_band_distance_to_reference_pct",
+        "ema_band_atr_extension_mult",
+        "ema_band_late_entry_guard_enabled",
+        "ema_band_late_entry_guard_blocked",
+        "ema_band_late_entry_guard_block_reason",
+        "ema_band_late_entry_guard_blocked_signals",
+        "ema_band_pullback_reentry_enabled",
     )
     for column_name in indicator_columns:
         if column_name in candles_dataframe.columns:
@@ -1555,6 +2393,24 @@ def _create_optimizer_pool(
         ),
         maxtasksperchild=OPTIMIZER_WORKER_MAX_TASKS_PER_CHILD,
     )
+
+
+def _estimate_strategy_signal_cache_bytes(
+    *,
+    strategy_name: str,
+    candle_count: int,
+    variant_count: int,
+) -> int:
+    if candle_count <= 0 or variant_count <= 0:
+        return 0
+    # Approximate packed payload footprint per (variant, candle).
+    # frama_cross / dual_thrust / ema_cross_volume: signals only (int8).
+    # ema_band_rejection: signal + long_exit + short_exit + dynamic_stop(float32).
+    series_multiplier = 1
+    if strategy_name == "ema_band_rejection":
+        series_multiplier = 7
+    estimated = int(candle_count) * int(variant_count) * int(series_multiplier)
+    return max(0, estimated)
 
 
 def _finalize_signal_series(
@@ -1737,9 +2593,34 @@ def _build_vectorized_strategy_cache_payload(
     raw_signal_override: Sequence[int] | None = None,
 ) -> dict[str, object] | None:
     effective_strategy_profile = strategy_profile
+    profile_values = {} if strategy_profile is None else dict(strategy_profile)
+
+    def _profile_int(field_name: str, default_value: int) -> int:
+        with suppress(Exception):
+            return int(float(profile_values.get(field_name, default_value) or default_value))
+        return int(default_value)
+
+    def _profile_float(field_name: str, default_value: float) -> float:
+        with suppress(Exception):
+            return float(profile_values.get(field_name, default_value) or default_value)
+        return float(default_value)
+
+    def _profile_flag(field_name: str, default_value: bool = False) -> bool:
+        raw_value = profile_values.get(field_name, default_value)
+        if isinstance(raw_value, bool):
+            return bool(raw_value)
+        with suppress(Exception):
+            return bool(float(raw_value) >= 0.5)
+        return bool(default_value)
+
     if strategy_name == "ema_cross_volume":
         with _temporary_strategy_profile(effective_strategy_profile, candles_df):
-            working_df = build_ema_cross_volume_signal_frame(candles_df)
+            working_df = build_ema_cross_volume_signal_frame(
+                candles_df,
+                min_ema_gap_pct=_profile_float("min_ema_gap_pct", 0.0),
+                cross_confirmation_bars=_profile_int("cross_confirmation_bars", 0),
+                max_price_extension_pct=_profile_float("max_price_extension_pct", 0.0),
+            )
             raw_signals = (
                 working_df["ema_long_entry"].astype("int8")
                 - working_df["ema_short_entry"].astype("int8")
@@ -1762,26 +2643,6 @@ def _build_vectorized_strategy_cache_payload(
         return payload
 
     if strategy_name == "ema_band_rejection":
-        profile_values = {} if strategy_profile is None else dict(strategy_profile)
-
-        def _profile_int(field_name: str, default_value: int) -> int:
-            with suppress(Exception):
-                return int(float(profile_values.get(field_name, default_value) or default_value))
-            return int(default_value)
-
-        def _profile_float(field_name: str, default_value: float) -> float:
-            with suppress(Exception):
-                return float(profile_values.get(field_name, default_value) or default_value)
-            return float(default_value)
-
-        def _profile_flag(field_name: str, default_value: bool = False) -> bool:
-            raw_value = profile_values.get(field_name, default_value)
-            if isinstance(raw_value, bool):
-                return bool(raw_value)
-            with suppress(Exception):
-                return bool(float(raw_value) >= 0.5)
-            return bool(default_value)
-
         working_df = build_ema_band_rejection_signal_frame(
             candles_df,
             ema_fast=_profile_int("ema_fast", 5),
@@ -1812,6 +2673,53 @@ def _build_vectorized_strategy_cache_payload(
             atr_length=_profile_int("atr_length", 14),
             atr_stop_buffer_mult=_profile_float("atr_stop_buffer_mult", 0.5),
             signal_cooldown_bars=_profile_int("signal_cooldown_bars", 0),
+            trend_persistence_bars=_profile_int("trend_persistence_bars", 1),
+            max_pullback_bars=_profile_int("max_pullback_bars", 0),
+            entry_offset_pct=_profile_float("entry_offset_pct", 0.0),
+            use_late_entry_guard=_profile_flag(
+                "use_late_entry_guard",
+                bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+            ),
+            late_entry_max_move_1_bar_pct=_profile_float(
+                "late_entry_max_move_1_bar_pct",
+                float(getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)),
+            ),
+            late_entry_max_move_2_bars_pct=_profile_float(
+                "late_entry_max_move_2_bars_pct",
+                float(getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)),
+            ),
+            late_entry_max_move_3_bars_pct=_profile_float(
+                "late_entry_max_move_3_bars_pct",
+                float(getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)),
+            ),
+            late_entry_max_distance_ref_pct=_profile_float(
+                "late_entry_max_distance_ref_pct",
+                float(getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)),
+            ),
+            late_entry_max_distance_fast_ref_pct=_profile_float(
+                "late_entry_max_distance_fast_ref_pct",
+                float(getattr(settings.strategy, "late_entry_max_distance_fast_ref_pct", 0.0)),
+            ),
+            late_entry_max_distance_mid_ref_pct=_profile_float(
+                "late_entry_max_distance_mid_ref_pct",
+                float(getattr(settings.strategy, "late_entry_max_distance_mid_ref_pct", 0.0)),
+            ),
+            late_entry_max_atr_mult=_profile_float(
+                "late_entry_max_atr_mult",
+                float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+            ),
+            use_pullback_reentry=_profile_flag(
+                "use_pullback_reentry",
+                bool(getattr(settings.strategy, "use_pullback_reentry", False)),
+            ),
+            pullback_reentry_min_touch=_profile_float(
+                "pullback_reentry_min_touch",
+                float(getattr(settings.strategy, "pullback_reentry_min_touch", 0.0)),
+            ),
+            pullback_reentry_reconfirm_required=_profile_flag(
+                "pullback_reentry_reconfirm_required",
+                bool(getattr(settings.strategy, "pullback_reentry_reconfirm_required", False)),
+            ),
         )
 
         if raw_signal_override is None:
@@ -1924,6 +2832,64 @@ def _build_vectorized_strategy_cache_payload(
                     errors="coerce",
                 ).fillna(0.0).max()
             )
+        late_entry_blocked_count = 0
+        with suppress(Exception):
+            late_entry_blocked_count = int(
+                pd.to_numeric(
+                    working_df.get("ema_band_late_entry_guard_blocked"),
+                    errors="coerce",
+                ).fillna(0.0).sum()
+            )
+        latest_blocker_reason = ""
+        latest_late_entry_guard_blocked = False
+        latest_move_last_1_bar_pct = 0.0
+        latest_move_last_2_bars_pct = 0.0
+        latest_move_last_3_bars_pct = 0.0
+        latest_distance_to_reference_pct = 0.0
+        latest_atr_extension_mult = 0.0
+        with suppress(Exception):
+            latest_blocker_reason = str(
+                working_df.get("ema_band_late_entry_guard_block_reason").iloc[-1] or ""
+            )
+        with suppress(Exception):
+            latest_late_entry_guard_blocked = bool(
+                working_df.get("ema_band_late_entry_guard_blocked").iloc[-1]
+            )
+        with suppress(Exception):
+            latest_move_last_1_bar_pct = float(
+                pd.to_numeric(
+                    working_df.get("ema_band_move_last_1_bar_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_move_last_2_bars_pct = float(
+                pd.to_numeric(
+                    working_df.get("ema_band_move_last_2_bars_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_move_last_3_bars_pct = float(
+                pd.to_numeric(
+                    working_df.get("ema_band_move_last_3_bars_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_distance_to_reference_pct = float(
+                pd.to_numeric(
+                    working_df.get("ema_band_distance_to_reference_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_atr_extension_mult = float(
+                pd.to_numeric(
+                    working_df.get("ema_band_atr_extension_mult"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
 
         return {
             "signals": signals,
@@ -1992,7 +2958,68 @@ def _build_vectorized_strategy_cache_payload(
                 "atr_length": _profile_int("atr_length", 14),
                 "atr_stop_buffer_mult": _profile_float("atr_stop_buffer_mult", 0.5),
                 "signal_cooldown_bars": _profile_int("signal_cooldown_bars", 0),
+                "trend_persistence_bars": _profile_int("trend_persistence_bars", 1),
+                "max_pullback_bars": _profile_int("max_pullback_bars", 0),
+                "entry_offset_pct": _profile_float("entry_offset_pct", 0.0),
                 "cooldown_blocked_signals": int(cooldown_blocked_signals),
+                "late_entry_guard_enabled": int(
+                    _profile_flag(
+                        "use_late_entry_guard",
+                        bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+                    )
+                ),
+                "late_entry_max_move_1_bar_pct": _profile_float(
+                    "late_entry_max_move_1_bar_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)),
+                ),
+                "late_entry_max_move_2_bars_pct": _profile_float(
+                    "late_entry_max_move_2_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)),
+                ),
+                "late_entry_max_move_3_bars_pct": _profile_float(
+                    "late_entry_max_move_3_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)),
+                ),
+                "late_entry_max_distance_ref_pct": _profile_float(
+                    "late_entry_max_distance_ref_pct",
+                    float(getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)),
+                ),
+                "late_entry_max_distance_fast_ref_pct": _profile_float(
+                    "late_entry_max_distance_fast_ref_pct",
+                    float(getattr(settings.strategy, "late_entry_max_distance_fast_ref_pct", 0.0)),
+                ),
+                "late_entry_max_distance_mid_ref_pct": _profile_float(
+                    "late_entry_max_distance_mid_ref_pct",
+                    float(getattr(settings.strategy, "late_entry_max_distance_mid_ref_pct", 0.0)),
+                ),
+                "late_entry_max_atr_mult": _profile_float(
+                    "late_entry_max_atr_mult",
+                    float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+                ),
+                "use_pullback_reentry": int(
+                    _profile_flag(
+                        "use_pullback_reentry",
+                        bool(getattr(settings.strategy, "use_pullback_reentry", False)),
+                    )
+                ),
+                "pullback_reentry_min_touch": _profile_float(
+                    "pullback_reentry_min_touch",
+                    float(getattr(settings.strategy, "pullback_reentry_min_touch", 0.0)),
+                ),
+                "pullback_reentry_reconfirm_required": int(
+                    _profile_flag(
+                        "pullback_reentry_reconfirm_required",
+                        bool(getattr(settings.strategy, "pullback_reentry_reconfirm_required", False)),
+                    )
+                ),
+                "late_entry_guard_blocked_count": int(late_entry_blocked_count),
+                "latest_late_entry_guard_blocked": int(bool(latest_late_entry_guard_blocked)),
+                "latest_blocker_reason": str(latest_blocker_reason),
+                "latest_move_last_1_bar_pct": float(latest_move_last_1_bar_pct),
+                "latest_move_last_2_bars_pct": float(latest_move_last_2_bars_pct),
+                "latest_move_last_3_bars_pct": float(latest_move_last_3_bars_pct),
+                "latest_distance_to_reference_pct": float(latest_distance_to_reference_pct),
+                "latest_atr_extension_mult": float(latest_atr_extension_mult),
                 "dynamic_stop_loss_entry_pct_min": float(dynamic_stop_min),
                 "dynamic_stop_loss_entry_pct_max": float(dynamic_stop_max),
                 "dynamic_stop_loss_entry_pct_mean": float(dynamic_stop_mean),
@@ -2005,7 +3032,36 @@ def _build_vectorized_strategy_cache_payload(
 
     if strategy_name == "frama_cross":
         with _temporary_strategy_profile(effective_strategy_profile, candles_df):
-            working_df = build_frama_cross_signal_frame(candles_df)
+            working_df = build_frama_cross_signal_frame(
+                candles_df,
+                min_frama_gap_pct=_profile_float("min_frama_gap_pct", 0.05),
+                min_frama_slope_pct=_profile_float("min_frama_slope_pct", 0.0),
+                post_cross_confirmation_bars=_profile_int("post_cross_confirmation_bars", 0),
+                use_late_entry_guard=_profile_flag(
+                    "use_late_entry_guard",
+                    bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+                ),
+                late_entry_max_move_1_bar_pct=_profile_float(
+                    "late_entry_max_move_1_bar_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)),
+                ),
+                late_entry_max_move_2_bars_pct=_profile_float(
+                    "late_entry_max_move_2_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)),
+                ),
+                late_entry_max_move_3_bars_pct=_profile_float(
+                    "late_entry_max_move_3_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)),
+                ),
+                late_entry_max_distance_ref_pct=_profile_float(
+                    "late_entry_max_distance_ref_pct",
+                    float(getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)),
+                ),
+                late_entry_max_atr_mult=_profile_float(
+                    "late_entry_max_atr_mult",
+                    float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+                ),
+            )
             raw_signals = (
                 working_df["frama_long_entry"].astype("int8")
                 - working_df["frama_short_entry"].astype("int8")
@@ -2018,16 +3074,147 @@ def _build_vectorized_strategy_cache_payload(
             strategy_name=strategy_name,
             regime_mask=regime_mask,
         )
+        latest_blocker_reason = ""
+        latest_late_entry_guard_blocked = False
+        latest_move_last_1_bar_pct = 0.0
+        latest_move_last_2_bars_pct = 0.0
+        latest_move_last_3_bars_pct = 0.0
+        latest_distance_to_reference_pct = 0.0
+        latest_atr_extension_mult = 0.0
+        late_entry_blocked_count = 0
+        with suppress(Exception):
+            latest_blocker_reason = str(
+                working_df.get("frama_late_entry_guard_block_reason").iloc[-1] or ""
+            )
+        with suppress(Exception):
+            latest_late_entry_guard_blocked = bool(
+                working_df.get("frama_late_entry_guard_blocked").iloc[-1]
+            )
+        with suppress(Exception):
+            late_entry_blocked_count = int(
+                pd.to_numeric(
+                    working_df.get("frama_late_entry_guard_blocked"),
+                    errors="coerce",
+                ).fillna(0.0).sum()
+            )
+        with suppress(Exception):
+            latest_move_last_1_bar_pct = float(
+                pd.to_numeric(
+                    working_df.get("frama_move_last_1_bar_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_move_last_2_bars_pct = float(
+                pd.to_numeric(
+                    working_df.get("frama_move_last_2_bars_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_move_last_3_bars_pct = float(
+                pd.to_numeric(
+                    working_df.get("frama_move_last_3_bars_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_distance_to_reference_pct = float(
+                pd.to_numeric(
+                    working_df.get("frama_distance_to_reference_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_atr_extension_mult = float(
+                pd.to_numeric(
+                    working_df.get("frama_atr_extension_mult"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
         return {
             "signals": signals,
             "total_signals": total_signals,
             "approved_signals": approved_signals,
             "blocked_signals": blocked_signals,
+            "strategy_diagnostics": {
+                "late_entry_guard_enabled": int(
+                    _profile_flag(
+                        "use_late_entry_guard",
+                        bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+                    )
+                ),
+                "late_entry_max_move_1_bar_pct": _profile_float(
+                    "late_entry_max_move_1_bar_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)),
+                ),
+                "late_entry_max_move_2_bars_pct": _profile_float(
+                    "late_entry_max_move_2_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)),
+                ),
+                "late_entry_max_move_3_bars_pct": _profile_float(
+                    "late_entry_max_move_3_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)),
+                ),
+                "late_entry_max_distance_ref_pct": _profile_float(
+                    "late_entry_max_distance_ref_pct",
+                    float(getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)),
+                ),
+                "late_entry_max_atr_mult": _profile_float(
+                    "late_entry_max_atr_mult",
+                    float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+                ),
+                "late_entry_guard_blocked_count": int(late_entry_blocked_count),
+                "latest_late_entry_guard_blocked": int(bool(latest_late_entry_guard_blocked)),
+                "latest_blocker_reason": str(latest_blocker_reason),
+                "latest_move_last_1_bar_pct": float(latest_move_last_1_bar_pct),
+                "latest_move_last_2_bars_pct": float(latest_move_last_2_bars_pct),
+                "latest_move_last_3_bars_pct": float(latest_move_last_3_bars_pct),
+                "latest_distance_to_reference_pct": float(latest_distance_to_reference_pct),
+                "latest_atr_extension_mult": float(latest_atr_extension_mult),
+            },
         }
 
     if strategy_name == "dual_thrust":
         with _temporary_strategy_profile(strategy_profile, candles_df):
-            working_df = build_dual_thrust_signal_frame(candles_df)
+            working_df = build_dual_thrust_signal_frame(
+                candles_df,
+                breakout_buffer_pct=_profile_float("breakout_buffer_pct", 0.0),
+                min_range_pct=_profile_float("min_range_pct", 0.0),
+                cooldown_bars_after_exit=_profile_int("cooldown_bars_after_exit", 0),
+                use_late_entry_guard=_profile_flag(
+                    "use_late_entry_guard",
+                    bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+                ),
+                late_entry_max_move_1_bar_pct=_profile_float(
+                    "late_entry_max_move_1_bar_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)),
+                ),
+                late_entry_max_move_2_bars_pct=_profile_float(
+                    "late_entry_max_move_2_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)),
+                ),
+                late_entry_max_move_3_bars_pct=_profile_float(
+                    "late_entry_max_move_3_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)),
+                ),
+                late_entry_max_distance_ref_pct=_profile_float(
+                    "late_entry_max_distance_ref_pct",
+                    float(getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)),
+                ),
+                late_entry_max_atr_mult=_profile_float(
+                    "late_entry_max_atr_mult",
+                    float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+                ),
+                max_breakout_candle_body_pct=_profile_float(
+                    "max_breakout_candle_body_pct",
+                    float(getattr(settings.strategy, "max_breakout_candle_body_pct", 0.0)),
+                ),
+                max_breakout_candle_range_atr_mult=_profile_float(
+                    "max_breakout_candle_range_atr_mult",
+                    float(getattr(settings.strategy, "max_breakout_candle_range_atr_mult", 0.0)),
+                ),
+            )
             raw_signals = (
                 working_df["dual_long_entry"].astype("int8")
                 - working_df["dual_short_entry"].astype("int8")
@@ -2042,6 +3229,64 @@ def _build_vectorized_strategy_cache_payload(
             strategy_name=strategy_name,
             regime_mask=regime_mask,
         )
+        latest_blocker_reason = ""
+        latest_late_entry_guard_blocked = False
+        latest_move_last_1_bar_pct = 0.0
+        latest_move_last_2_bars_pct = 0.0
+        latest_move_last_3_bars_pct = 0.0
+        latest_distance_to_reference_pct = 0.0
+        latest_atr_extension_mult = 0.0
+        late_entry_blocked_count = 0
+        with suppress(Exception):
+            latest_blocker_reason = str(
+                working_df.get("dual_late_entry_guard_block_reason").iloc[-1] or ""
+            )
+        with suppress(Exception):
+            latest_late_entry_guard_blocked = bool(
+                working_df.get("dual_late_entry_guard_blocked").iloc[-1]
+            )
+        with suppress(Exception):
+            late_entry_blocked_count = int(
+                pd.to_numeric(
+                    working_df.get("dual_late_entry_guard_blocked"),
+                    errors="coerce",
+                ).fillna(0.0).sum()
+            )
+        with suppress(Exception):
+            latest_move_last_1_bar_pct = float(
+                pd.to_numeric(
+                    working_df.get("dual_move_last_1_bar_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_move_last_2_bars_pct = float(
+                pd.to_numeric(
+                    working_df.get("dual_move_last_2_bars_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_move_last_3_bars_pct = float(
+                pd.to_numeric(
+                    working_df.get("dual_move_last_3_bars_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_distance_to_reference_pct = float(
+                pd.to_numeric(
+                    working_df.get("dual_distance_to_reference_pct"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
+        with suppress(Exception):
+            latest_atr_extension_mult = float(
+                pd.to_numeric(
+                    working_df.get("dual_atr_extension_mult"),
+                    errors="coerce",
+                ).iloc[-1]
+            )
         return {
             "signals": signals,
             "total_signals": total_signals,
@@ -2049,6 +3294,50 @@ def _build_vectorized_strategy_cache_payload(
             "blocked_signals": blocked_signals,
             "precomputed_long_exit_flags": long_exit_flags,
             "precomputed_short_exit_flags": short_exit_flags,
+            "strategy_diagnostics": {
+                "late_entry_guard_enabled": int(
+                    _profile_flag(
+                        "use_late_entry_guard",
+                        bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+                    )
+                ),
+                "late_entry_max_move_1_bar_pct": _profile_float(
+                    "late_entry_max_move_1_bar_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)),
+                ),
+                "late_entry_max_move_2_bars_pct": _profile_float(
+                    "late_entry_max_move_2_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)),
+                ),
+                "late_entry_max_move_3_bars_pct": _profile_float(
+                    "late_entry_max_move_3_bars_pct",
+                    float(getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)),
+                ),
+                "late_entry_max_distance_ref_pct": _profile_float(
+                    "late_entry_max_distance_ref_pct",
+                    float(getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)),
+                ),
+                "late_entry_max_atr_mult": _profile_float(
+                    "late_entry_max_atr_mult",
+                    float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+                ),
+                "max_breakout_candle_body_pct": _profile_float(
+                    "max_breakout_candle_body_pct",
+                    float(getattr(settings.strategy, "max_breakout_candle_body_pct", 0.0)),
+                ),
+                "max_breakout_candle_range_atr_mult": _profile_float(
+                    "max_breakout_candle_range_atr_mult",
+                    float(getattr(settings.strategy, "max_breakout_candle_range_atr_mult", 0.0)),
+                ),
+                "late_entry_guard_blocked_count": int(late_entry_blocked_count),
+                "latest_late_entry_guard_blocked": int(bool(latest_late_entry_guard_blocked)),
+                "latest_blocker_reason": str(latest_blocker_reason),
+                "latest_move_last_1_bar_pct": float(latest_move_last_1_bar_pct),
+                "latest_move_last_2_bars_pct": float(latest_move_last_2_bars_pct),
+                "latest_move_last_3_bars_pct": float(latest_move_last_3_bars_pct),
+                "latest_distance_to_reference_pct": float(latest_distance_to_reference_pct),
+                "latest_atr_extension_mult": float(latest_atr_extension_mult),
+            },
         }
 
     return None
@@ -2077,6 +3366,19 @@ def _temporary_strategy_profile(
         "frama_fast_period": settings.strategy.frama_fast_period,
         "frama_slow_period": settings.strategy.frama_slow_period,
         "volume_multiplier": settings.strategy.volume_multiplier,
+        "use_late_entry_guard": settings.strategy.use_late_entry_guard,
+        "late_entry_max_move_1_bar_pct": settings.strategy.late_entry_max_move_1_bar_pct,
+        "late_entry_max_move_2_bars_pct": settings.strategy.late_entry_max_move_2_bars_pct,
+        "late_entry_max_move_3_bars_pct": settings.strategy.late_entry_max_move_3_bars_pct,
+        "late_entry_max_distance_ref_pct": settings.strategy.late_entry_max_distance_ref_pct,
+        "late_entry_max_distance_fast_ref_pct": settings.strategy.late_entry_max_distance_fast_ref_pct,
+        "late_entry_max_distance_mid_ref_pct": settings.strategy.late_entry_max_distance_mid_ref_pct,
+        "late_entry_max_atr_mult": settings.strategy.late_entry_max_atr_mult,
+        "use_pullback_reentry": settings.strategy.use_pullback_reentry,
+        "pullback_reentry_min_touch": settings.strategy.pullback_reentry_min_touch,
+        "pullback_reentry_reconfirm_required": settings.strategy.pullback_reentry_reconfirm_required,
+        "max_breakout_candle_body_pct": settings.strategy.max_breakout_candle_body_pct,
+        "max_breakout_candle_range_atr_mult": settings.strategy.max_breakout_candle_range_atr_mult,
     }
     with _OPTIMIZER_SETTINGS_LOCK:
         if candles_dataframe is not None:
@@ -2293,6 +3595,87 @@ def _format_runtime_settings_log(
     )
 
 
+def _format_hmm_non_convergence_detail(detection: object) -> str:
+    def _safe_int(value: object, default: int = -1) -> int:
+        if value is None:
+            return int(default)
+        with suppress(Exception):
+            return int(value)
+        return int(default)
+
+    events = getattr(detection, "non_convergence_events", None)
+    if not isinstance(events, (list, tuple)) or not events:
+        return "window_context=n/a"
+    latest = events[-1]
+    if not isinstance(latest, Mapping):
+        return "window_context=n/a"
+    window_index = _safe_int(latest.get("window_index", -1))
+    train_start = _safe_int(latest.get("train_start", -1))
+    train_end = _safe_int(latest.get("train_end", -1))
+    apply_start = _safe_int(latest.get("apply_start", -1))
+    apply_end = _safe_int(latest.get("apply_end", -1))
+    previous_score = latest.get("previous_score")
+    current_score = latest.get("current_score")
+    delta_score = latest.get("delta_score")
+    previous_text = "n/a" if previous_score is None else f"{float(previous_score):.6f}"
+    current_text = "n/a" if current_score is None else f"{float(current_score):.6f}"
+    delta_text = "n/a" if delta_score is None else f"{float(delta_score):.6f}"
+    return (
+        f"window={window_index} "
+        f"train=[{train_start}:{train_end}) "
+        f"apply=[{apply_start}:{apply_end}) "
+        f"prev={previous_text} curr={current_text} delta={delta_text}"
+    )
+
+
+def _format_hmm_warning_detail(
+    detection: object,
+    *,
+    warning_kind: str | None = None,
+) -> str:
+    def _safe_int(value: object, default: int = -1) -> int:
+        if value is None:
+            return int(default)
+        with suppress(Exception):
+            return int(value)
+        return int(default)
+
+    events = getattr(detection, "warning_events", None)
+    if not isinstance(events, (list, tuple)) or not events:
+        return "warning_context=n/a"
+    filtered_events = [
+        event
+        for event in events
+        if isinstance(event, Mapping)
+        and (
+            warning_kind is None
+            or str(event.get("warning_kind", "")).strip().lower()
+            == str(warning_kind).strip().lower()
+        )
+    ]
+    if not filtered_events:
+        return "warning_context=n/a"
+    latest = filtered_events[-1]
+    warning_kind_text = str(latest.get("warning_kind", "unknown")).strip() or "unknown"
+    window_index = _safe_int(latest.get("window_index", -1))
+    train_start = _safe_int(latest.get("train_start", -1))
+    train_end = _safe_int(latest.get("train_end", -1))
+    apply_start = _safe_int(latest.get("apply_start", -1))
+    apply_end = _safe_int(latest.get("apply_end", -1))
+    message_text = str(latest.get("warning_message", "") or "").strip()
+    if len(message_text) > 220:
+        message_text = f"{message_text[:217]}..."
+    if not message_text:
+        message_text = "n/a"
+    return (
+        f"kind={warning_kind_text} "
+        f"window={window_index} "
+        f"train=[{train_start}:{train_end}) "
+        f"apply=[{apply_start}:{apply_end}) "
+        f"message={message_text}"
+    )
+
+
 def _trace_datetime_text(value: object) -> str:
     if value is None:
         return TRACE_VALUE_UNAVAILABLE
@@ -2462,14 +3845,20 @@ def _extract_profile_from_summary(summary: dict[str, float]) -> OptimizationProf
         key: float(value)
         for key, value in summary.items()
         if key not in OPTIMIZATION_METRIC_FIELDS
-        and key not in {"chandelier_period", "chandelier_multiplier", "chandelier_mult"}
     }
 
 
 def _strategy_variant_field_names(strategy_name: str) -> tuple[str, ...]:
     strategy_name = _validate_strategy_name(strategy_name)
     if strategy_name == "ema_cross_volume":
-        return ("ema_fast_period", "ema_slow_period", "volume_multiplier")
+        return (
+            "ema_fast_period",
+            "ema_slow_period",
+            "volume_multiplier",
+            "min_ema_gap_pct",
+            "cross_confirmation_bars",
+            "max_price_extension_pct",
+        )
     if strategy_name == "ema_band_rejection":
         return (
             "ema_fast",
@@ -2494,11 +3883,53 @@ def _strategy_variant_field_names(strategy_name: str) -> tuple[str, ...]:
             "atr_length",
             "atr_stop_buffer_mult",
             "signal_cooldown_bars",
+            "trend_persistence_bars",
+            "max_pullback_bars",
+            "entry_offset_pct",
+            "use_late_entry_guard",
+            "late_entry_max_move_1_bar_pct",
+            "late_entry_max_move_2_bars_pct",
+            "late_entry_max_move_3_bars_pct",
+            "late_entry_max_distance_ref_pct",
+            "late_entry_max_distance_fast_ref_pct",
+            "late_entry_max_distance_mid_ref_pct",
+            "late_entry_max_atr_mult",
+            "use_pullback_reentry",
+            "pullback_reentry_min_touch",
+            "pullback_reentry_reconfirm_required",
         )
     if strategy_name == "frama_cross":
-        return ("frama_fast_period", "frama_slow_period", "volume_multiplier")
+        return (
+            "frama_fast_period",
+            "frama_slow_period",
+            "volume_multiplier",
+            "min_frama_gap_pct",
+            "min_frama_slope_pct",
+            "post_cross_confirmation_bars",
+            "use_late_entry_guard",
+            "late_entry_max_move_1_bar_pct",
+            "late_entry_max_move_2_bars_pct",
+            "late_entry_max_move_3_bars_pct",
+            "late_entry_max_distance_ref_pct",
+            "late_entry_max_atr_mult",
+        )
     if strategy_name == "dual_thrust":
-        return ("dual_thrust_period", "dual_thrust_k1", "dual_thrust_k2")
+        return (
+            "dual_thrust_period",
+            "dual_thrust_k1",
+            "dual_thrust_k2",
+            "breakout_buffer_pct",
+            "min_range_pct",
+            "cooldown_bars_after_exit",
+            "use_late_entry_guard",
+            "late_entry_max_move_1_bar_pct",
+            "late_entry_max_move_2_bars_pct",
+            "late_entry_max_move_3_bars_pct",
+            "late_entry_max_distance_ref_pct",
+            "late_entry_max_atr_mult",
+            "max_breakout_candle_body_pct",
+            "max_breakout_candle_range_atr_mult",
+        )
     return ()
 
 
@@ -2770,6 +4201,11 @@ def _format_profile_dict(profile: OptimizationProfile) -> str:
         "ema_length",
         "frama_fast_period",
         "frama_slow_period",
+        "post_cross_confirmation_bars",
+        "cross_confirmation_bars",
+        "cooldown_bars_after_exit",
+        "trend_persistence_bars",
+        "max_pullback_bars",
     }
     for key, value in profile.items():
         numeric_value = float(value)
@@ -3010,6 +4446,9 @@ def _strategy_cache_key(strategy_name: str, strategy_profile: OptimizationProfil
             int(strategy_profile.get("ema_fast_period", 0.0)),
             int(strategy_profile.get("ema_slow_period", 0.0)),
             float(strategy_profile.get("volume_multiplier", 0.0)),
+            float(strategy_profile.get("min_ema_gap_pct", 0.0)),
+            int(strategy_profile.get("cross_confirmation_bars", 0.0)),
+            float(strategy_profile.get("max_price_extension_pct", 0.0)),
         )
     if strategy_name == "ema_band_rejection":
         return (
@@ -3035,18 +4474,52 @@ def _strategy_cache_key(strategy_name: str, strategy_profile: OptimizationProfil
             int(strategy_profile.get("atr_length", 0.0)),
             float(strategy_profile.get("atr_stop_buffer_mult", 0.0)),
             int(strategy_profile.get("signal_cooldown_bars", 0.0)),
+            int(strategy_profile.get("trend_persistence_bars", 1.0)),
+            int(strategy_profile.get("max_pullback_bars", 0.0)),
+            float(strategy_profile.get("entry_offset_pct", 0.0)),
+            int(round(float(strategy_profile.get("use_late_entry_guard", 0.0)))),
+            float(strategy_profile.get("late_entry_max_move_1_bar_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_move_2_bars_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_move_3_bars_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_distance_ref_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_distance_fast_ref_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_distance_mid_ref_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_atr_mult", 0.0)),
+            int(round(float(strategy_profile.get("use_pullback_reentry", 0.0)))),
+            float(strategy_profile.get("pullback_reentry_min_touch", 0.0)),
+            int(round(float(strategy_profile.get("pullback_reentry_reconfirm_required", 0.0)))),
         )
     if strategy_name == "frama_cross":
         return (
             int(strategy_profile.get("frama_fast_period", 0.0)),
             int(strategy_profile.get("frama_slow_period", 0.0)),
             float(strategy_profile.get("volume_multiplier", 0.0)),
+            float(strategy_profile.get("min_frama_gap_pct", 0.0)),
+            float(strategy_profile.get("min_frama_slope_pct", 0.0)),
+            int(strategy_profile.get("post_cross_confirmation_bars", 0.0)),
+            int(round(float(strategy_profile.get("use_late_entry_guard", 0.0)))),
+            float(strategy_profile.get("late_entry_max_move_1_bar_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_move_2_bars_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_move_3_bars_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_distance_ref_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_atr_mult", 0.0)),
         )
     if strategy_name == "dual_thrust":
         return (
             int(strategy_profile.get("dual_thrust_period", 0.0)),
             float(strategy_profile.get("dual_thrust_k1", 0.0)),
             float(strategy_profile.get("dual_thrust_k2", 0.0)),
+            float(strategy_profile.get("breakout_buffer_pct", 0.0)),
+            float(strategy_profile.get("min_range_pct", 0.0)),
+            int(strategy_profile.get("cooldown_bars_after_exit", 0.0)),
+            int(round(float(strategy_profile.get("use_late_entry_guard", 0.0)))),
+            float(strategy_profile.get("late_entry_max_move_1_bar_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_move_2_bars_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_move_3_bars_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_distance_ref_pct", 0.0)),
+            float(strategy_profile.get("late_entry_max_atr_mult", 0.0)),
+            float(strategy_profile.get("max_breakout_candle_body_pct", 0.0)),
+            float(strategy_profile.get("max_breakout_candle_range_atr_mult", 0.0)),
         )
     return strategy_name
 
@@ -3321,10 +4794,6 @@ def _build_jit_signal_array(
     strategy_name: str,
     strategy_profile: OptimizationProfile,
 ) -> np.ndarray | None:
-    strategy_code = _jit_strategy_code(strategy_name)
-    if strategy_code == 0:
-        return None
-
     def _profile_float(field_name: str, default_value: float) -> float:
         with suppress(Exception):
             return float(strategy_profile.get(field_name, default_value))
@@ -3342,6 +4811,19 @@ def _build_jit_signal_array(
         with suppress(Exception):
             return 1 if float(raw_value) >= 0.5 else 0
         return 1 if default_value else 0
+
+    strategy_code = _jit_strategy_code(strategy_name)
+    if strategy_code == 0:
+        return None
+    # Late-entry guard and pullback-reentry logic are implemented in the
+    # Python/vectorized strategy builders. Force Python path when enabled so
+    # JIT and Python stay behaviorally aligned.
+    use_late_entry_guard = bool(_profile_flag("use_late_entry_guard", False))
+    use_pullback_reentry = bool(_profile_flag("use_pullback_reentry", False))
+    if use_late_entry_guard:
+        return None
+    if strategy_name == "ema_band_rejection" and use_pullback_reentry:
+        return None
 
     if strategy_code == 1:
         param_a = _profile_float("ema_fast_period", settings.strategy.ema_fast_period)
@@ -3451,6 +4933,53 @@ def _build_python_ema_band_reference_signals(
         atr_length=_profile_int("atr_length", 14),
         atr_stop_buffer_mult=_profile_float("atr_stop_buffer_mult", 0.5),
         signal_cooldown_bars=_profile_int("signal_cooldown_bars", 0),
+        trend_persistence_bars=_profile_int("trend_persistence_bars", 1),
+        max_pullback_bars=_profile_int("max_pullback_bars", 0),
+        entry_offset_pct=_profile_float("entry_offset_pct", 0.0),
+        use_late_entry_guard=_profile_flag(
+            "use_late_entry_guard",
+            bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+        ),
+        late_entry_max_move_1_bar_pct=_profile_float(
+            "late_entry_max_move_1_bar_pct",
+            float(getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)),
+        ),
+        late_entry_max_move_2_bars_pct=_profile_float(
+            "late_entry_max_move_2_bars_pct",
+            float(getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)),
+        ),
+        late_entry_max_move_3_bars_pct=_profile_float(
+            "late_entry_max_move_3_bars_pct",
+            float(getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)),
+        ),
+        late_entry_max_distance_ref_pct=_profile_float(
+            "late_entry_max_distance_ref_pct",
+            float(getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)),
+        ),
+        late_entry_max_distance_fast_ref_pct=_profile_float(
+            "late_entry_max_distance_fast_ref_pct",
+            float(getattr(settings.strategy, "late_entry_max_distance_fast_ref_pct", 0.0)),
+        ),
+        late_entry_max_distance_mid_ref_pct=_profile_float(
+            "late_entry_max_distance_mid_ref_pct",
+            float(getattr(settings.strategy, "late_entry_max_distance_mid_ref_pct", 0.0)),
+        ),
+        late_entry_max_atr_mult=_profile_float(
+            "late_entry_max_atr_mult",
+            float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+        ),
+        use_pullback_reentry=_profile_flag(
+            "use_pullback_reentry",
+            bool(getattr(settings.strategy, "use_pullback_reentry", False)),
+        ),
+        pullback_reentry_min_touch=_profile_float(
+            "pullback_reentry_min_touch",
+            float(getattr(settings.strategy, "pullback_reentry_min_touch", 0.0)),
+        ),
+        pullback_reentry_reconfirm_required=_profile_flag(
+            "pullback_reentry_reconfirm_required",
+            bool(getattr(settings.strategy, "pullback_reentry_reconfirm_required", False)),
+        ),
     )
     raw_signals = pd.to_numeric(
         working_df["ema_band_signal_direction"],
@@ -4262,6 +5791,25 @@ def _run_python_profile_evaluation(
     normalized_dynamic_take_profit_pcts = _normalize_dynamic_pct_series(
         payload.get("precomputed_dynamic_take_profit_pcts")
     )
+    resolved_chandelier_period = int(
+        float(
+            strategy_profile.get(
+                "chandelier_period",
+                settings.trading.chandelier_period,
+            )
+            or settings.trading.chandelier_period
+        )
+    )
+    resolved_chandelier_multiplier = float(
+        strategy_profile.get(
+            "chandelier_multiplier",
+            strategy_profile.get(
+                "chandelier_mult",
+                settings.trading.chandelier_multiplier,
+            ),
+        )
+        or settings.trading.chandelier_multiplier
+    )
 
     engine = _build_worker_backtest_engine(
         symbol=symbol,
@@ -4276,6 +5824,8 @@ def _run_python_profile_evaluation(
         dynamic_stop_loss_pcts=normalized_dynamic_stop_loss_pcts,
         dynamic_take_profit_pcts=normalized_dynamic_take_profit_pcts,
         enable_chandelier_exit=True,
+        chandelier_period=resolved_chandelier_period,
+        chandelier_multiplier=resolved_chandelier_multiplier,
         strategy_exit_pre_take_profit=False,
         strategy_name=strategy_name,
         early_stop_max_trades=(30 if apply_optimizer_early_stop else None),
@@ -4323,10 +5873,6 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
     strategy_name = str(task["strategy_name"])
     force_python_path = bool(task.get("force_python_path", False))
     strategy_profile = dict(task["strategy_profile"])
-    with suppress(Exception):
-        strategy_profile.pop("chandelier_period", None)
-        strategy_profile.pop("chandelier_multiplier", None)
-        strategy_profile.pop("chandelier_mult", None)
     if "breakeven_activation_pct" not in strategy_profile:
         minimum_breakeven_activation_pct = (
             _resolve_optimizer_min_breakeven_activation_pct_for_strategy(strategy_name)
@@ -4335,6 +5881,57 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
             strategy_profile["breakeven_activation_pct"] = float(
                 minimum_breakeven_activation_pct
             )
+
+    def _finalize_profile_result(
+        summary: dict[str, float],
+        *,
+        total_signals: int,
+        approved_signals: int,
+        blocked_signals: int,
+    ) -> dict[str, object]:
+        guard_pass = True
+        with suppress(Exception):
+            guard_pass = _passes_common_risk_profile_guards(
+                take_profit_pct=float(
+                    summary.get("take_profit_pct", strategy_profile.get("take_profit_pct", 0.0))
+                    or 0.0
+                ),
+                stop_loss_pct=float(
+                    summary.get("stop_loss_pct", strategy_profile.get("stop_loss_pct", 0.0))
+                    or 0.0
+                ),
+                trailing_activation_pct=float(
+                    summary.get(
+                        "trailing_activation_pct",
+                        strategy_profile.get("trailing_activation_pct", 0.0),
+                    )
+                    or 0.0
+                ),
+                trailing_distance_pct=float(
+                    summary.get(
+                        "trailing_distance_pct",
+                        strategy_profile.get("trailing_distance_pct", 0.0),
+                    )
+                    or 0.0
+                ),
+                breakeven_activation_pct=float(
+                    summary.get(
+                        "breakeven_activation_pct",
+                        strategy_profile.get("breakeven_activation_pct", 0.0),
+                    )
+                    or 0.0
+                ),
+                avg_profit_per_trade_net_pct=float(
+                    summary.get("avg_profit_per_trade_net_pct", 0.0) or 0.0
+                ),
+            )
+        normalized_summary = summary if guard_pass else _build_zero_fitness_summary(strategy_profile)
+        return {
+            "summary": normalized_summary,
+            "total_signals": int(total_signals),
+            "approved_signals": int(approved_signals),
+            "blocked_signals": int(blocked_signals),
+        }
 
     total_signals = int(task.get("total_signals", 0))
     approved_signals = int(task.get("approved_signals", 0))
@@ -4393,12 +5990,12 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
         if consistent_result is None:
             return None
         summary, total_signals, approved_signals, blocked_signals = consistent_result
-        return {
-            "summary": summary,
-            "total_signals": int(total_signals),
-            "approved_signals": int(approved_signals),
-            "blocked_signals": int(blocked_signals),
-        }
+        return _finalize_profile_result(
+            summary,
+            total_signals=int(total_signals),
+            approved_signals=int(approved_signals),
+            blocked_signals=int(blocked_signals),
+        )
 
     if force_python_path or _jit_strategy_code(strategy_name) == 0:
         python_result = _run_python_profile_evaluation(
@@ -4417,12 +6014,12 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
         if python_result is None:
             return None
         py_summary, py_total_signals, py_approved_signals, py_blocked_signals = python_result
-        return {
-            "summary": py_summary,
-            "total_signals": int(py_total_signals),
-            "approved_signals": int(py_approved_signals),
-            "blocked_signals": int(py_blocked_signals),
-        }
+        return _finalize_profile_result(
+            py_summary,
+            total_signals=int(py_total_signals),
+            approved_signals=int(py_approved_signals),
+            blocked_signals=int(py_blocked_signals),
+        )
 
     candles_df = _task_candles_dataframe(task)
     open_arr, high_arr, low_arr, close_arr, volume_arr = _task_ohlcv_numpy_arrays(
@@ -4447,11 +6044,30 @@ def _run_optimization_profile_worker(task: dict[str, object]) -> dict[str, objec
     if jit_result is None:
         return None
     jit_summary, jit_total_signals, jit_approved_signals, jit_blocked_signals = jit_result
+    return _finalize_profile_result(
+        jit_summary,
+        total_signals=int(jit_total_signals),
+        approved_signals=int(jit_approved_signals),
+        blocked_signals=int(jit_blocked_signals),
+    )
+
+
+def _run_optimization_profile_chunk_worker(task: dict[str, object]) -> dict[str, object]:
+    profile_tasks_raw = task.get("profile_tasks", [])
+    if not isinstance(profile_tasks_raw, Sequence):
+        return {"chunk_results": [], "submitted_profiles": 0}
+    chunk_results: list[dict[str, object]] = []
+    submitted_profiles = 0
+    for raw_profile_task in profile_tasks_raw:
+        if not isinstance(raw_profile_task, Mapping):
+            continue
+        submitted_profiles += 1
+        profile_result = _run_optimization_profile_worker(dict(raw_profile_task))
+        if profile_result is not None:
+            chunk_results.append(profile_result)
     return {
-        "summary": jit_summary,
-        "total_signals": int(jit_total_signals),
-        "approved_signals": int(jit_approved_signals),
-        "blocked_signals": int(jit_blocked_signals),
+        "chunk_results": chunk_results,
+        "submitted_profiles": int(submitted_profiles),
     }
 
 
@@ -4642,6 +6258,22 @@ class BotEngineThread(QThread):
         self._live_candidate_status: dict[str, str] = {}
         self._live_candidate_reason: dict[str, str] = {}
         self._live_candidate_entry_slippage_pct: dict[str, deque[float]] = {}
+        self._runtime_regime_cache: dict[tuple[str, str], dict[str, object]] = {}
+        self._runtime_hmm_detectors: dict[str, HMMRegimeDetector] = {}
+        self._runtime_hmm_non_convergence_warned_at: dict[tuple[str, str], datetime] = {}
+        self._runtime_hmm_structural_warned_at: dict[tuple[str, str, str], datetime] = {}
+        self._meta_policy_cache: dict[tuple[str, str, str], dict[str, object]] = {}
+        self._meta_cooldown_until: dict[tuple[str, str, str], datetime] = {}
+        self._meta_last_state_by_key: dict[tuple[str, str, str], str] = {}
+        self._meta_fail_safe_active = False
+        self._meta_fail_safe_reason = ""
+        self._meta_fail_safe_activated_at: datetime | None = None
+        self._meta_operational_errors: deque[tuple[datetime, str, str, str, str]] = deque(maxlen=600)
+        self._meta_operational_error_last_seen: dict[str, datetime] = {}
+        self._meta_last_daily_report_date: datetime.date | None = None
+        self._meta_last_weekly_report_iso: tuple[int, int] | None = None
+        self._meta_service_active = True
+        self._meta_global_risk_multiplier = 1.0
         for symbol_name in self._symbols:
             candidate_policy = resolve_live_candidate_policy(symbol_name)
             if candidate_policy is None:
@@ -4697,6 +6329,7 @@ class BotEngineThread(QThread):
             breakeven_buffer_pct=float(LIVE_BREAKEVEN_BUFFER_PCT),
             fee_pct_override=effective_live_fee_pct,
         )
+        self._initialize_meta_services()
         self._include_recovered_position_symbols()
         self.log_message.emit(
             f"[RECOVERY] Restored {len(self._paper_engine.active_trades)} active trades from storage."
@@ -4847,6 +6480,7 @@ class BotEngineThread(QThread):
             self.log_message.emit(f"Manual close skipped: no open position for {symbol}.")
             return
 
+        self._review_and_recompute_after_close(closed_trade_id)
         closed_trade = self._db.fetch_trade_by_id(closed_trade_id)
         if closed_trade is None:
             self.log_message.emit(
@@ -4892,8 +6526,13 @@ class BotEngineThread(QThread):
                     f"Recovered candle: {symbol} {candle.interval} @ {candle.open_time.isoformat()} close={candle.close:.4f}"
                 )
 
-            closed_trade_ids = self._paper_engine.update_positions(candle.close, symbol=symbol)
+            closed_trade_ids = self._paper_engine.update_positions(
+                candle.close,
+                symbol=symbol,
+                intrabar=False,
+            )
             for trade_id in closed_trade_ids:
+                self._review_and_recompute_after_close(trade_id)
                 closed_trade = self._db.fetch_trade_by_id(trade_id)
                 if closed_trade is None:
                     self.log_message.emit(f"Trade closed: id={trade_id} price={candle.close:.4f}")
@@ -4919,19 +6558,42 @@ class BotEngineThread(QThread):
                 resolved_strategy_name,
                 use_setup_gate=self._use_setup_gate,
             )
+            if isinstance(strategy_profile, Mapping) and strategy_profile:
+                with suppress(Exception):
+                    required_candle_count = max(
+                        int(required_candle_count),
+                        int(
+                            _required_candle_count_for_profile(
+                                resolved_strategy_name,
+                                dict(strategy_profile),
+                                use_setup_gate=self._use_setup_gate,
+                            )
+                        ),
+                    )
             analysis_window = _live_analysis_window_for_strategy(
                 resolved_strategy_name,
                 use_setup_gate=self._use_setup_gate,
             )
+            analysis_window = max(int(analysis_window), int(required_candle_count) + 3)
+            regime_window = max(int(analysis_window), 240)
             recent_candles = self._db.fetch_recent_candles(
                 symbol,
                 candle.interval,
-                limit=analysis_window,
+                limit=regime_window,
             )
-            if len(recent_candles) < required_candle_count:
+            if not recent_candles:
                 return
 
-            candles_dataframe = _candles_to_dataframe(recent_candles)
+            candles_dataframe_full = _candles_to_dataframe(recent_candles)
+            regime_payload = self.resolve_market_regime(
+                symbol=symbol,
+                timeframe=candle.interval,
+                candles_dataframe=candles_dataframe_full,
+                observed_time=candle.open_time,
+            )
+            if len(candles_dataframe_full) < required_candle_count:
+                return
+            candles_dataframe = candles_dataframe_full.tail(analysis_window).copy(deep=True)
             open_trades = self._db.fetch_open_trades(symbol=symbol)
             if open_trades:
                 open_trade = open_trades[0]
@@ -4946,6 +6608,7 @@ class BotEngineThread(QThread):
                         status="STRATEGY_EXIT",
                     )
                     if closed_trade_id is not None:
+                        self._review_and_recompute_after_close(closed_trade_id)
                         closed_trade = self._db.fetch_trade_by_id(closed_trade_id)
                         if closed_trade is not None:
                             self.log_message.emit(
@@ -4960,6 +6623,7 @@ class BotEngineThread(QThread):
                 # Recovered candles are historical gap fills; avoid opening fresh entries on stale prices.
                 return
 
+            candidate_state = self._live_candidate_status.get(symbol, "ACTIVE")
             if self._is_live_candidate_symbol(symbol):
                 candidate_metrics_pre_signal = self._sync_live_candidate_state(
                     symbol,
@@ -4979,6 +6643,7 @@ class BotEngineThread(QThread):
                 signal_direction,
                 dynamic_stop_loss_pct,
                 dynamic_take_profit_pct,
+                signal_diagnostics,
             ) = self._evaluate_live_signal_direction(
                 strategy_name=resolved_strategy_name,
                 candles_dataframe=candles_dataframe,
@@ -5000,10 +6665,34 @@ class BotEngineThread(QThread):
                 f"Signal evaluation: {signal_name} on {symbol} {candle.interval} via {resolved_strategy_name}"
                 f"{dynamic_risk_text}"
             )
+            latest_blocker_reason = str(signal_diagnostics.get("latest_blocker_reason", "") or "")
+            latest_guard_blocked = bool(
+                float(signal_diagnostics.get("latest_late_entry_guard_blocked", 0.0) or 0.0)
+                >= 0.5
+            )
+            if signal_direction == 0 and (latest_guard_blocked or latest_blocker_reason):
+                latest_move_1 = float(signal_diagnostics.get("latest_move_last_1_bar_pct", 0.0) or 0.0)
+                latest_move_2 = float(signal_diagnostics.get("latest_move_last_2_bars_pct", 0.0) or 0.0)
+                latest_move_3 = float(signal_diagnostics.get("latest_move_last_3_bars_pct", 0.0) or 0.0)
+                latest_distance_ref = float(
+                    signal_diagnostics.get("latest_distance_to_reference_pct", 0.0) or 0.0
+                )
+                latest_atr_extension = float(
+                    signal_diagnostics.get("latest_atr_extension_mult", 0.0) or 0.0
+                )
+                self.log_message.emit(
+                    "Signal blocked by late-entry guard: "
+                    f"symbol={symbol} strategy={resolved_strategy_name} interval={candle.interval} "
+                    f"reason={latest_blocker_reason or 'overextended_from_reference'} "
+                    f"move1={latest_move_1:.4f}% move2={latest_move_2:.4f}% move3={latest_move_3:.4f}% "
+                    f"dist_ref={latest_distance_ref:.4f}% atr_ext={latest_atr_extension:.4f}x"
+                )
             if self._is_live_candidate_symbol(symbol):
                 self.log_message.emit(
                     f"[LIVE_CANDIDATE] {symbol} signal={signal_name} strategy={resolved_strategy_name} interval={candle.interval}"
                 )
+            setup_gate_score: float | None = None
+            setup_gate_reason = ""
             if signal_direction != 0 and self._setup_gate is not None:
                 is_approved, score, reason = self._setup_gate.evaluate_signal_at_index(
                     candles_dataframe,
@@ -5011,20 +6700,110 @@ class BotEngineThread(QThread):
                     signal_direction,
                     resolved_strategy_name,
                 )
+                setup_gate_score = float(score)
+                setup_gate_reason = str(reason or "")
                 if not is_approved:
                     self.log_message.emit(
                         f"Signal filtered by Setup Gate (Score: {score:.1f}%): {reason}"
                     )
                     return
+            if signal_direction == 0:
+                return
+            meta_policy = self.evaluate_meta_policy(
+                symbol=symbol,
+                strategy_name=resolved_strategy_name,
+                interval=candle.interval,
+                current_context={
+                    "regime_payload": dict(regime_payload),
+                    "signal_diagnostics": dict(signal_diagnostics),
+                    "candidate_state": candidate_state,
+                },
+            )
+            if not bool(meta_policy.get("allow_trade", True)):
+                self.log_message.emit(
+                    "[META] entry blocked: "
+                    f"symbol={symbol} strategy={resolved_strategy_name} interval={candle.interval} "
+                    f"state={meta_policy.get('state')} "
+                    f"reason={meta_policy.get('block_reason', 'blocked_by_meta_policy')}"
+                )
+                self.build_learning_log_entry(
+                    change_type="Regime-Veto aktiv"
+                    if "regime_veto" in str(meta_policy.get("block_reason", ""))
+                    else "Symbol pausiert",
+                    symbol=symbol,
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    details={
+                        "meta_policy": dict(meta_policy),
+                    },
+                )
+                return
+            meta_warning_reason = str(meta_policy.get("warning_reason", "") or "")
+            if meta_warning_reason:
+                self.log_message.emit(
+                    f"[META] warning: {symbol} {resolved_strategy_name} {candle.interval} -> {meta_warning_reason}"
+                )
+            profile_version = self._resolve_profile_version(
+                symbol=symbol,
+                strategy_name=resolved_strategy_name,
+                timeframe=candle.interval,
+            )
             leverage_scale, risk_multiplier = self._candidate_trade_controls(symbol)
+            meta_risk_multiplier = float(meta_policy.get("risk_multiplier", 1.0) or 1.0)
+            combined_risk_multiplier = max(0.0, float(risk_multiplier) * max(0.0, meta_risk_multiplier))
+            if combined_risk_multiplier <= 0.0:
+                self.log_message.emit(
+                    f"[META] entry blocked due to zero combined risk multiplier: {symbol} {resolved_strategy_name}"
+                )
+                return
+            runtime_settings = self._paper_engine.get_runtime_settings(symbol)
+            effective_leverage = max(
+                1,
+                int(round(float(runtime_settings.leverage) * float(leverage_scale))),
+            )
+            entry_snapshot = self.build_entry_snapshot(
+                symbol=symbol,
+                strategy_name=resolved_strategy_name,
+                timeframe=candle.interval,
+                side=("LONG" if signal_direction > 0 else "SHORT"),
+                entry_time=datetime.now(tz=UTC).replace(tzinfo=None),
+                entry_price=execution_price,
+                leverage_scale=float(effective_leverage),
+                profile_version=profile_version,
+                regime_payload=regime_payload,
+                signal_direction=signal_direction,
+                signal_diagnostics=signal_diagnostics,
+                candles_dataframe=candles_dataframe,
+                setup_gate_score=setup_gate_score,
+                setup_gate_reason=setup_gate_reason,
+                candidate_state=candidate_state,
+            )
+            entry_snapshot["meta_flags"] = list(meta_policy.get("meta_flags", []))
+            entry_snapshot["meta_policy"] = dict(meta_policy.get("effective_policy_json", {}))
+            entry_snapshot["risk_multiplier_effective"] = float(combined_risk_multiplier)
             trade_id = self._paper_engine.process_signal(
                 symbol=symbol,
                 current_price=execution_price,
                 signal_direction=signal_direction,
+                strategy_name=resolved_strategy_name,
                 leverage_scale=leverage_scale,
-                risk_multiplier=risk_multiplier,
+                risk_multiplier=combined_risk_multiplier,
                 dynamic_stop_loss_pct=dynamic_stop_loss_pct,
                 dynamic_take_profit_pct=dynamic_take_profit_pct,
+                timeframe=candle.interval,
+                regime_label_at_entry=str(entry_snapshot.get("regime_label_at_entry", "")),
+                regime_confidence=float(entry_snapshot.get("regime_confidence", 0.0) or 0.0),
+                session_label=str(entry_snapshot.get("session_label", "")),
+                signal_strength=float(entry_snapshot.get("signal_strength", 0.0) or 0.0),
+                confidence_score=float(entry_snapshot.get("confidence_score", 0.0) or 0.0),
+                atr_pct_at_entry=float(entry_snapshot.get("atr_pct_at_entry", 0.0) or 0.0),
+                volume_ratio_at_entry=float(entry_snapshot.get("volume_ratio_at_entry", 0.0) or 0.0),
+                spread_estimate=float(entry_snapshot.get("spread_estimate", 0.0) or 0.0),
+                move_already_extended_pct=float(entry_snapshot.get("move_already_extended_pct", 0.0) or 0.0),
+                entry_snapshot_json=entry_snapshot,
+                lifecycle_snapshot_json=None,
+                profile_version=profile_version,
+                review_status="PENDING",
             )
             if trade_id is None:
                 return
@@ -5057,15 +6836,70 @@ class BotEngineThread(QThread):
                     event_label="post_entry",
                     metrics=candidate_metrics_post_entry,
                 )
+        except Exception as exc:
+            self._register_operational_error(
+                symbol=symbol,
+                interval=candle.interval,
+                reason="candle_closed_runtime_error",
+                exception_text=str(exc),
+                source="runtime_exception",
+            )
+            self.log_message.emit(
+                f"[META_FAILSAFE_CHECK] runtime error on candle processing for {symbol} {candle.interval}: {exc}"
+            )
         finally:
             self._last_closed_candle_times[(symbol, candle.interval)] = candle.open_time
 
     async def _on_candle_update(self, symbol: str, candle: CandleRecord) -> None:
+        if self._db is None or self._paper_engine is None:
+            return
         target_interval = self._target_interval_for_symbol(symbol)
         if candle.interval != target_interval:
             return
         self._latest_market_prices[symbol] = float(candle.close)
         self.price_update.emit(symbol, candle.close)
+        try:
+            closed_trade_ids = self._paper_engine.update_positions(
+                candle.close,
+                symbol=symbol,
+                intrabar=True,
+            )
+            for trade_id in closed_trade_ids:
+                self._review_and_recompute_after_close(trade_id)
+                closed_trade = self._db.fetch_trade_by_id(trade_id)
+                if closed_trade is None:
+                    self.log_message.emit(
+                        f"[INTRABAR_EXIT] Trade closed: id={trade_id} symbol={symbol} price={candle.close:.4f}"
+                    )
+                    continue
+                self.log_message.emit(
+                    "[INTRABAR_EXIT] Trade closed: "
+                    f"id={closed_trade.id} symbol={closed_trade.symbol} price={candle.close:.4f} "
+                    f"reason={closed_trade.status} net_pnl={closed_trade.pnl:.4f} fees={closed_trade.total_fees:.4f}"
+                )
+            if closed_trade_ids:
+                self._emit_positions_snapshot()
+                if self._is_live_candidate_symbol(symbol):
+                    candidate_metrics_after_close = self._sync_live_candidate_state(
+                        symbol,
+                        context="intrabar_close",
+                    )
+                    self._log_live_candidate_snapshot(
+                        symbol,
+                        event_label="intrabar_close",
+                        metrics=candidate_metrics_after_close,
+                    )
+        except Exception as exc:
+            self._register_operational_error(
+                symbol=symbol,
+                interval=candle.interval,
+                reason="candle_update_runtime_error",
+                exception_text=str(exc),
+                source="runtime_exception",
+            )
+            self.log_message.emit(
+                f"[META_FAILSAFE_CHECK] runtime error on candle update for {symbol} {candle.interval}: {exc}"
+            )
 
     def _on_ws_log(self, message: str) -> None:
         self.log_message.emit(message)
@@ -5080,6 +6914,8 @@ class BotEngineThread(QThread):
     async def _perform_heartbeat_check(self) -> None:
         if self._db is None:
             return
+        with suppress(Exception):
+            self._maybe_generate_periodic_meta_reports()
 
         now = datetime.now(tz=UTC).replace(tzinfo=None)
         status_payload: dict[str, dict[str, object]] = {}
@@ -5124,6 +6960,13 @@ class BotEngineThread(QThread):
 
             if symbol_status == "LAGGING":
                 lagging_symbols.append(symbol)
+            resolved_strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
+            meta_policy = self.evaluate_meta_policy(
+                symbol=symbol,
+                strategy_name=resolved_strategy_name,
+                interval=interval,
+                current_context={},
+            )
 
             status_payload[symbol] = {
                 "status": symbol_status,
@@ -5131,6 +6974,10 @@ class BotEngineThread(QThread):
                 "latest_interval": latest_interval,
                 "lag_seconds": worst_lag_seconds,
                 "interval_statuses": interval_statuses,
+                "meta_state": str(meta_policy.get("state", "unknown")),
+                "meta_allow_trade": bool(meta_policy.get("allow_trade", True)),
+                "meta_risk_multiplier": float(meta_policy.get("risk_multiplier", 1.0) or 1.0),
+                "meta_block_reason": str(meta_policy.get("block_reason", "") or ""),
             }
 
             latest_label = "--:--" if latest_time is None else latest_time.strftime("%H:%M")
@@ -5327,6 +7174,7 @@ class BotEngineThread(QThread):
                             symbols=interval_symbols,
                             interval=interval,
                             candles_per_symbol=preload_count,
+                            should_abort=lambda: self.isInterruptionRequested(),
                             on_progress=(
                                 None
                                 if not emit_progress
@@ -5599,6 +7447,8 @@ class BotEngineThread(QThread):
                 int(float(candidate_policy.get("target_leverage", payload_effective_leverage) or payload_effective_leverage)),
             )
             payload_effective_leverage = int(candidate_target_leverage)
+        meta_key = self._meta_key(symbol, resolved_strategy_name, runtime_settings.interval)
+        meta_policy = self._meta_policy_cache.get(meta_key, {})
         payload = {
             "symbol": symbol,
             "resolved_strategy_name": resolved_strategy_name,
@@ -5614,6 +7464,10 @@ class BotEngineThread(QThread):
                 str(self._live_candidate_reason.get(symbol, "") or "")
             ),
             "live_candidate_target_leverage": candidate_target_leverage,
+            "meta_service_active": bool(self._meta_service_active),
+            "meta_state": str(meta_policy.get("state", "unknown") or "unknown"),
+            "meta_allow_trade": bool(meta_policy.get("allow_trade", True)),
+            "meta_risk_multiplier": float(meta_policy.get("risk_multiplier", 1.0) or 1.0),
         }
         self.runtime_profile_update.emit(payload)
 
@@ -5679,41 +7533,67 @@ class BotEngineThread(QThread):
         candles_dataframe: pd.DataFrame,
         strategy_profile: OptimizationProfile | None,
         required_candle_count: int,
-    ) -> tuple[int, float | None, float | None]:
-        if strategy_name == "ema_band_rejection":
-            payload = _build_vectorized_strategy_cache_payload(
-                candles_dataframe,
-                strategy_name=strategy_name,
-                required_candles=required_candle_count,
-                setup_gate=None,
-                strategy_profile=strategy_profile,
-                regime_mask=None,
+    ) -> tuple[int, float | None, float | None, dict[str, object]]:
+        payload = _build_vectorized_strategy_cache_payload(
+            candles_dataframe,
+            strategy_name=strategy_name,
+            required_candles=required_candle_count,
+            setup_gate=None,
+            strategy_profile=strategy_profile,
+            regime_mask=None,
+        )
+        if isinstance(payload, Mapping):
+            diagnostics_payload = payload.get("strategy_diagnostics")
+            strategy_diagnostics = (
+                dict(diagnostics_payload)
+                if isinstance(diagnostics_payload, Mapping)
+                else {}
             )
-            if isinstance(payload, Mapping):
-                signals_payload = payload.get("signals")
-                if isinstance(signals_payload, Sequence) and len(signals_payload) > 0:
-                    with suppress(Exception):
-                        signal_direction = int(signals_payload[-1])
-                        dynamic_stop_loss_pct: float | None = None
-                        if signal_direction != 0:
-                            dynamic_stop_loss_series = payload.get("precomputed_dynamic_stop_loss_pcts")
-                            if (
-                                isinstance(dynamic_stop_loss_series, Sequence)
-                                and len(dynamic_stop_loss_series) > 0
-                            ):
-                                with suppress(Exception):
-                                    candidate_dynamic_stop_loss_pct = float(
-                                        dynamic_stop_loss_series[-1]
+            signals_payload = payload.get("signals")
+            if isinstance(signals_payload, Sequence) and len(signals_payload) > 0:
+                with suppress(Exception):
+                    signal_direction = int(signals_payload[-1])
+                    dynamic_stop_loss_pct: float | None = None
+                    dynamic_take_profit_pct: float | None = None
+                    if signal_direction != 0:
+                        dynamic_stop_loss_series = payload.get("precomputed_dynamic_stop_loss_pcts")
+                        if (
+                            isinstance(dynamic_stop_loss_series, Sequence)
+                            and len(dynamic_stop_loss_series) > 0
+                        ):
+                            with suppress(Exception):
+                                candidate_dynamic_stop_loss_pct = float(
+                                    dynamic_stop_loss_series[-1]
+                                )
+                                if (
+                                    math.isfinite(candidate_dynamic_stop_loss_pct)
+                                    and candidate_dynamic_stop_loss_pct > 0.0
+                                ):
+                                    dynamic_stop_loss_pct = float(
+                                        candidate_dynamic_stop_loss_pct
                                     )
-                                    if (
-                                        math.isfinite(candidate_dynamic_stop_loss_pct)
-                                        and candidate_dynamic_stop_loss_pct > 0.0
-                                    ):
-                                        dynamic_stop_loss_pct = float(
-                                            candidate_dynamic_stop_loss_pct
-                                        )
-                        return signal_direction, dynamic_stop_loss_pct, None
-            return 0, None, None
+                        dynamic_take_profit_series = payload.get("precomputed_dynamic_take_profit_pcts")
+                        if (
+                            isinstance(dynamic_take_profit_series, Sequence)
+                            and len(dynamic_take_profit_series) > 0
+                        ):
+                            with suppress(Exception):
+                                candidate_dynamic_take_profit_pct = float(
+                                    dynamic_take_profit_series[-1]
+                                )
+                                if (
+                                    math.isfinite(candidate_dynamic_take_profit_pct)
+                                    and candidate_dynamic_take_profit_pct > 0.0
+                                ):
+                                    dynamic_take_profit_pct = float(
+                                        candidate_dynamic_take_profit_pct
+                                    )
+                    return (
+                        signal_direction,
+                        dynamic_stop_loss_pct,
+                        dynamic_take_profit_pct,
+                        strategy_diagnostics,
+                    )
         return (
             int(
                 _evaluate_strategy_signal(
@@ -5724,7 +7604,2420 @@ class BotEngineThread(QThread):
             ),
             None,
             None,
+            {},
         )
+
+    def _review_and_recompute_after_close(self, trade_id: int) -> None:
+        if self._db is None:
+            return
+        self.review_closed_trade(trade_id)
+        closed_trade = self._db.fetch_trade_by_id(trade_id)
+        if closed_trade is None:
+            return
+        strategy_name = (
+            str(closed_trade.strategy_name).strip()
+            if closed_trade.strategy_name is not None and str(closed_trade.strategy_name).strip()
+            else resolve_strategy_for_symbol(closed_trade.symbol, self._strategy_name)
+        )
+        timeframe = (
+            str(closed_trade.timeframe).strip()
+            if closed_trade.timeframe is not None and str(closed_trade.timeframe).strip()
+            else self._target_interval_for_symbol(closed_trade.symbol)
+        )
+        with suppress(Exception):
+            self.recompute_strategy_health(
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                timeframe=timeframe,
+            )
+        with suppress(Exception):
+            self.evaluate_meta_policy(
+                closed_trade.symbol,
+                strategy_name,
+                timeframe,
+                current_context={},
+            )
+        with suppress(Exception):
+            self._maybe_generate_periodic_meta_reports()
+
+    def _resolve_profile_version(
+        self,
+        *,
+        symbol: str,
+        strategy_name: str,
+        timeframe: str,
+    ) -> str:
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_strategy = str(strategy_name).strip()
+        normalized_timeframe = str(timeframe).strip()
+        profile_payload = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol, {})
+        digest_payload = {
+            "symbol": normalized_symbol,
+            "strategy": normalized_strategy,
+            "timeframe": normalized_timeframe,
+            "profile": profile_payload,
+        }
+        payload_text = json.dumps(
+            digest_payload,
+            sort_keys=True,
+            ensure_ascii=True,
+            default=str,
+        )
+        digest = hashlib.sha1(payload_text.encode("utf-8")).hexdigest()[:12]
+        return f"{normalized_strategy}:{normalized_timeframe}:{digest}"
+
+    @staticmethod
+    def _resolve_session_label(timestamp: datetime) -> str:
+        if timestamp.weekday() >= 5:
+            return "weekend"
+        hour = int(timestamp.hour)
+        if 0 <= hour < 7:
+            return "asia"
+        if 7 <= hour < 12:
+            return "asia_europe_overlap"
+        if 12 <= hour < 17:
+            return "europe"
+        if 17 <= hour < 22:
+            return "us"
+        return "us_asia_overlap"
+
+    @staticmethod
+    def _parse_json_payload(payload: object) -> dict[str, object]:
+        if isinstance(payload, Mapping):
+            return dict(payload)
+        if isinstance(payload, str):
+            normalized = payload.strip()
+            if not normalized:
+                return {}
+            with suppress(Exception):
+                parsed = json.loads(normalized)
+                if isinstance(parsed, Mapping):
+                    return dict(parsed)
+        return {}
+
+    @staticmethod
+    def _meta_key(symbol: str, strategy_name: str, interval: str) -> tuple[str, str, str]:
+        return (
+            str(symbol).strip().upper(),
+            _sanitize_backtest_strategy_name(strategy_name),
+            str(interval).strip(),
+        )
+
+    def _insert_adaptation_event(
+        self,
+        *,
+        event_type: str,
+        symbol: str,
+        strategy_name: str | None,
+        interval: str | None,
+        payload: Mapping[str, object] | None = None,
+        source: str = "meta_bot",
+    ) -> None:
+        if self._db is None:
+            return
+        with suppress(Exception):
+            self._db.insert_adaptation_log(
+                AdaptationLogCreate(
+                    created_at=datetime.now(tz=UTC).replace(tzinfo=None),
+                    symbol=str(symbol).strip().upper(),
+                    strategy_name=(
+                        None
+                        if strategy_name is None
+                        else _sanitize_backtest_strategy_name(strategy_name)
+                    ),
+                    timeframe=(
+                        None
+                        if interval is None
+                        else str(interval).strip()
+                    ),
+                    event_type=str(event_type).strip(),
+                    payload_json=dict(payload or {}),
+                    source=str(source).strip(),
+                )
+            )
+
+    def _emit_meta_warning(
+        self,
+        *,
+        warning_code: str,
+        message: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        warning_payload = {
+            "warning_code": str(warning_code),
+            "message": str(message),
+            "payload": dict(payload or {}),
+            "emitted_at": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
+        }
+        self.log_message.emit(
+            f"[META_WARNING] {warning_payload['warning_code']}: {warning_payload['message']}"
+        )
+        for channel in META_WARN_HOOK_CHANNELS:
+            if channel == "log":
+                continue
+            self._dispatch_warning_stub(channel=channel, payload=warning_payload)
+
+    def _dispatch_warning_stub(self, *, channel: str, payload: Mapping[str, object]) -> None:
+        self.log_message.emit(
+            f"[META_WARNING_STUB] channel={channel} payload={json.dumps(dict(payload), ensure_ascii=True, sort_keys=True)}"
+        )
+
+    def _activate_fail_safe_mode(self, *, reason: str, payload: Mapping[str, object] | None = None) -> None:
+        normalized_reason = str(reason).strip() or "unspecified_fail_safe_reason"
+        if self._meta_fail_safe_active and normalized_reason == self._meta_fail_safe_reason:
+            return
+        activated_at = datetime.now(tz=UTC).replace(tzinfo=None)
+        self._meta_fail_safe_active = True
+        self._meta_fail_safe_reason = normalized_reason
+        self._meta_fail_safe_activated_at = activated_at
+        self._emit_meta_warning(
+            warning_code="system_paused",
+            message=f"Fail-safe mode active: {normalized_reason}",
+            payload=payload,
+        )
+        self._insert_adaptation_event(
+            event_type="fail_safe_activated",
+            symbol="GLOBAL",
+            strategy_name=None,
+            interval=None,
+            payload={
+                "reason": normalized_reason,
+                "payload": dict(payload or {}),
+                "activated_at": activated_at.isoformat(),
+            },
+            source="meta_bot",
+        )
+
+    def _maybe_recover_fail_safe_mode(self, *, now: datetime) -> None:
+        if not self._meta_fail_safe_active:
+            return
+        if self._meta_fail_safe_reason != "repeated_operational_error":
+            return
+        activated_at = self._meta_fail_safe_activated_at
+        if activated_at is None:
+            return
+        if now < (activated_at + timedelta(minutes=META_FAILSAFE_AUTO_RECOVER_MINUTES)):
+            return
+        window_start = now - timedelta(minutes=META_OPERATIONAL_ERROR_WINDOW_MINUTES)
+        recent_hard_errors = [
+            item
+            for item in self._meta_operational_errors
+            if item[0] >= window_start and item[4] in {"runtime_exception", "runtime"}
+        ]
+        if recent_hard_errors:
+            return
+        previous_reason = str(self._meta_fail_safe_reason)
+        self._meta_fail_safe_active = False
+        self._meta_fail_safe_reason = ""
+        self._meta_fail_safe_activated_at = None
+        self.log_message.emit(
+            "[META] fail-safe auto-recovered after operational error cooldown."
+        )
+        self._insert_adaptation_event(
+            event_type="fail_safe_recovered",
+            symbol="GLOBAL",
+            strategy_name=None,
+            interval=None,
+            payload={
+                "previous_reason": previous_reason,
+                "recovered_at": now.isoformat(),
+                "cooldown_minutes": META_FAILSAFE_AUTO_RECOVER_MINUTES,
+                "window_minutes": META_OPERATIONAL_ERROR_WINDOW_MINUTES,
+            },
+            source="meta_bot",
+        )
+
+    def _register_operational_error(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        reason: str,
+        exception_text: str,
+        source: str = "runtime_exception",
+    ) -> None:
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_interval = str(interval).strip()
+        normalized_reason = str(reason).strip() or "unknown_operational_error"
+        normalized_source = str(source).strip().lower() or "runtime_exception"
+        exception_head = str(exception_text).strip().splitlines()[0][:240]
+        signature = (
+            f"{normalized_source}|{normalized_symbol}|{normalized_interval}|"
+            f"{normalized_reason}|{exception_head}"
+        )
+        dedup_since = self._meta_operational_error_last_seen.get(signature)
+        if (
+            isinstance(dedup_since, datetime)
+            and (now - dedup_since).total_seconds() < float(META_OPERATIONAL_ERROR_DEDUP_SECONDS)
+        ):
+            self.log_message.emit(
+                "[META] operational error deduped: "
+                f"source={normalized_source} symbol={normalized_symbol} "
+                f"interval={normalized_interval} reason={normalized_reason}"
+            )
+            return
+        self._meta_operational_error_last_seen[signature] = now
+        self._meta_operational_errors.append(
+            (
+                now,
+                normalized_symbol,
+                normalized_interval,
+                normalized_reason,
+                normalized_source,
+            )
+        )
+        window_start = now - timedelta(minutes=META_OPERATIONAL_ERROR_WINDOW_MINUTES)
+        while self._meta_operational_errors and self._meta_operational_errors[0][0] < window_start:
+            self._meta_operational_errors.popleft()
+        for cached_signature, cached_time in list(self._meta_operational_error_last_seen.items()):
+            if (now - cached_time).total_seconds() > float(META_OPERATIONAL_ERROR_WINDOW_MINUTES * 60):
+                self._meta_operational_error_last_seen.pop(cached_signature, None)
+
+        current_window_entries = [
+            entry
+            for entry in self._meta_operational_errors
+            if entry[0] >= window_start
+        ]
+        current_count = len(current_window_entries)
+        self._insert_adaptation_event(
+            event_type="operational_error",
+            symbol=normalized_symbol,
+            strategy_name=None,
+            interval=normalized_interval,
+            payload={
+                "reason": normalized_reason,
+                "exception_text": exception_head,
+                "source": normalized_source,
+                "window_minutes": META_OPERATIONAL_ERROR_WINDOW_MINUTES,
+                "window_error_count": current_count,
+            },
+            source=normalized_source,
+        )
+
+        # Heartbeat / sync hints remain warnings only and are never escalated to fail-safe.
+        if normalized_source in {"heartbeat", "heartbeat_warning"}:
+            self.log_message.emit(
+                "[META] heartbeat warning observed (non-escalating): "
+                f"symbol={normalized_symbol} interval={normalized_interval} "
+                f"reason={normalized_reason} detail={exception_head}"
+            )
+            return
+
+        hard_entries = [
+            entry
+            for entry in current_window_entries
+            if entry[4] in {"runtime_exception", "runtime"}
+        ]
+        hard_count = len(hard_entries)
+        distinct_symbols = {entry[1] for entry in hard_entries}
+        distinct_signatures = {(entry[1], entry[2], entry[3]) for entry in hard_entries}
+        enough_volume = hard_count >= META_OPERATIONAL_ERROR_FAILSAFE_THRESHOLD
+        enough_breadth = (
+            len(distinct_symbols) >= META_OPERATIONAL_ERROR_MIN_DISTINCT_SYMBOLS
+            or len(distinct_signatures) >= META_OPERATIONAL_ERROR_MIN_DISTINCT_SIGNATURES
+        )
+        if enough_volume and enough_breadth:
+            self._emit_meta_warning(
+                warning_code="repeated_operational_error",
+                message=(
+                    f"Operational runtime exceptions reached {hard_count} within "
+                    f"{META_OPERATIONAL_ERROR_WINDOW_MINUTES} minutes."
+                ),
+                payload={
+                    "symbol": normalized_symbol,
+                    "interval": normalized_interval,
+                    "window_error_count": hard_count,
+                    "distinct_symbols": sorted(distinct_symbols),
+                    "distinct_signatures": len(distinct_signatures),
+                },
+            )
+            self._activate_fail_safe_mode(
+                reason="repeated_operational_error",
+                payload={
+                    "window_minutes": META_OPERATIONAL_ERROR_WINDOW_MINUTES,
+                    "window_error_count": hard_count,
+                    "distinct_symbols": sorted(distinct_symbols),
+                    "distinct_signatures": len(distinct_signatures),
+                },
+            )
+            return
+
+        self.log_message.emit(
+            "[META] operational error recorded without fail-safe escalation: "
+            f"hard_count={hard_count} distinct_symbols={len(distinct_symbols)} "
+            f"distinct_signatures={len(distinct_signatures)} threshold={META_OPERATIONAL_ERROR_FAILSAFE_THRESHOLD}"
+        )
+
+    def _initialize_meta_services(self) -> None:
+        META_REPORTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        self._meta_service_active = True
+        self._meta_global_risk_multiplier = 1.0
+        self.log_message.emit(
+            "[META] services initialized: "
+            "mode=active_observe_and_guard | parameter_overwrite=disabled | "
+            f"reports_dir={META_REPORTS_DIRECTORY.as_posix()}"
+        )
+        self.log_message.emit(
+            "[META] guards: "
+            f"max_daily_loss={META_MAX_DAILY_LOSS_USD:.2f} | "
+            f"max_symbol_loss_streak={META_MAX_SYMBOL_LOSS_STREAK} | "
+            f"max_strategy_drawdown_pct={META_MAX_STRATEGY_DRAWDOWN_PCT:.2f}% | "
+            f"max_open_positions={META_MAX_OPEN_POSITIONS_GUARD} | "
+            f"max_correlated_risk={META_MAX_CORRELATED_RISK}."
+        )
+        recompute_targets: set[tuple[str, str, str]] = set()
+        for symbol in self._symbols:
+            strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
+            interval = self._target_interval_for_symbol(symbol)
+            recompute_targets.add(
+                self._meta_key(symbol, strategy_name, interval)
+            )
+        if self._db is not None:
+            with suppress(Exception):
+                for row in self._db.fetch_strategy_health_rows(limit=5000):
+                    recompute_targets.add(
+                        self._meta_key(row.symbol, row.strategy_name, row.timeframe)
+                    )
+        for normalized_symbol, normalized_strategy, normalized_interval in sorted(recompute_targets):
+            with suppress(Exception):
+                self.recompute_strategy_health(
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    timeframe=normalized_interval,
+                )
+            with suppress(Exception):
+                self.evaluate_meta_policy(
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    current_context={},
+                )
+        with suppress(Exception):
+            self._maybe_generate_periodic_meta_reports()
+
+    def resolve_market_regime(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        candles_dataframe: pd.DataFrame,
+        observed_time: datetime | None = None,
+    ) -> dict[str, object]:
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_timeframe = str(timeframe).strip()
+        if candles_dataframe.empty:
+            observed_at = observed_time or datetime.now(tz=UTC).replace(tzinfo=None)
+            return {
+                "regime_label": "range_balanced",
+                "regime_confidence": 0.2,
+                "trend_bias": "neutral",
+                "volatility_state": "normal",
+                "expansion_state": "balanced",
+                "liquidity_state": "normal",
+                "session_label": self._resolve_session_label(observed_at),
+                "regime_features_json": {
+                    "engine_version": REGIME_ENGINE_VERSION,
+                    "reason": "empty_candles",
+                },
+            }
+
+        working_df = candles_dataframe.tail(720).copy(deep=True)
+        observed_at = observed_time
+        if observed_at is None:
+            with suppress(Exception):
+                candidate = working_df.iloc[-1].get("open_time")
+                if isinstance(candidate, datetime):
+                    observed_at = candidate.replace(tzinfo=None)
+        if observed_at is None:
+            observed_at = datetime.now(tz=UTC).replace(tzinfo=None)
+
+        cache_key = (normalized_symbol, normalized_timeframe)
+        cache_entry = self._runtime_regime_cache.get(cache_key)
+        stable_payload: dict[str, object] | None = None
+        if isinstance(cache_entry, dict):
+            cached_time = cache_entry.get("observed_at")
+            cached_payload = cache_entry.get("payload")
+            if isinstance(cached_payload, Mapping):
+                stable_payload = dict(cached_payload)
+            if (
+                isinstance(cached_time, datetime)
+                and cached_time == observed_at
+                and isinstance(cached_payload, Mapping)
+            ):
+                return dict(cached_payload)
+
+        close_series = pd.to_numeric(working_df["close"], errors="coerce").ffill().bfill().fillna(0.0)
+        high_series = pd.to_numeric(working_df["high"], errors="coerce").ffill().bfill().fillna(close_series)
+        low_series = pd.to_numeric(working_df["low"], errors="coerce").ffill().bfill().fillna(close_series)
+        volume_series = pd.to_numeric(working_df["volume"], errors="coerce").ffill().bfill().fillna(0.0)
+        close_safe = close_series.clip(lower=1e-9)
+        returns_pct = close_safe.pct_change().fillna(0.0) * 100.0
+        prev_close = close_safe.shift(1).fillna(close_safe)
+        true_range = pd.concat(
+            [
+                (high_series - low_series).abs(),
+                (high_series - prev_close).abs(),
+                (low_series - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr_pct_series = (true_range / close_safe) * 100.0
+        range_pct_series = ((high_series - low_series).abs() / close_safe) * 100.0
+
+        close_now = float(close_safe.iloc[-1])
+        close_20_ref = float(close_safe.iloc[-min(len(close_safe), 20)])
+        close_50_ref = float(close_safe.iloc[-min(len(close_safe), 50)])
+        trend_pct_20 = ((close_now / max(close_20_ref, 1e-9)) - 1.0) * 100.0
+        trend_pct_50 = ((close_now / max(close_50_ref, 1e-9)) - 1.0) * 100.0
+        atr_pct_latest = float(atr_pct_series.tail(14).mean()) if not atr_pct_series.empty else 0.0
+        atr_pct_baseline = float(atr_pct_series.tail(80).mean()) if not atr_pct_series.empty else atr_pct_latest
+        vol_ratio = (
+            float(volume_series.iloc[-1]) / max(float(volume_series.tail(20).mean()), 1e-9)
+            if not volume_series.empty
+            else 1.0
+        )
+        range_pct_latest = float(range_pct_series.iloc[-1]) if not range_pct_series.empty else 0.0
+        range_pct_baseline = float(range_pct_series.tail(20).mean()) if not range_pct_series.empty else range_pct_latest
+        expansion_ratio = range_pct_latest / max(range_pct_baseline, 1e-9)
+        ret_std_20 = float(returns_pct.tail(20).std(ddof=0)) if len(returns_pct) > 1 else 0.0
+        move_3_bars_pct = 0.0
+        if len(close_safe) >= 4:
+            close_3_ref = float(close_safe.iloc[-4])
+            move_3_bars_pct = abs((close_now / max(close_3_ref, 1e-9)) - 1.0) * 100.0
+
+        hmm_label = HMMRegimeDetector.UNKNOWN
+        hmm_allowed_ratio = 1.0
+        hmm_converged = True
+        hmm_non_converged_windows = 0
+        hmm_window_count = 0
+        hmm_non_convergence_detail = "window_context=n/a"
+        if len(working_df) >= 80:
+            detector = self._runtime_hmm_detectors.get(normalized_timeframe)
+            if detector is None:
+                detector = HMMRegimeDetector(
+                    n_components=4,
+                    train_window_candles=1200,
+                    apply_window_candles=240,
+                    warmup_candles=120,
+                    stability_candles=3,
+                    allowed_regimes=(
+                        HMMRegimeDetector.BULL_TREND,
+                        HMMRegimeDetector.BEAR_TREND,
+                        HMMRegimeDetector.HIGH_VOL_RANGE,
+                        HMMRegimeDetector.LOW_VOL_RANGE,
+                        HMMRegimeDetector.UNKNOWN,
+                        HMMRegimeDetector.WARMUP,
+                    ),
+                )
+                self._runtime_hmm_detectors[normalized_timeframe] = detector
+            with suppress(Exception):
+                detection = detector.detect(working_df)
+                hmm_converged = bool(getattr(detection, "converged", True))
+                hmm_non_converged_windows = int(getattr(detection, "non_converged_windows", 0) or 0)
+                hmm_window_count = int(getattr(detection, "window_count", 0) or 0)
+                if not bool(hmm_converged):
+                    hmm_non_convergence_detail = _format_hmm_non_convergence_detail(detection)
+                if detection.regime_labels:
+                    hmm_label = str(detection.regime_labels[-1])
+                hmm_allowed_ratio = float(detection.allowed_ratio)
+                transmat_warning_events = [
+                    event
+                    for event in tuple(getattr(detection, "warning_events", tuple()) or tuple())
+                    if isinstance(event, Mapping)
+                    and str(event.get("warning_kind", "")).strip().lower()
+                    == "transmat_zero_sum_no_transition"
+                ]
+                if transmat_warning_events:
+                    now = datetime.now(tz=UTC).replace(tzinfo=None)
+                    structural_warn_key = (
+                        normalized_symbol,
+                        normalized_timeframe,
+                        "transmat_zero_sum_no_transition",
+                    )
+                    last_warned_at = self._runtime_hmm_structural_warned_at.get(structural_warn_key)
+                    if (
+                        not isinstance(last_warned_at, datetime)
+                        or now
+                        >= (
+                            last_warned_at
+                            + timedelta(minutes=REGIME_HMM_NON_CONVERGENCE_WARN_INTERVAL_MINUTES)
+                        )
+                    ):
+                        self._runtime_hmm_structural_warned_at[structural_warn_key] = now
+                        warning_detail = _format_hmm_warning_detail(
+                            detection,
+                            warning_kind="transmat_zero_sum_no_transition",
+                        )
+                        self.log_message.emit(
+                            "[REGIME] HMM structural warning: "
+                            f"{normalized_symbol} {normalized_timeframe} "
+                            f"{warning_detail}."
+                        )
+
+        if (not bool(hmm_converged)) and stable_payload is not None:
+            now = datetime.now(tz=UTC).replace(tzinfo=None)
+            last_warned_at = self._runtime_hmm_non_convergence_warned_at.get(cache_key)
+            if (
+                not isinstance(last_warned_at, datetime)
+                or now >= (last_warned_at + timedelta(minutes=REGIME_HMM_NON_CONVERGENCE_WARN_INTERVAL_MINUTES))
+            ):
+                self._runtime_hmm_non_convergence_warned_at[cache_key] = now
+                self.log_message.emit(
+                    "[REGIME] HMM non-converged; reusing last stable regime: "
+                    f"{normalized_symbol} {normalized_timeframe} "
+                    f"(non_converged_windows={hmm_non_converged_windows}, windows={hmm_window_count}) "
+                    f"{hmm_non_convergence_detail}."
+                )
+            fallback_payload = dict(stable_payload)
+            fallback_features = self._parse_json_payload(fallback_payload.get("regime_features_json"))
+            fallback_features.update(
+                {
+                    "engine_version": REGIME_ENGINE_VERSION,
+                    "hmm_converged": False,
+                    "hmm_non_converged_windows": int(hmm_non_converged_windows),
+                    "hmm_window_count": int(hmm_window_count),
+                    "fallback_reason": "hmm_non_converged_reuse_last_stable",
+                    "fallback_observed_at": observed_at.isoformat(),
+                }
+            )
+            fallback_payload["session_label"] = self._resolve_session_label(observed_at)
+            fallback_payload["regime_features_json"] = fallback_features
+            self._runtime_regime_cache[cache_key] = {
+                "observed_at": observed_at,
+                "payload": dict(fallback_payload),
+            }
+            return fallback_payload
+        if not bool(hmm_converged):
+            now = datetime.now(tz=UTC).replace(tzinfo=None)
+            last_warned_at = self._runtime_hmm_non_convergence_warned_at.get(cache_key)
+            if (
+                not isinstance(last_warned_at, datetime)
+                or now >= (last_warned_at + timedelta(minutes=REGIME_HMM_NON_CONVERGENCE_WARN_INTERVAL_MINUTES))
+            ):
+                self._runtime_hmm_non_convergence_warned_at[cache_key] = now
+                self.log_message.emit(
+                    "[REGIME] HMM non-converged without stable cache; "
+                    f"using heuristic regime fallback for {normalized_symbol} {normalized_timeframe}. "
+                    f"{hmm_non_convergence_detail}."
+                )
+
+        if trend_pct_20 >= 0.6 and trend_pct_50 >= 0.1:
+            trend_bias = "bullish"
+        elif trend_pct_20 <= -0.6 and trend_pct_50 <= -0.1:
+            trend_bias = "bearish"
+        else:
+            trend_bias = "neutral"
+
+        volatility_state = "normal"
+        if atr_pct_latest >= 2.0 or ret_std_20 >= 1.6:
+            volatility_state = "extreme"
+        elif atr_pct_latest >= 1.0 or ret_std_20 >= 0.9:
+            volatility_state = "high"
+        elif atr_pct_latest <= 0.3:
+            volatility_state = "low"
+
+        expansion_state = "balanced"
+        if expansion_ratio >= 2.2 or move_3_bars_pct >= 4.0:
+            expansion_state = "panic_expansion"
+        elif expansion_ratio >= 1.35:
+            expansion_state = "expanding"
+        elif expansion_ratio <= 0.7:
+            expansion_state = "compressed"
+
+        liquidity_state = "normal"
+        if vol_ratio < 0.45:
+            liquidity_state = "illiquid"
+        elif vol_ratio < 0.8:
+            liquidity_state = "thin"
+        elif vol_ratio > 1.7:
+            liquidity_state = "thick"
+
+        regime_label = "range_balanced"
+        if liquidity_state in {"illiquid", "thin"} and expansion_state in {"balanced", "compressed"}:
+            regime_label = "illiquid_noise"
+        elif expansion_state == "panic_expansion":
+            regime_label = "panic_expansion"
+        elif expansion_state == "compressed" and abs(trend_pct_20) < 0.8:
+            regime_label = "compression_pre_breakout"
+        elif abs(trend_pct_20) >= 2.2 and expansion_ratio >= 1.35:
+            regime_label = "trend_exhausted"
+        elif trend_bias == "bullish" or hmm_label == HMMRegimeDetector.BULL_TREND:
+            regime_label = "trend_clean_up"
+        elif trend_bias == "bearish" or hmm_label == HMMRegimeDetector.BEAR_TREND:
+            regime_label = "trend_clean_down"
+        elif expansion_ratio >= 1.3 and abs(trend_pct_20) >= 0.7:
+            regime_label = "breakout_transition"
+        elif volatility_state in {"high", "extreme"} or hmm_label == HMMRegimeDetector.HIGH_VOL_RANGE:
+            regime_label = "range_volatile"
+
+        if regime_label not in REGIME_LABEL_UNIVERSE:
+            regime_label = "range_balanced"
+
+        trend_conf = min(1.0, abs(trend_pct_20) / 3.0)
+        vol_conf = min(1.0, abs(expansion_ratio - 1.0) / 1.4)
+        confidence = 0.38
+        if regime_label.startswith("trend_clean"):
+            confidence += 0.32 * trend_conf + 0.18 * vol_conf
+        elif regime_label == "trend_exhausted":
+            confidence += 0.22 * trend_conf + 0.25 * vol_conf
+        elif regime_label in {"range_balanced", "compression_pre_breakout", "illiquid_noise"}:
+            confidence += 0.20 * (1.0 - trend_conf) + 0.15 * (1.0 - min(vol_conf, 1.0))
+        else:
+            confidence += 0.28 * vol_conf + 0.14 * trend_conf
+        if hmm_label in {
+            HMMRegimeDetector.BULL_TREND,
+            HMMRegimeDetector.BEAR_TREND,
+            HMMRegimeDetector.HIGH_VOL_RANGE,
+            HMMRegimeDetector.LOW_VOL_RANGE,
+        }:
+            confidence += 0.08
+        elif hmm_label in {HMMRegimeDetector.UNKNOWN, HMMRegimeDetector.WARMUP}:
+            confidence -= 0.05
+        regime_confidence = float(max(0.05, min(confidence, 0.99)))
+
+        session_label = self._resolve_session_label(observed_at)
+        regime_features = {
+            "engine_version": REGIME_ENGINE_VERSION,
+            "hmm_label": str(hmm_label),
+            "hmm_allowed_ratio": float(hmm_allowed_ratio),
+            "hmm_converged": bool(hmm_converged),
+            "hmm_non_converged_windows": int(hmm_non_converged_windows),
+            "hmm_window_count": int(hmm_window_count),
+            "trend_pct_20": float(trend_pct_20),
+            "trend_pct_50": float(trend_pct_50),
+            "atr_pct_latest": float(atr_pct_latest),
+            "atr_pct_baseline": float(atr_pct_baseline),
+            "range_pct_latest": float(range_pct_latest),
+            "range_pct_baseline": float(range_pct_baseline),
+            "ret_std_20": float(ret_std_20),
+            "expansion_ratio": float(expansion_ratio),
+            "volume_ratio": float(vol_ratio),
+            "move_3_bars_pct": float(move_3_bars_pct),
+            "trend_bias": str(trend_bias),
+            "volatility_state": str(volatility_state),
+            "expansion_state": str(expansion_state),
+            "liquidity_state": str(liquidity_state),
+        }
+        regime_payload = {
+            "regime_label": regime_label,
+            "regime_confidence": regime_confidence,
+            "trend_bias": trend_bias,
+            "volatility_state": volatility_state,
+            "expansion_state": expansion_state,
+            "liquidity_state": liquidity_state,
+            "session_label": session_label,
+            "regime_features_json": regime_features,
+        }
+
+        if self._db is not None:
+            with suppress(Exception):
+                self._db.insert_regime_observation(
+                    RegimeObservationCreate(
+                        observed_at=observed_at,
+                        symbol=normalized_symbol,
+                        timeframe=normalized_timeframe,
+                        regime_label=regime_label,
+                        regime_confidence=regime_confidence,
+                        trend_bias=trend_bias,
+                        volatility_state=volatility_state,
+                        expansion_state=expansion_state,
+                        liquidity_state=liquidity_state,
+                        session_label=session_label,
+                        regime_features_json=regime_features,
+                        source=REGIME_ENGINE_VERSION,
+                    )
+                )
+
+        self._runtime_regime_cache[cache_key] = {
+            "observed_at": observed_at,
+            "payload": dict(regime_payload),
+        }
+        return regime_payload
+
+    def build_entry_snapshot(
+        self,
+        *,
+        symbol: str,
+        strategy_name: str,
+        timeframe: str,
+        side: str,
+        entry_time: datetime,
+        entry_price: float,
+        leverage_scale: float,
+        profile_version: str,
+        regime_payload: Mapping[str, object],
+        signal_direction: int,
+        signal_diagnostics: Mapping[str, object] | None,
+        candles_dataframe: pd.DataFrame,
+        setup_gate_score: float | None,
+        setup_gate_reason: str,
+        candidate_state: str,
+    ) -> dict[str, object]:
+        diagnostics = dict(signal_diagnostics or {})
+        safe_entry_price = float(entry_price) if math.isfinite(float(entry_price)) else 0.0
+        if safe_entry_price <= 0.0:
+            safe_entry_price = 1e-9
+        close_series = pd.to_numeric(candles_dataframe["close"], errors="coerce").ffill().bfill()
+        high_series = pd.to_numeric(candles_dataframe["high"], errors="coerce").ffill().bfill()
+        low_series = pd.to_numeric(candles_dataframe["low"], errors="coerce").ffill().bfill()
+        volume_series = pd.to_numeric(candles_dataframe["volume"], errors="coerce").ffill().bfill()
+        close_safe = close_series.clip(lower=1e-9)
+        prev_close = close_safe.shift(1).fillna(close_safe)
+        true_range = pd.concat(
+            [
+                (high_series - low_series).abs(),
+                (high_series - prev_close).abs(),
+                (low_series - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr_pct_at_entry = float(((true_range / close_safe) * 100.0).tail(14).mean()) if len(true_range) > 0 else 0.0
+        volume_ratio_at_entry = (
+            float(volume_series.iloc[-1]) / max(float(volume_series.tail(20).mean()), 1e-9)
+            if len(volume_series) > 0
+            else 1.0
+        )
+        spread_estimate = (
+            float((high_series.iloc[-1] - low_series.iloc[-1]) / max(close_safe.iloc[-1], 1e-9) * 100.0)
+            if len(close_safe) > 0
+            else 0.0
+        )
+        move_last_1 = float(diagnostics.get("latest_move_last_1_bar_pct", 0.0) or 0.0)
+        move_last_2 = float(diagnostics.get("latest_move_last_2_bars_pct", 0.0) or 0.0)
+        move_last_3 = float(diagnostics.get("latest_move_last_3_bars_pct", 0.0) or 0.0)
+        distance_to_reference = float(diagnostics.get("latest_distance_to_reference_pct", 0.0) or 0.0)
+        atr_extension_mult = float(diagnostics.get("latest_atr_extension_mult", 0.0) or 0.0)
+        move_already_extended_pct = max(abs(move_last_1), abs(move_last_2), abs(move_last_3), abs(distance_to_reference))
+        base_signal_strength = 1.0 if abs(int(signal_direction)) >= 1 else 0.0
+        expansion_component = min(1.0, abs(move_last_3) / 3.5)
+        guard_component = 0.0
+        with suppress(Exception):
+            if float(diagnostics.get("latest_late_entry_guard_blocked", 0.0) or 0.0) < 0.5:
+                guard_component = 1.0
+        signal_strength = float(
+            max(
+                0.05,
+                min(
+                    1.0,
+                    (0.55 * base_signal_strength)
+                    + (0.25 * expansion_component)
+                    + (0.20 * guard_component),
+                ),
+            )
+        )
+        regime_confidence = float(regime_payload.get("regime_confidence", 0.0) or 0.0)
+        if setup_gate_score is not None and math.isfinite(float(setup_gate_score)):
+            confidence_score = float(max(0.0, min(1.0, float(setup_gate_score) / 100.0)))
+        else:
+            confidence_score = float(
+                max(
+                    0.05,
+                    min(
+                        0.99,
+                        0.30 + (0.45 * signal_strength) + (0.25 * regime_confidence),
+                    ),
+                )
+            )
+        setup_reason_code = str(setup_gate_reason).strip()
+        if not setup_reason_code:
+            setup_reason_code = str(diagnostics.get("latest_blocker_reason", "") or "").strip()
+        if not setup_reason_code:
+            setup_reason_code = "signal_confirmed"
+
+        regime_features_json = regime_payload.get("regime_features_json")
+        if not isinstance(regime_features_json, Mapping):
+            regime_features_json = {}
+        return {
+            "symbol": str(symbol).strip().upper(),
+            "strategy_name": str(strategy_name).strip(),
+            "timeframe": str(timeframe).strip(),
+            "side": str(side).strip().upper(),
+            "entry_time": entry_time.isoformat(),
+            "entry_price": float(safe_entry_price),
+            "leverage": float(max(1.0, leverage_scale)),
+            "profile_version": str(profile_version),
+            "regime_label_at_entry": str(regime_payload.get("regime_label", "range_balanced")),
+            "regime_confidence": float(max(0.0, min(regime_confidence, 1.0))),
+            "trend_bias": str(regime_payload.get("trend_bias", "neutral")),
+            "volatility_state": str(regime_payload.get("volatility_state", "normal")),
+            "expansion_state": str(regime_payload.get("expansion_state", "balanced")),
+            "liquidity_state": str(regime_payload.get("liquidity_state", "normal")),
+            "session_label": str(regime_payload.get("session_label", self._resolve_session_label(entry_time))),
+            "signal_strength": float(signal_strength),
+            "confidence_score": float(confidence_score),
+            "atr_pct_at_entry": float(atr_pct_at_entry),
+            "volume_ratio_at_entry": float(volume_ratio_at_entry),
+            "spread_estimate": float(spread_estimate),
+            "move_already_extended_pct": float(move_already_extended_pct),
+            "ema_distance_metrics": {
+                "distance_to_reference_pct": float(distance_to_reference),
+                "atr_extension_mult": float(atr_extension_mult),
+                "ema_spread_entry_pct_mean": float(diagnostics.get("ema_spread_entry_pct_mean", 0.0) or 0.0),
+                "ema_spread_entry_pct_max": float(diagnostics.get("ema_spread_entry_pct_max", 0.0) or 0.0),
+                "ema_spread_pct_mean": float(diagnostics.get("ema_spread_pct_mean", 0.0) or 0.0),
+            },
+            "recent_range_metrics": {
+                "move_last_1_bar_pct": float(move_last_1),
+                "move_last_2_bars_pct": float(move_last_2),
+                "move_last_3_bars_pct": float(move_last_3),
+                "atr_extension_mult": float(atr_extension_mult),
+                "range_pct_last_bar": float(spread_estimate),
+            },
+            "setup_reason_code": setup_reason_code,
+            "veto_flags": {
+                "setup_gate_enabled": bool(self._setup_gate is not None),
+                "setup_gate_reason": str(setup_gate_reason or ""),
+                "live_candidate_state": str(candidate_state or ""),
+                "late_entry_guard_blocked": bool(
+                    float(diagnostics.get("latest_late_entry_guard_blocked", 0.0) or 0.0) >= 0.5
+                ),
+                "latest_blocker_reason": str(diagnostics.get("latest_blocker_reason", "") or ""),
+            },
+            "regime_features_json": dict(regime_features_json),
+            "feature_snapshot_version": ENTRY_SNAPSHOT_SCHEMA_VERSION,
+        }
+
+    def _resolve_configured_take_profit_pct(self, symbol: str) -> float:
+        normalized_symbol = str(symbol).strip().upper()
+        production_profile = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol)
+        if isinstance(production_profile, Mapping):
+            with suppress(Exception):
+                resolved_tp = float(production_profile.get("take_profit_pct", 0.0) or 0.0)
+                if math.isfinite(resolved_tp) and resolved_tp > 0.0:
+                    return resolved_tp
+        coin_profile = settings.trading.coin_profiles.get(normalized_symbol)
+        if coin_profile is not None and coin_profile.take_profit_pct is not None:
+            with suppress(Exception):
+                resolved_tp = float(coin_profile.take_profit_pct)
+                if math.isfinite(resolved_tp) and resolved_tp > 0.0:
+                    return resolved_tp
+        return float(settings.trading.take_profit_pct)
+
+    def _resolve_configured_stop_loss_pct(self, symbol: str) -> float:
+        normalized_symbol = str(symbol).strip().upper()
+        production_profile = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol)
+        if isinstance(production_profile, Mapping):
+            with suppress(Exception):
+                resolved_sl = float(production_profile.get("stop_loss_pct", 0.0) or 0.0)
+                if math.isfinite(resolved_sl) and resolved_sl > 0.0:
+                    return resolved_sl
+        coin_profile = settings.trading.coin_profiles.get(normalized_symbol)
+        if coin_profile is not None and coin_profile.stop_loss_pct is not None:
+            with suppress(Exception):
+                resolved_sl = float(coin_profile.stop_loss_pct)
+                if math.isfinite(resolved_sl) and resolved_sl > 0.0:
+                    return resolved_sl
+        return float(settings.trading.stop_loss_pct)
+
+    def _build_trade_lifecycle_snapshot(self, trade: PaperTrade) -> dict[str, object]:
+        if self._db is None:
+            return {
+                "max_favorable_excursion": 0.0,
+                "max_adverse_excursion": 0.0,
+                "bars_in_trade": 0,
+                "exit_trigger_category": "unknown",
+                "did_reach_partial_tp": False,
+                "best_unrealized_pnl": 0.0,
+                "worst_unrealized_pnl": 0.0,
+            }
+        if trade.exit_time is None:
+            return {
+                "max_favorable_excursion": 0.0,
+                "max_adverse_excursion": 0.0,
+                "bars_in_trade": 0,
+                "exit_trigger_category": "open",
+                "did_reach_partial_tp": False,
+                "best_unrealized_pnl": 0.0,
+                "worst_unrealized_pnl": 0.0,
+            }
+
+        timeframe = (
+            str(trade.timeframe).strip()
+            if trade.timeframe is not None and str(trade.timeframe).strip()
+            else self._target_interval_for_symbol(trade.symbol)
+        )
+        interval_seconds = max(_interval_total_seconds(timeframe), 60)
+        start_time = trade.entry_time - timedelta(seconds=interval_seconds)
+        end_time = trade.exit_time + timedelta(seconds=interval_seconds)
+        candles = self._db.fetch_candles_since(
+            trade.symbol,
+            timeframe,
+            start_time=start_time,
+            end_time=end_time,
+            limit=6000,
+        )
+        side = str(trade.side).strip().upper()
+        entry_price = max(float(trade.entry_price), 1e-9)
+        max_favorable_pct = 0.0
+        max_adverse_pct = 0.0
+        best_unrealized_pnl = 0.0
+        worst_unrealized_pnl = 0.0
+        for candle in candles:
+            if side == "LONG":
+                favorable_pct = ((float(candle.high) / entry_price) - 1.0) * 100.0
+                adverse_pct = ((float(candle.low) / entry_price) - 1.0) * 100.0
+            else:
+                favorable_pct = ((entry_price / max(float(candle.low), 1e-9)) - 1.0) * 100.0
+                adverse_pct = ((entry_price / max(float(candle.high), 1e-9)) - 1.0) * 100.0
+                adverse_pct = min(0.0, adverse_pct)
+            max_favorable_pct = max(max_favorable_pct, float(favorable_pct))
+            adverse_abs = abs(min(0.0, float(adverse_pct)))
+            max_adverse_pct = max(max_adverse_pct, adverse_abs)
+            best_unrealized_pnl = max(
+                best_unrealized_pnl,
+                float(favorable_pct) / 100.0 * entry_price * float(trade.qty),
+            )
+            worst_unrealized_pnl = min(
+                worst_unrealized_pnl,
+                -adverse_abs / 100.0 * entry_price * float(trade.qty),
+            )
+
+        exit_status = str(trade.status or "").strip().upper()
+        if exit_status in {
+            "CLOSED_SL",
+            "BREAKEVEN_STOP",
+            "TRAILING_STOP",
+            "TIGHT_TRAILING_STOP",
+            "INTRABAR_SL",
+            "INTRABAR_TRAILING",
+            "INTRABAR_BREAKEVEN",
+        }:
+            exit_trigger_category = "stop"
+        elif exit_status in {"CLOSED_TP", "INTRABAR_TP"}:
+            exit_trigger_category = "take_profit"
+        elif exit_status in {"STRATEGY_EXIT", "MANUAL_CLOSE"}:
+            exit_trigger_category = "manual_or_strategy"
+        else:
+            exit_trigger_category = "other"
+
+        configured_tp_pct = self._resolve_configured_take_profit_pct(trade.symbol)
+        did_reach_partial_tp = bool(max_favorable_pct >= max(0.25, configured_tp_pct * 0.5))
+        return {
+            "max_favorable_excursion": float(max_favorable_pct),
+            "max_adverse_excursion": float(max_adverse_pct),
+            "bars_in_trade": int(len(candles)),
+            "exit_trigger_category": str(exit_trigger_category),
+            "did_reach_partial_tp": bool(did_reach_partial_tp),
+            "best_unrealized_pnl": float(best_unrealized_pnl),
+            "worst_unrealized_pnl": float(worst_unrealized_pnl),
+            "configured_take_profit_pct": float(configured_tp_pct),
+            "configured_stop_loss_pct": float(self._resolve_configured_stop_loss_pct(trade.symbol)),
+        }
+
+    def _ensure_lifecycle_snapshot(self, trade: PaperTrade) -> dict[str, object]:
+        existing_payload = self._parse_json_payload(trade.lifecycle_snapshot_json)
+        required_fields = {
+            "max_favorable_excursion",
+            "max_adverse_excursion",
+            "bars_in_trade",
+            "exit_trigger_category",
+            "did_reach_partial_tp",
+            "best_unrealized_pnl",
+            "worst_unrealized_pnl",
+        }
+        if required_fields.issubset(existing_payload.keys()):
+            return existing_payload
+        lifecycle_snapshot = self._build_trade_lifecycle_snapshot(trade)
+        if self._db is not None:
+            with suppress(Exception):
+                self._db.update_trade(
+                    trade.id,
+                    PaperTradeUpdate(lifecycle_snapshot_json=lifecycle_snapshot),
+                )
+        return lifecycle_snapshot
+
+    def review_closed_trade(self, trade_id: int) -> dict[str, object] | None:
+        if self._db is None:
+            return None
+        trade = self._db.fetch_trade_by_id(trade_id)
+        if trade is None or str(trade.status).upper() == "OPEN":
+            return None
+
+        lifecycle_snapshot = self._ensure_lifecycle_snapshot(trade)
+        entry_snapshot = self._parse_json_payload(trade.entry_snapshot_json)
+        recent_range_metrics = self._parse_json_payload(entry_snapshot.get("recent_range_metrics"))
+
+        strategy_name = (
+            str(trade.strategy_name).strip()
+            if trade.strategy_name is not None and str(trade.strategy_name).strip()
+            else resolve_strategy_for_symbol(trade.symbol, self._strategy_name)
+        )
+        timeframe = (
+            str(trade.timeframe).strip()
+            if trade.timeframe is not None and str(trade.timeframe).strip()
+            else self._target_interval_for_symbol(trade.symbol)
+        )
+        regime_label = (
+            str(trade.regime_label_at_entry).strip()
+            if trade.regime_label_at_entry is not None and str(trade.regime_label_at_entry).strip()
+            else str(entry_snapshot.get("regime_label_at_entry", "range_balanced"))
+        )
+        trend_bias = str(entry_snapshot.get("trend_bias", "neutral") or "neutral")
+        signal_strength = float(
+            trade.signal_strength
+            if trade.signal_strength is not None
+            else float(entry_snapshot.get("signal_strength", 0.0) or 0.0)
+        )
+        confidence_score = float(
+            trade.confidence_score
+            if trade.confidence_score is not None
+            else float(entry_snapshot.get("confidence_score", 0.0) or 0.0)
+        )
+        move_already_extended_pct = float(
+            trade.move_already_extended_pct
+            if trade.move_already_extended_pct is not None
+            else float(entry_snapshot.get("move_already_extended_pct", 0.0) or 0.0)
+        )
+        max_favorable_excursion = float(lifecycle_snapshot.get("max_favorable_excursion", 0.0) or 0.0)
+        max_adverse_excursion = float(lifecycle_snapshot.get("max_adverse_excursion", 0.0) or 0.0)
+        best_unrealized_pnl = float(lifecycle_snapshot.get("best_unrealized_pnl", 0.0) or 0.0)
+        worst_unrealized_pnl = float(lifecycle_snapshot.get("worst_unrealized_pnl", 0.0) or 0.0)
+        did_reach_partial_tp = bool(lifecycle_snapshot.get("did_reach_partial_tp", False))
+        trade_pnl = float(trade.pnl or 0.0)
+        stop_loss_pct = float(lifecycle_snapshot.get("configured_stop_loss_pct", self._resolve_configured_stop_loss_pct(trade.symbol)) or 0.0)
+        take_profit_pct = float(lifecycle_snapshot.get("configured_take_profit_pct", self._resolve_configured_take_profit_pct(trade.symbol)) or 0.0)
+
+        side = str(trade.side).strip().upper()
+        entry_against_regime = bool(
+            (side == "LONG" and (regime_label == "trend_clean_down" or trend_bias == "bearish"))
+            or (side == "SHORT" and (regime_label == "trend_clean_up" or trend_bias == "bullish"))
+        )
+        strategy_regime_mismatch = not self._strategy_regime_matches(strategy_name, regime_label)
+        regime_mismatch_flag = bool(entry_against_regime or strategy_regime_mismatch)
+        overextended_entry_flag = bool(
+            move_already_extended_pct >= max(1.2, stop_loss_pct * 0.8)
+            or regime_label in {"trend_exhausted", "panic_expansion"}
+        )
+        late_entry_flag = bool(
+            overextended_entry_flag
+            or float(recent_range_metrics.get("move_last_1_bar_pct", 0.0) or 0.0) >= 1.0
+            or float(recent_range_metrics.get("move_last_2_bars_pct", 0.0) or 0.0) >= 1.6
+        )
+        insufficient_confirmation = bool(confidence_score < 0.45 or signal_strength < 0.45)
+        strategy_coin_mismatch = False
+        profile = PRODUCTION_PROFILE_REGISTRY.get(str(trade.symbol).strip().upper())
+        if isinstance(profile, Mapping):
+            profile_strategy = str(profile.get("strategy_name", "") or "").strip()
+            profile_strategy = STRATEGY_NAME_ALIASES.get(profile_strategy, profile_strategy)
+            strategy_coin_mismatch = bool(profile_strategy and profile_strategy != strategy_name)
+
+        status_upper = str(trade.status or "").strip().upper()
+        stop_exit_status = status_upper in {
+            "CLOSED_SL",
+            "BREAKEVEN_STOP",
+            "TRAILING_STOP",
+            "TIGHT_TRAILING_STOP",
+            "INTRABAR_SL",
+            "INTRABAR_TRAILING",
+            "INTRABAR_BREAKEVEN",
+        }
+        sl_too_tight_flag = bool(
+            stop_exit_status
+            and max_favorable_excursion >= max(0.6, stop_loss_pct * 0.75)
+            and max_adverse_excursion <= max(0.6, stop_loss_pct * 0.9)
+        )
+        sl_too_wide_flag = bool(
+            trade_pnl < 0.0
+            and max_adverse_excursion > max(0.75, stop_loss_pct * 1.35)
+        )
+        tp_too_conservative = bool(
+            trade_pnl > 0.0
+            and best_unrealized_pnl > trade_pnl * 1.7
+            and max_favorable_excursion >= max(0.5, take_profit_pct * 0.5)
+        )
+        tp_too_ambitious = bool(
+            trade_pnl < 0.0
+            and stop_exit_status
+            and max_favorable_excursion < max(0.25, take_profit_pct * 0.25)
+            and not did_reach_partial_tp
+        )
+        better_no_trade_flag = bool(
+            trade_pnl < 0.0
+            and confidence_score < 0.6
+            and (
+                regime_mismatch_flag
+                or late_entry_flag
+                or overextended_entry_flag
+                or insufficient_confirmation
+                or strategy_coin_mismatch
+            )
+        )
+        avoidable_loss_flag = bool(
+            trade_pnl < 0.0
+            and (
+                better_no_trade_flag
+                or late_entry_flag
+                or regime_mismatch_flag
+                or overextended_entry_flag
+                or insufficient_confirmation
+                or sl_too_tight_flag
+            )
+        )
+        better_exit_possible_flag = bool(tp_too_conservative or tp_too_ambitious or sl_too_tight_flag or sl_too_wide_flag)
+
+        error_hits: list[str] = []
+        if better_no_trade_flag:
+            error_hits.append("should_not_have_traded")
+        if strategy_coin_mismatch:
+            error_hits.append("strategy_coin_mismatch")
+        if strategy_regime_mismatch:
+            error_hits.append("strategy_regime_mismatch")
+        if entry_against_regime:
+            error_hits.append("entry_against_regime")
+        if regime_label in {"trend_exhausted", "panic_expansion"}:
+            error_hits.append("entry_into_exhaustion")
+        if late_entry_flag:
+            error_hits.append("late_entry_after_expansion")
+        if insufficient_confirmation:
+            error_hits.append("entry_without_sufficient_confirmation")
+        if sl_too_tight_flag:
+            error_hits.append("stop_too_tight")
+        if sl_too_wide_flag:
+            error_hits.append("stop_too_wide")
+        if tp_too_conservative:
+            error_hits.append("tp_too_conservative")
+        if tp_too_ambitious:
+            error_hits.append("tp_too_ambitious")
+        error_hits = [error for error in error_hits if error in REVIEW_ERROR_CATALOG]
+        error_type_primary = error_hits[0] if error_hits else None
+        error_type_secondary = error_hits[1] if len(error_hits) > 1 else None
+
+        trade_quality_score = 55.0
+        if trade_pnl > 0.0:
+            trade_quality_score += 18.0
+        elif trade_pnl < 0.0:
+            trade_quality_score -= 22.0
+        if confidence_score >= 0.65:
+            trade_quality_score += 6.0
+        if signal_strength >= 0.65:
+            trade_quality_score += 4.0
+        if late_entry_flag:
+            trade_quality_score -= 10.0
+        if regime_mismatch_flag:
+            trade_quality_score -= 12.0
+        if overextended_entry_flag:
+            trade_quality_score -= 8.0
+        if insufficient_confirmation:
+            trade_quality_score -= 8.0
+        if sl_too_tight_flag:
+            trade_quality_score -= 7.0
+        if sl_too_wide_flag:
+            trade_quality_score -= 7.0
+        if better_no_trade_flag:
+            trade_quality_score -= 10.0
+        if avoidable_loss_flag:
+            trade_quality_score -= 8.0
+        trade_quality_score = float(max(0.0, min(100.0, trade_quality_score)))
+
+        notes_auto = {
+            "engine_version": TRADE_REVIEW_ENGINE_VERSION,
+            "error_catalog": list(REVIEW_ERROR_CATALOG),
+            "triggered_errors": list(error_hits),
+            "regime_label": regime_label,
+            "trend_bias": trend_bias,
+            "strategy_name": strategy_name,
+            "timeframe": timeframe,
+            "confidence_score": float(confidence_score),
+            "signal_strength": float(signal_strength),
+            "move_already_extended_pct": float(move_already_extended_pct),
+            "max_favorable_excursion": float(max_favorable_excursion),
+            "max_adverse_excursion": float(max_adverse_excursion),
+            "best_unrealized_pnl": float(best_unrealized_pnl),
+            "worst_unrealized_pnl": float(worst_unrealized_pnl),
+            "trade_pnl": float(trade_pnl),
+        }
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        review_create = TradeReviewCreate(
+            trade_id=int(trade.id),
+            created_at=now,
+            updated_at=now,
+            symbol=str(trade.symbol).strip().upper(),
+            strategy_name=strategy_name,
+            timeframe=timeframe,
+            trade_quality_score=float(trade_quality_score),
+            error_type_primary=error_type_primary,
+            error_type_secondary=error_type_secondary,
+            better_no_trade_flag=bool(better_no_trade_flag),
+            better_exit_possible_flag=bool(better_exit_possible_flag),
+            late_entry_flag=bool(late_entry_flag),
+            regime_mismatch_flag=bool(regime_mismatch_flag),
+            overextended_entry_flag=bool(overextended_entry_flag),
+            sl_too_tight_flag=bool(sl_too_tight_flag),
+            sl_too_wide_flag=bool(sl_too_wide_flag),
+            avoidable_loss_flag=bool(avoidable_loss_flag),
+            notes_auto_json=notes_auto,
+            review_engine_version=TRADE_REVIEW_ENGINE_VERSION,
+        )
+        self._db.upsert_trade_review(review_create)
+        self._db.update_trade(
+            trade.id,
+            PaperTradeUpdate(
+                strategy_name=strategy_name,
+                timeframe=timeframe,
+                lifecycle_snapshot_json=lifecycle_snapshot,
+                review_status="REVIEWED_AUTO",
+            ),
+        )
+        return {
+            "trade_id": int(trade.id),
+            "trade_quality_score": float(trade_quality_score),
+            "error_type_primary": error_type_primary,
+            "error_type_secondary": error_type_secondary,
+            "avoidable_loss_flag": bool(avoidable_loss_flag),
+        }
+
+    @staticmethod
+    def _strategy_regime_matches(strategy_name: str, regime_label: str) -> bool:
+        normalized_strategy = _sanitize_backtest_strategy_name(strategy_name)
+        normalized_regime = str(regime_label).strip()
+        if normalized_regime not in REGIME_LABEL_UNIVERSE:
+            return True
+        expected_map: dict[str, set[str]] = {
+            "frama_cross": {
+                "trend_clean_up",
+                "trend_clean_down",
+                "breakout_transition",
+                "trend_exhausted",
+            },
+            "dual_thrust": {
+                "breakout_transition",
+                "compression_pre_breakout",
+                "range_volatile",
+                "panic_expansion",
+            },
+            "ema_band_rejection": {
+                "range_balanced",
+                "range_volatile",
+                "compression_pre_breakout",
+                "trend_exhausted",
+            },
+            "ema_cross_volume": {
+                "trend_clean_up",
+                "trend_clean_down",
+                "breakout_transition",
+                "range_volatile",
+            },
+        }
+        expected = expected_map.get(normalized_strategy)
+        if expected is None:
+            return True
+        return normalized_regime in expected
+
+    @staticmethod
+    def _max_loss_streak(trades_desc: Sequence[PaperTrade]) -> int:
+        max_streak = 0
+        running_streak = 0
+        for trade in reversed(list(trades_desc)):
+            trade_pnl = float(trade.pnl or 0.0)
+            if trade_pnl < 0.0:
+                running_streak += 1
+                max_streak = max(max_streak, running_streak)
+            else:
+                running_streak = 0
+        return int(max_streak)
+
+    def recompute_strategy_health(
+        self,
+        *,
+        symbol: str,
+        strategy_name: str,
+        timeframe: str,
+    ) -> StrategyHealthSnapshot | None:
+        if self._db is None:
+            return None
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_strategy = _sanitize_backtest_strategy_name(strategy_name)
+        normalized_timeframe = str(timeframe).strip()
+
+        production_profile = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol)
+        configured_window = 60
+        if isinstance(production_profile, Mapping):
+            with suppress(Exception):
+                configured_window = int(float(production_profile.get("health_window_size", configured_window) or configured_window))
+        window_size = max(20, min(320, configured_window))
+
+        closed_trades_desc = self._db.fetch_closed_trades(
+            symbol=normalized_symbol,
+            strategy_name=normalized_strategy,
+            timeframe=normalized_timeframe,
+            limit=window_size,
+        )
+        trade_count = int(len(closed_trades_desc))
+        trade_ids = [int(trade.id) for trade in closed_trades_desc]
+        reviews = self._db.fetch_trade_reviews_for_trade_ids(trade_ids)
+        review_by_trade_id = {int(review.trade_id): review for review in reviews}
+        review_count = int(len(reviews))
+        regime_observations = self._db.fetch_recent_regime_observations(
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            limit=max(window_size * 3, 120),
+        )
+
+        pnl_sum = float(sum(float(trade.pnl or 0.0) for trade in closed_trades_desc))
+        wins = int(sum(1 for trade in closed_trades_desc if float(trade.pnl or 0.0) > 0.0))
+        winrate = float((wins / trade_count) * 100.0) if trade_count > 0 else 0.0
+        avg_pnl = float(pnl_sum / trade_count) if trade_count > 0 else 0.0
+        avg_fees = (
+            float(sum(float(trade.total_fees or 0.0) for trade in closed_trades_desc) / trade_count)
+            if trade_count > 0
+            else 0.0
+        )
+        late_entry_count = int(
+            sum(1 for trade_id, review in review_by_trade_id.items() if review.late_entry_flag and trade_id in trade_ids)
+        )
+        regime_mismatch_count = int(
+            sum(1 for trade_id, review in review_by_trade_id.items() if review.regime_mismatch_flag and trade_id in trade_ids)
+        )
+        avoidable_loss_count = int(
+            sum(1 for trade_id, review in review_by_trade_id.items() if review.avoidable_loss_flag and trade_id in trade_ids)
+        )
+        error_count = int(
+            sum(
+                1
+                for trade_id, review in review_by_trade_id.items()
+                if review.error_type_primary and trade_id in trade_ids
+            )
+        )
+        late_entry_rate = float(late_entry_count / trade_count) if trade_count > 0 else 0.0
+        regime_mismatch_rate = float(regime_mismatch_count / trade_count) if trade_count > 0 else 0.0
+        avoidable_loss_rate = float(avoidable_loss_count / trade_count) if trade_count > 0 else 0.0
+        error_rate = float(error_count / trade_count) if trade_count > 0 else 0.0
+        max_loss_streak = self._max_loss_streak(closed_trades_desc)
+
+        regime_fit_trials = 0
+        regime_fit_hits = 0
+        for trade in closed_trades_desc:
+            if trade.regime_label_at_entry is None:
+                continue
+            regime_fit_trials += 1
+            if self._strategy_regime_matches(normalized_strategy, str(trade.regime_label_at_entry)):
+                regime_fit_hits += 1
+        regime_fit_rate = (
+            float(regime_fit_hits / regime_fit_trials)
+            if regime_fit_trials > 0
+            else 0.5
+        )
+        dominant_regime = "unknown"
+        if regime_observations:
+            regime_counts: dict[str, int] = {}
+            for observation in regime_observations:
+                regime_counts[observation.regime_label] = regime_counts.get(observation.regime_label, 0) + 1
+            if regime_counts:
+                dominant_regime = max(regime_counts.items(), key=lambda item: item[1])[0]
+
+        sample_soft_floor = 8.0
+        sample_full_weight = 40.0
+        sample_factor = float(
+            max(
+                0.0,
+                min(
+                    1.0,
+                    (float(trade_count) - sample_soft_floor) / max(sample_full_weight - sample_soft_floor, 1.0),
+                ),
+            )
+        )
+        profitability_component = 50.0
+        profitability_component += max(-22.0, min(22.0, (winrate - 50.0) * 0.55))
+        profitability_component += max(
+            -20.0,
+            min(
+                20.0,
+                (avg_pnl / max(abs(avg_pnl) + 5.0, 5.0)) * 20.0,
+            ),
+        )
+        profitability_component += max(
+            -16.0,
+            min(
+                16.0,
+                (pnl_sum / max(float(settings.trading.start_capital), 1.0)) * 140.0,
+            ),
+        )
+        error_penalty = (
+            (late_entry_rate * 12.0)
+            + (regime_mismatch_rate * 18.0)
+            + (avoidable_loss_rate * 22.0)
+            + (error_rate * 16.0)
+            + (float(max_loss_streak) * 2.5)
+        )
+        regime_bonus = (regime_fit_rate - 0.5) * 18.0
+        raw_health_score = profitability_component + regime_bonus - error_penalty
+        health_score = 50.0 + (raw_health_score - 50.0) * (0.20 + (0.80 * sample_factor))
+        health_score = float(max(0.0, min(100.0, health_score)))
+
+        # Mode B: low-sample data should stay neutral/healthy unless we have solid evidence.
+        low_sample_observe_only = trade_count < META_MIN_SAMPLE_SIZE_FOR_PROMOTION
+        state = "healthy"
+        if low_sample_observe_only:
+            state = "healthy"
+        elif health_score < 40.0 or max_loss_streak >= 7:
+            state = "degraded"
+        elif health_score < 55.0:
+            state = "watchlist"
+        elif health_score < 68.0:
+            state = "degraded"
+
+        risk_multiplier = 1.0
+        if state == "healthy":
+            if low_sample_observe_only:
+                risk_multiplier = 1.0
+            else:
+                risk_multiplier = float(max(0.95, min(1.10, 0.98 + ((health_score - 68.0) / 32.0) * 0.12)))
+        elif state == "degraded":
+            risk_multiplier = 0.90
+        elif state == "watchlist":
+            risk_multiplier = 1.00
+
+        last_review_at: datetime | None = None
+        for review in reviews:
+            if last_review_at is None or review.updated_at > last_review_at:
+                last_review_at = review.updated_at
+        profile_version = self._resolve_profile_version(
+            symbol=normalized_symbol,
+            strategy_name=normalized_strategy,
+            timeframe=normalized_timeframe,
+        )
+        health_features = {
+            "engine_version": STRATEGY_HEALTH_ENGINE_VERSION,
+            "sample_factor": float(sample_factor),
+            "review_count": int(review_count),
+            "review_coverage": float(review_count / trade_count) if trade_count > 0 else 0.0,
+            "regime_fit_rate": float(regime_fit_rate),
+            "regime_fit_trials": int(regime_fit_trials),
+            "dominant_recent_regime": str(dominant_regime),
+            "regime_observation_count": int(len(regime_observations)),
+            "profitability_component": float(profitability_component),
+            "error_penalty": float(error_penalty),
+            "regime_bonus": float(regime_bonus),
+            "raw_health_score": float(raw_health_score),
+            "low_sample_observe_only": bool(low_sample_observe_only),
+        }
+        snapshot = StrategyHealthSnapshot(
+            symbol=normalized_symbol,
+            strategy_name=normalized_strategy,
+            timeframe=normalized_timeframe,
+            computed_at=datetime.now(tz=UTC).replace(tzinfo=None),
+            trades_count=trade_count,
+            pnl_sum=float(pnl_sum),
+            winrate=float(winrate),
+            avg_pnl=float(avg_pnl),
+            avg_fees=float(avg_fees),
+            late_entry_rate=float(late_entry_rate),
+            regime_mismatch_rate=float(regime_mismatch_rate),
+            avoidable_loss_rate=float(avoidable_loss_rate),
+            error_rate=float(error_rate),
+            max_loss_streak=int(max_loss_streak),
+            health_score=float(health_score),
+            risk_multiplier=float(risk_multiplier),
+            state=str(state),
+            last_review_at=last_review_at,
+            window_size=int(window_size),
+            health_features_json=health_features,
+            profile_version=profile_version,
+        )
+        previous_snapshot = self._db.fetch_strategy_health(
+            symbol=normalized_symbol,
+            strategy_name=normalized_strategy,
+            timeframe=normalized_timeframe,
+        )
+        self._db.upsert_strategy_health(snapshot)
+        previous_state = None if previous_snapshot is None else str(previous_snapshot.state)
+        if previous_state is not None and previous_state != state:
+            with suppress(Exception):
+                self._db.insert_adaptation_log(
+                    AdaptationLogCreate(
+                        created_at=datetime.now(tz=UTC).replace(tzinfo=None),
+                        symbol=normalized_symbol,
+                        strategy_name=normalized_strategy,
+                        timeframe=normalized_timeframe,
+                        event_type="health_state_transition",
+                        payload_json={
+                            "previous_state": previous_state,
+                            "new_state": state,
+                            "previous_risk_multiplier": float(previous_snapshot.risk_multiplier),
+                            "new_risk_multiplier": float(risk_multiplier),
+                            "health_score": float(health_score),
+                            "trade_count": int(trade_count),
+                        },
+                        source=STRATEGY_HEALTH_ENGINE_VERSION,
+                    )
+                )
+        return snapshot
+
+    def _compute_strategy_drawdown_pct(
+        self,
+        *,
+        strategy_name: str,
+        interval: str,
+        max_trades: int = 200,
+    ) -> float:
+        if self._db is None:
+            return 0.0
+        closed_trades_desc = self._db.fetch_closed_trades(
+            strategy_name=_sanitize_backtest_strategy_name(strategy_name),
+            timeframe=str(interval).strip(),
+            limit=max(20, int(max_trades)),
+        )
+        if not closed_trades_desc:
+            return 0.0
+        equity = float(settings.trading.start_capital)
+        peak = float(equity)
+        max_drawdown_pct = 0.0
+        for trade in reversed(closed_trades_desc):
+            equity += float(trade.pnl or 0.0)
+            if equity > peak:
+                peak = float(equity)
+            elif peak > 0.0:
+                drawdown_pct = ((peak - equity) / peak) * 100.0
+                if drawdown_pct > max_drawdown_pct:
+                    max_drawdown_pct = float(drawdown_pct)
+        return float(max_drawdown_pct)
+
+    def _evaluate_global_meta_guards(
+        self,
+        *,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+    ) -> dict[str, object]:
+        if self._db is None:
+            return {"allow_trade": True, "risk_cap": 1.0, "block_reason": "", "warning_reason": "", "flags": []}
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        day_start = datetime(now.year, now.month, now.day)
+        flags: list[str] = []
+        allow_trade = True
+        risk_cap = 1.0
+        block_reason = ""
+        warning_reason = ""
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_strategy = _sanitize_backtest_strategy_name(strategy_name)
+        normalized_interval = str(interval).strip()
+        meta_key = self._meta_key(normalized_symbol, normalized_strategy, normalized_interval)
+
+        self._maybe_recover_fail_safe_mode(now=now)
+        if self._meta_fail_safe_active:
+            return {
+                "allow_trade": False,
+                "risk_cap": 0.0,
+                "block_reason": f"fail_safe_active:{self._meta_fail_safe_reason}",
+                "warning_reason": "",
+                "flags": ["fail_safe_active"],
+            }
+
+        daily_realized_pnl = float(self._db.fetch_realized_pnl_since(day_start))
+        if daily_realized_pnl <= -abs(META_MAX_DAILY_LOSS_USD):
+            allow_trade = False
+            flags.append("max_daily_loss")
+            block_reason = f"max_daily_loss:{daily_realized_pnl:.2f}"
+            self._emit_meta_warning(
+                warning_code="max_daily_loss",
+                message=f"Daily loss limit reached ({daily_realized_pnl:.2f} <= {-abs(META_MAX_DAILY_LOSS_USD):.2f}).",
+                payload={"daily_realized_pnl": daily_realized_pnl},
+            )
+
+        if allow_trade:
+            symbol_recent = self._db.fetch_recent_closed_trades(
+                normalized_symbol,
+                limit=max(20, META_MAX_SYMBOL_LOSS_STREAK + 2),
+            )
+            symbol_loss_streak = 0
+            for trade in symbol_recent:
+                if float(trade.pnl or 0.0) < 0.0:
+                    symbol_loss_streak += 1
+                else:
+                    break
+            if symbol_loss_streak >= META_MAX_SYMBOL_LOSS_STREAK:
+                allow_trade = False
+                flags.append("max_symbol_loss_streak")
+                block_reason = f"max_symbol_loss_streak:{symbol_loss_streak}"
+
+        strategy_drawdown_pct = self._compute_strategy_drawdown_pct(
+            strategy_name=normalized_strategy,
+            interval=normalized_interval,
+        )
+        if allow_trade and strategy_drawdown_pct > META_MAX_STRATEGY_DRAWDOWN_PCT:
+            allow_trade = False
+            flags.append("max_strategy_drawdown")
+            block_reason = f"max_strategy_drawdown:{strategy_drawdown_pct:.2f}%"
+
+        open_trades = self._db.fetch_open_trades()
+        if self._paper_engine is not None:
+            runtime_trade_ids = {int(trade_id) for trade_id in self._paper_engine.active_trades}
+            db_trade_ids = {int(trade.id) for trade in open_trades}
+            if runtime_trade_ids != db_trade_ids:
+                self._activate_fail_safe_mode(
+                    reason="positions_desync",
+                    payload={
+                        "runtime_trade_ids": sorted(runtime_trade_ids),
+                        "db_trade_ids": sorted(db_trade_ids),
+                    },
+                )
+                return {
+                    "allow_trade": False,
+                    "risk_cap": 0.0,
+                    "block_reason": "positions_desync",
+                    "warning_reason": "",
+                    "flags": ["positions_desync"],
+                    "daily_realized_pnl": float(daily_realized_pnl),
+                    "strategy_drawdown_pct": float(strategy_drawdown_pct),
+                    "open_positions": int(len(open_trades)),
+                }
+        for open_trade in open_trades:
+            high_water_mark = float(open_trade.high_water_mark or 0.0)
+            if not math.isfinite(high_water_mark) or high_water_mark <= 0.0:
+                self._activate_fail_safe_mode(
+                    reason="missing_exit_control",
+                    payload={
+                        "trade_id": int(open_trade.id),
+                        "symbol": str(open_trade.symbol),
+                        "high_water_mark": float(high_water_mark),
+                    },
+                )
+                return {
+                    "allow_trade": False,
+                    "risk_cap": 0.0,
+                    "block_reason": f"missing_exit_control:trade={int(open_trade.id)}",
+                    "warning_reason": "",
+                    "flags": ["missing_exit_control"],
+                    "daily_realized_pnl": float(daily_realized_pnl),
+                    "strategy_drawdown_pct": float(strategy_drawdown_pct),
+                    "open_positions": int(len(open_trades)),
+                }
+        open_by_symbol: Counter[str] = Counter(str(trade.symbol).strip().upper() for trade in open_trades)
+        duplicate_open_symbols = [sym for sym, count in open_by_symbol.items() if count > 1]
+        if duplicate_open_symbols:
+            self._activate_fail_safe_mode(
+                reason="duplicate_entries_detected",
+                payload={"symbols": duplicate_open_symbols},
+            )
+            return {
+                "allow_trade": False,
+                "risk_cap": 0.0,
+                "block_reason": f"duplicate_entries:{','.join(duplicate_open_symbols)}",
+                "warning_reason": "",
+                "flags": ["duplicate_entries_detected"],
+                "daily_realized_pnl": float(daily_realized_pnl),
+                "strategy_drawdown_pct": float(strategy_drawdown_pct),
+                "open_positions": int(len(open_trades)),
+            }
+        if allow_trade and len(open_trades) >= META_MAX_OPEN_POSITIONS_GUARD:
+            allow_trade = False
+            flags.append("max_open_positions")
+            block_reason = f"max_open_positions:{len(open_trades)}"
+
+        side_counter: Counter[str] = Counter(str(trade.side).strip().upper() for trade in open_trades)
+        correlated_open = max(int(side_counter.get("LONG", 0)), int(side_counter.get("SHORT", 0)))
+        if correlated_open >= META_MAX_CORRELATED_RISK:
+            risk_cap = min(risk_cap, 0.5)
+            flags.append("correlated_risk")
+            if not warning_reason:
+                warning_reason = f"correlated_risk:{correlated_open}"
+
+        pause_events_today = self._db.fetch_adaptation_logs(
+            event_type="fail_safe_activated",
+            since=day_start,
+            limit=1000,
+        )
+        pause_event_count = 0
+        for entry in pause_events_today:
+            payload = self._parse_json_payload(entry.payload_json)
+            reason = str(payload.get("reason", "") or "")
+            if reason:
+                pause_event_count += 1
+        if allow_trade and pause_event_count >= META_MAX_PAUSE_EVENTS_PER_DAY:
+            allow_trade = False
+            flags.append("max_pause_events_per_day")
+            block_reason = f"max_pause_events_per_day:{pause_event_count}"
+
+        cooldown_until = self._meta_cooldown_until.get(meta_key)
+        if allow_trade and isinstance(cooldown_until, datetime) and now < cooldown_until:
+            allow_trade = False
+            flags.append("cooldown_active")
+            block_reason = f"cooldown_active_until:{cooldown_until.isoformat()}"
+
+        return {
+            "allow_trade": bool(allow_trade),
+            "risk_cap": float(max(0.0, min(risk_cap, 1.0))),
+            "block_reason": str(block_reason),
+            "warning_reason": str(warning_reason),
+            "flags": flags,
+            "daily_realized_pnl": float(daily_realized_pnl),
+            "strategy_drawdown_pct": float(strategy_drawdown_pct),
+            "open_positions": int(len(open_trades)),
+        }
+
+    def evaluate_meta_policy(
+        self,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+        current_context: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        normalized_symbol, normalized_strategy, normalized_interval = self._meta_key(
+            symbol,
+            strategy_name,
+            interval,
+        )
+        context = dict(current_context or {})
+        regime_payload = self._parse_json_payload(context.get("regime_payload"))
+        regime_label = str(regime_payload.get("regime_label", "range_balanced") or "range_balanced")
+        regime_confidence = float(regime_payload.get("regime_confidence", 0.0) or 0.0)
+        health_snapshot = None if self._db is None else self._db.fetch_strategy_health(
+            symbol=normalized_symbol,
+            strategy_name=normalized_strategy,
+            timeframe=normalized_interval,
+        )
+        trades_count = int(health_snapshot.trades_count) if health_snapshot is not None else 0
+        low_sample_observe_only = trades_count < META_MIN_SAMPLE_SIZE_FOR_PROMOTION
+        state = "healthy"
+        risk_multiplier = 1.0
+        allow_trade = True
+        block_reason = ""
+        warning_reason = ""
+        meta_flags: list[str] = []
+        negative_signals: set[str] = set()
+        hard_guard_block = False
+
+        if health_snapshot is not None:
+            snapshot_state = str(health_snapshot.state).strip().lower() or "healthy"
+            if snapshot_state == "paper_only":
+                snapshot_state = "watchlist"
+                meta_flags.append("paper_only_mapped_to_watchlist")
+            if snapshot_state == "paused":
+                snapshot_state = "watchlist"
+                meta_flags.append("paused_health_mapped_to_watchlist")
+            state = snapshot_state
+            risk_multiplier = float(health_snapshot.risk_multiplier or 1.0)
+            if state == "healthy":
+                allow_trade = True
+                risk_multiplier = max(0.95, min(risk_multiplier, 1.10))
+            elif state == "degraded":
+                allow_trade = True
+                risk_multiplier = max(0.80, min(risk_multiplier, 0.95))
+            elif state == "watchlist":
+                allow_trade = True
+                risk_multiplier = max(0.95, min(risk_multiplier, 1.05))
+            else:
+                state = "healthy"
+                allow_trade = True
+                risk_multiplier = 1.0
+        else:
+            meta_flags.append("health_missing")
+            state = "healthy"
+            allow_trade = True
+            risk_multiplier = 1.0
+
+        if low_sample_observe_only:
+            meta_flags.append("low_sample_observe_only")
+
+        if health_snapshot is not None:
+            late_rate = float(health_snapshot.late_entry_rate)
+            mismatch_rate = float(health_snapshot.regime_mismatch_rate)
+            avoidable_rate = float(health_snapshot.avoidable_loss_rate)
+            if mismatch_rate >= 0.55 or late_rate >= 0.55 or avoidable_rate >= 0.55:
+                negative_signals.add("error_rates_high")
+                if state == "healthy":
+                    state = "degraded"
+                risk_multiplier = min(risk_multiplier, 0.90)
+                warning_reason = (
+                    f"error_rates_high:late={late_rate:.2f}|regime={mismatch_rate:.2f}|avoidable={avoidable_rate:.2f}"
+                )
+                meta_flags.append("error_rates_high_observe")
+            elif mismatch_rate >= 0.35 or late_rate >= 0.35 or avoidable_rate >= 0.35:
+                negative_signals.add("error_rates_warn")
+                risk_multiplier = min(risk_multiplier, 0.95)
+                if state == "healthy":
+                    state = "degraded"
+                warning_reason = (
+                    f"error_rates_warn:late={late_rate:.2f}|regime={mismatch_rate:.2f}|avoidable={avoidable_rate:.2f}"
+                )
+                meta_flags.append("error_rates_warn")
+            if int(health_snapshot.max_loss_streak or 0) >= 4:
+                negative_signals.add("loss_streak_alert")
+                if state == "healthy":
+                    state = "watchlist"
+                risk_multiplier = min(risk_multiplier, 0.95)
+                if not warning_reason:
+                    warning_reason = f"loss_streak_alert:{int(health_snapshot.max_loss_streak or 0)}"
+                meta_flags.append("loss_streak_alert")
+
+        if regime_confidence >= 0.60 and not self._strategy_regime_matches(normalized_strategy, regime_label):
+            negative_signals.add("regime_mismatch")
+            risk_multiplier = min(risk_multiplier, 0.95)
+            if state == "healthy":
+                state = "watchlist"
+            warning_reason = f"regime_mismatch:{regime_label}"
+            meta_flags.append("regime_veto_warn_soft")
+        if regime_confidence >= 0.55 and regime_label == "illiquid_noise":
+            negative_signals.add("illiquid_noise")
+            risk_multiplier = min(risk_multiplier, 0.95)
+            if state == "healthy":
+                state = "watchlist"
+            if not warning_reason:
+                warning_reason = "illiquid_noise"
+            meta_flags.append("illiquid_noise_warn_soft")
+
+        if low_sample_observe_only:
+            if negative_signals:
+                if state == "healthy":
+                    state = "watchlist"
+                risk_multiplier = min(risk_multiplier, 0.95)
+                meta_flags.append("low_sample_with_negative_evidence")
+            else:
+                # Neutral low-sample mode: keep normal papertrading behavior and visible healthy state.
+                state = "healthy"
+                allow_trade = True
+                risk_multiplier = 1.0
+                if warning_reason == "health_snapshot_missing":
+                    warning_reason = ""
+
+        guard_payload = self._evaluate_global_meta_guards(
+            symbol=normalized_symbol,
+            strategy_name=normalized_strategy,
+            interval=normalized_interval,
+        )
+        risk_multiplier = min(risk_multiplier, float(guard_payload.get("risk_cap", 1.0) or 1.0))
+        if not bool(guard_payload.get("allow_trade", True)):
+            hard_guard_block = True
+            allow_trade = False
+            state = "paused"
+            risk_multiplier = 0.0
+            block_reason = str(guard_payload.get("block_reason", "") or "hard_global_guard")
+            meta_flags.append("hard_guard_block")
+        guard_warning = str(guard_payload.get("warning_reason", "") or "")
+        if guard_warning and not warning_reason:
+            warning_reason = guard_warning
+        guard_flags = guard_payload.get("flags")
+        if isinstance(guard_flags, list):
+            meta_flags.extend(str(item) for item in guard_flags)
+
+        if allow_trade:
+            block_reason = ""
+            if state == "paused":
+                state = "watchlist"
+                meta_flags.append("paused_deescalated_mode_b")
+        risk_multiplier = max(0.0, min(float(risk_multiplier), 1.25))
+
+        unique_meta_flags = sorted(set(str(item) for item in meta_flags))
+        is_low_sample_info_only = (
+            state == "healthy"
+            and bool(allow_trade)
+            and not block_reason
+            and not warning_reason
+            and abs(float(risk_multiplier) - 1.0) <= 1e-9
+            and unique_meta_flags in (["low_sample_observe_only"], ["health_missing", "low_sample_observe_only"])
+        )
+        guard_signature = ""
+        if (meta_flags or block_reason or warning_reason) and not is_low_sample_info_only:
+            guard_signature = "|".join(
+                [
+                    str(state),
+                    str(block_reason),
+                    str(warning_reason),
+                    ",".join(unique_meta_flags),
+                ]
+            )
+        guard_key = (normalized_symbol, normalized_strategy, normalized_interval)
+        previous_guard_signature = self._meta_last_state_by_key.get(guard_key)
+        if guard_signature:
+            if guard_signature != previous_guard_signature:
+                self._meta_last_state_by_key[guard_key] = guard_signature
+                self._insert_adaptation_event(
+                    event_type="meta_guard_triggered",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    payload={
+                        "state": str(state),
+                        "block_reason": str(block_reason),
+                        "warning_reason": str(warning_reason),
+                        "meta_flags": sorted(set(meta_flags)),
+                        "allow_trade": bool(allow_trade),
+                        "risk_multiplier": float(risk_multiplier),
+                    },
+                    source="meta_bot",
+                )
+        elif previous_guard_signature is not None:
+            self._meta_last_state_by_key.pop(guard_key, None)
+
+        effective_policy_json = {
+            "symbol": normalized_symbol,
+            "strategy_name": normalized_strategy,
+            "interval": normalized_interval,
+            "allow_trade": bool(allow_trade),
+            "risk_multiplier": float(risk_multiplier),
+            "state": str(state),
+            "block_reason": str(block_reason),
+            "warning_reason": str(warning_reason),
+            "meta_flags": sorted(set(meta_flags)),
+            "health_snapshot_available": bool(health_snapshot is not None),
+            "health_score": (
+                None
+                if health_snapshot is None
+                else float(health_snapshot.health_score)
+            ),
+            "trades_count": int(trades_count),
+            "regime_label": regime_label,
+            "regime_confidence": float(regime_confidence),
+            "global_guards": dict(guard_payload),
+            "timestamp": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
+        }
+        policy = {
+            "allow_trade": bool(allow_trade),
+            "risk_multiplier": float(risk_multiplier),
+            "state": str(state),
+            "block_reason": str(block_reason),
+            "warning_reason": str(warning_reason),
+            "meta_flags": sorted(set(meta_flags)),
+            "effective_policy_json": effective_policy_json,
+        }
+        previous_policy = self._meta_policy_cache.get((normalized_symbol, normalized_strategy, normalized_interval))
+        self._meta_policy_cache[(normalized_symbol, normalized_strategy, normalized_interval)] = dict(policy)
+        previous_state = (
+            None
+            if previous_policy is None
+            else str(previous_policy.get("state", ""))
+        )
+        previous_risk = (
+            None
+            if previous_policy is None
+            else float(previous_policy.get("risk_multiplier", 1.0) or 1.0)
+        )
+        if previous_state != str(state) or previous_risk is None or abs(previous_risk - risk_multiplier) > 1e-9:
+            self._insert_adaptation_event(
+                event_type="meta_state_change",
+                symbol=normalized_symbol,
+                strategy_name=normalized_strategy,
+                interval=normalized_interval,
+                payload={
+                    "previous_state": previous_state,
+                    "new_state": str(state),
+                    "previous_risk_multiplier": previous_risk,
+                    "new_risk_multiplier": float(risk_multiplier),
+                    "allow_trade": bool(allow_trade),
+                    "block_reason": str(block_reason),
+                    "warning_reason": str(warning_reason),
+                    "meta_flags": sorted(set(meta_flags)),
+                },
+                source="meta_bot",
+            )
+            self.log_message.emit(
+                "[META] policy update: "
+                f"{normalized_symbol} {normalized_strategy} {normalized_interval} "
+                f"state={state} allow={int(bool(allow_trade))} risk={risk_multiplier:.2f} "
+                f"block={block_reason or '-'} warn={warning_reason or '-'}"
+            )
+            if previous_risk is not None and float(risk_multiplier) < float(previous_risk):
+                self.build_learning_log_entry(
+                    change_type="Risk reduziert",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    details={
+                        "previous_risk_multiplier": float(previous_risk),
+                        "new_risk_multiplier": float(risk_multiplier),
+                        "state": str(state),
+                    },
+                )
+            if str(state) == "paused":
+                self._emit_meta_warning(
+                    warning_code=f"health_state_{state}",
+                    message=(
+                        f"Meta state changed to {state} for "
+                        f"{normalized_symbol} {normalized_strategy} {normalized_interval}."
+                    ),
+                    payload={"policy": dict(effective_policy_json)},
+                )
+                self.build_learning_log_entry(
+                    change_type="Symbol pausiert",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    details={"state": str(state), "block_reason": str(block_reason)},
+                )
+            if "low_sample_observe_only" in meta_flags:
+                if "low_sample_with_negative_evidence" in meta_flags:
+                    self._emit_meta_warning(
+                        warning_code="low_sample_observe_only",
+                        message=(
+                            f"Low sample + negative evidence for "
+                            f"{normalized_symbol} {normalized_strategy} {normalized_interval}."
+                        ),
+                        payload={
+                            "trades_count": trades_count,
+                            "state": str(state),
+                            "warning_reason": str(warning_reason),
+                        },
+                    )
+                else:
+                    self.log_message.emit(
+                        "[META] low-sample observe-only: "
+                        f"{normalized_symbol} {normalized_strategy} {normalized_interval} "
+                        f"trades={trades_count}"
+                    )
+            if "regime_veto_warn_soft" in meta_flags:
+                self.build_learning_log_entry(
+                    change_type="Regime-Veto aktiv",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    details={
+                        "regime_label": regime_label,
+                        "regime_confidence": regime_confidence,
+                        "meta_flags": sorted(set(meta_flags)),
+                    },
+                )
+            if state == "paused" and (not allow_trade) and hard_guard_block:
+                cooldown_until = datetime.now(tz=UTC).replace(tzinfo=None) + timedelta(
+                    minutes=META_COOLDOWN_AFTER_PAUSE_MINUTES
+                )
+                self._meta_cooldown_until[(normalized_symbol, normalized_strategy, normalized_interval)] = cooldown_until
+                self._insert_adaptation_event(
+                    event_type="meta_cooldown_started",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    payload={"cooldown_until": cooldown_until.isoformat()},
+                    source="meta_bot",
+                )
+                self.build_learning_log_entry(
+                    change_type="Cooldown gestartet",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    details={"cooldown_until": cooldown_until.isoformat()},
+                )
+        return policy
+
+    def build_learning_log_entry(
+        self,
+        *,
+        change_type: str,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+        details: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        entry = {
+            "timestamp": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
+            "change_type": str(change_type),
+            "symbol": str(symbol).strip().upper(),
+            "strategy_name": _sanitize_backtest_strategy_name(strategy_name),
+            "interval": str(interval).strip(),
+            "details": dict(details or {}),
+        }
+        self._insert_adaptation_event(
+            event_type="learning_log_entry",
+            symbol=str(symbol).strip().upper(),
+            strategy_name=_sanitize_backtest_strategy_name(strategy_name),
+            interval=str(interval).strip(),
+            payload=entry,
+            source="meta_reports",
+        )
+        return entry
+
+    def _render_meta_report_markdown(self, report: Mapping[str, object], *, title: str) -> str:
+        lines = [f"# {title}", ""]
+        lines.append(f"- Generated At: {report.get('generated_at')}")
+        lines.append(f"- Report Type: {report.get('report_type')}")
+        lines.append("")
+        overview = report.get("overview")
+        if isinstance(overview, Mapping):
+            lines.append("## Overview")
+            for key, value in overview.items():
+                lines.append(f"- {key}: {value}")
+            lines.append("")
+        rows = report.get("rows")
+        if isinstance(rows, list) and rows:
+            header = [
+                "symbol",
+                "strategy_name",
+                "interval",
+                "trade_count",
+                "pnl_sum",
+                "winrate",
+                "late_entry_rate",
+                "regime_mismatch_rate",
+                "avoidable_loss_rate",
+                "health_state",
+                "risk_multiplier",
+            ]
+            lines.append("## Rows")
+            lines.append("| " + " | ".join(header) + " |")
+            lines.append("|" + "|".join("---" for _ in header) + "|")
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                values = [str(row.get(column, "")) for column in header]
+                lines.append("| " + " | ".join(values) + " |")
+            lines.append("")
+        highlights = report.get("highlights")
+        if isinstance(highlights, list) and highlights:
+            lines.append("## Highlights")
+            for item in highlights:
+                lines.append(f"- {item}")
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+    def _persist_meta_report_files(
+        self,
+        *,
+        report: Mapping[str, object],
+        report_prefix: str,
+        markdown_title: str,
+    ) -> dict[str, str]:
+        META_REPORTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        generated_at = str(report.get("generated_at", datetime.now(tz=UTC).replace(tzinfo=None).isoformat()))
+        safe_stamp = generated_at.replace(":", "").replace("-", "").replace("T", "_").replace(".", "")
+        json_path = META_REPORTS_DIRECTORY / f"{report_prefix}_{safe_stamp}.json"
+        md_path = META_REPORTS_DIRECTORY / f"{report_prefix}_{safe_stamp}.md"
+        txt_path = META_REPORTS_DIRECTORY / f"{report_prefix}_{safe_stamp}.txt"
+        json_path.write_text(
+            json.dumps(dict(report), ensure_ascii=True, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        markdown_text = self._render_meta_report_markdown(report, title=markdown_title)
+        md_path.write_text(markdown_text, encoding="utf-8")
+        txt_path.write_text(markdown_text, encoding="utf-8")
+        return {
+            "json": json_path.as_posix(),
+            "markdown": md_path.as_posix(),
+            "text": txt_path.as_posix(),
+        }
+
+    def build_daily_meta_report(self, *, report_date: datetime | None = None) -> dict[str, object]:
+        if self._db is None:
+            return {}
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        if report_date is None:
+            report_date = now
+        day_start = datetime(report_date.year, report_date.month, report_date.day)
+        day_end = day_start + timedelta(days=1)
+        closed_trades = self._db.fetch_closed_trades_since(
+            start_time=day_start,
+            end_time=day_end,
+            limit=5000,
+        )
+        grouped: dict[tuple[str, str, str], list[PaperTrade]] = {}
+        for trade in closed_trades:
+            strategy_name = (
+                str(trade.strategy_name).strip()
+                if trade.strategy_name is not None and str(trade.strategy_name).strip()
+                else resolve_strategy_for_symbol(trade.symbol, self._strategy_name)
+            )
+            interval = (
+                str(trade.timeframe).strip()
+                if trade.timeframe is not None and str(trade.timeframe).strip()
+                else self._target_interval_for_symbol(trade.symbol)
+            )
+            key = self._meta_key(trade.symbol, strategy_name, interval)
+            grouped.setdefault(key, []).append(trade)
+
+        rows: list[dict[str, object]] = []
+        total_pnl = 0.0
+        for key, trades in grouped.items():
+            symbol, strategy_name, interval = key
+            pnl_sum = float(sum(float(trade.pnl or 0.0) for trade in trades))
+            total_pnl += pnl_sum
+            wins = int(sum(1 for trade in trades if float(trade.pnl or 0.0) > 0.0))
+            trade_count = int(len(trades))
+            winrate = float((wins / trade_count) * 100.0) if trade_count > 0 else 0.0
+            trade_reviews = self._db.fetch_recent_trade_reviews(
+                symbol=symbol,
+                strategy_name=strategy_name,
+                timeframe=interval,
+                limit=max(50, trade_count * 4),
+            )
+            review_for_ids = [item for item in trade_reviews if int(item.get("trade_id", -1)) in {int(t.id) for t in trades}]
+            error_counter: Counter[str] = Counter()
+            late_count = 0
+            mismatch_count = 0
+            avoidable_count = 0
+            for review in review_for_ids:
+                primary = str(review.get("error_type_primary", "") or "").strip()
+                if primary:
+                    error_counter[primary] += 1
+                if bool(review.get("late_entry_flag", False)):
+                    late_count += 1
+                if bool(review.get("regime_mismatch_flag", False)):
+                    mismatch_count += 1
+                if bool(review.get("avoidable_loss_flag", False)):
+                    avoidable_count += 1
+            health = self._db.fetch_strategy_health(
+                symbol=symbol,
+                strategy_name=strategy_name,
+                timeframe=interval,
+            )
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "strategy_name": strategy_name,
+                    "interval": interval,
+                    "trade_count": trade_count,
+                    "pnl_sum": round(pnl_sum, 6),
+                    "winrate": round(winrate, 4),
+                    "error_type_distribution": dict(error_counter),
+                    "late_entry_rate": round(float(late_count / trade_count) if trade_count > 0 else 0.0, 6),
+                    "regime_mismatch_rate": round(float(mismatch_count / trade_count) if trade_count > 0 else 0.0, 6),
+                    "avoidable_loss_rate": round(float(avoidable_count / trade_count) if trade_count > 0 else 0.0, 6),
+                    "health_state": None if health is None else str(health.state),
+                    "risk_multiplier": None if health is None else float(health.risk_multiplier),
+                }
+            )
+        rows.sort(key=lambda row: float(row.get("pnl_sum", 0.0) or 0.0))
+        overview_counts = self._db.fetch_meta_overview_counts()
+        paper_only_count_raw = int(overview_counts.get("paper_only", 0))
+        report = {
+            "report_type": "daily_meta_report",
+            "generated_at": now.isoformat(),
+            "date": day_start.date().isoformat(),
+            "overview": {
+                "daily_meta_pnl": round(total_pnl, 6),
+                "closed_trades": int(len(closed_trades)),
+                "healthy_count": int(overview_counts.get("healthy", 0)),
+                "degraded_count": int(overview_counts.get("degraded", 0)),
+                "watchlist_count": int(overview_counts.get("watchlist", 0)) + paper_only_count_raw,
+                "paper_only_count": 0,
+                "paused_count": int(overview_counts.get("paused", 0)),
+            },
+            "rows": rows,
+            "highlights": [
+                f"Worst row pnl: {rows[0]['symbol']} {rows[0]['strategy_name']} {rows[0]['interval']} -> {rows[0]['pnl_sum']:.4f}"
+                if rows
+                else "No rows available.",
+                f"Best row pnl: {rows[-1]['symbol']} {rows[-1]['strategy_name']} {rows[-1]['interval']} -> {rows[-1]['pnl_sum']:.4f}"
+                if rows
+                else "No rows available.",
+            ],
+        }
+        report_paths = self._persist_meta_report_files(
+            report=report,
+            report_prefix="daily_meta_report",
+            markdown_title="Daily Meta Report",
+        )
+        report["files"] = report_paths
+        return report
+
+    def build_weekly_meta_report(self, *, end_time: datetime | None = None) -> dict[str, object]:
+        if self._db is None:
+            return {}
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        if end_time is None:
+            end_time = now
+        start_time = end_time - timedelta(days=7)
+        closed_trades = self._db.fetch_closed_trades_since(
+            start_time=start_time,
+            end_time=end_time,
+            limit=20_000,
+        )
+        reviews = self._db.fetch_recent_trade_reviews(limit=5000)
+        review_trade_ids = {int(item.get("trade_id", -1)) for item in reviews}
+        weekly_trade_ids = {int(trade.id) for trade in closed_trades}
+        relevant_reviews = [item for item in reviews if int(item.get("trade_id", -1)) in weekly_trade_ids]
+        error_counter: Counter[str] = Counter()
+        for review in relevant_reviews:
+            primary = str(review.get("error_type_primary", "") or "").strip()
+            if primary:
+                error_counter[primary] += 1
+        health_rows = self._db.fetch_strategy_health_rows(limit=2000)
+        paused_rows = [
+            row for row in health_rows if str(row.state).strip().lower() == "paused"
+        ]
+        paper_only_rows: list[StrategyHealthSnapshot] = []
+        adaptation_rows = self._db.fetch_adaptation_logs(since=start_time, limit=5000)
+        deterioration = [
+            entry
+            for entry in adaptation_rows
+            if str(entry.event_type).strip().lower() in {"meta_state_change", "fail_safe_activated"}
+        ]
+        improvement = [
+            entry
+            for entry in adaptation_rows
+            if str(entry.event_type).strip().lower() in {"learning_log_entry"}
+        ]
+        weekly_pnl = float(sum(float(trade.pnl or 0.0) for trade in closed_trades))
+        challenger_hypotheses: list[str] = []
+        for error_name, count in error_counter.most_common(3):
+            if error_name in {"late_entry_after_expansion", "entry_into_exhaustion"}:
+                challenger_hypotheses.append(
+                    f"Tighten late-entry veto thresholds for regime transitions ({error_name}, count={count})."
+                )
+            elif error_name in {"entry_against_regime", "strategy_regime_mismatch"}:
+                challenger_hypotheses.append(
+                    f"Re-evaluate regime fit mapping and challenger fallback for mismatch-heavy pairs ({error_name}, count={count})."
+                )
+            else:
+                challenger_hypotheses.append(
+                    f"Run focused challenger sweep for recurring error '{error_name}' (count={count})."
+                )
+        report = {
+            "report_type": "weekly_meta_report",
+            "generated_at": now.isoformat(),
+            "window_start": start_time.isoformat(),
+            "window_end": end_time.isoformat(),
+            "overview": {
+                "weekly_meta_pnl": round(weekly_pnl, 6),
+                "closed_trades": int(len(closed_trades)),
+                "review_coverage": round(float(len(relevant_reviews) / max(len(weekly_trade_ids), 1)), 6),
+                "paused_symbols": int(len(paused_rows)),
+                "paper_only_symbols": 0,
+                "deterioration_events": int(len(deterioration)),
+                "improvement_events": int(len(improvement)),
+            },
+            "top_error_types": dict(error_counter.most_common(12)),
+            "paused_rows": [
+                {
+                    "symbol": row.symbol,
+                    "strategy_name": row.strategy_name,
+                    "interval": row.timeframe,
+                    "health_score": row.health_score,
+                    "risk_multiplier": row.risk_multiplier,
+                }
+                for row in paused_rows
+            ],
+            "paper_only_rows": [
+                {
+                    "symbol": row.symbol,
+                    "strategy_name": row.strategy_name,
+                    "interval": row.timeframe,
+                    "health_score": row.health_score,
+                    "risk_multiplier": row.risk_multiplier,
+                }
+                for row in paper_only_rows
+            ],
+            "challenger_hypotheses": challenger_hypotheses,
+            "highlights": [
+                f"Weekly pnl: {weekly_pnl:.2f}",
+                f"Top error: {next(iter(error_counter.keys()), 'n/a')}",
+                f"Paused rows: {len(paused_rows)}, paper_only rows: 0",
+            ],
+        }
+        report_paths = self._persist_meta_report_files(
+            report=report,
+            report_prefix="weekly_meta_report",
+            markdown_title="Weekly Meta Report",
+        )
+        report["files"] = report_paths
+        return report
+
+    def _maybe_generate_periodic_meta_reports(self) -> None:
+        if self._db is None:
+            return
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        today = now.date()
+        iso_week = now.isocalendar()[:2]
+        if self._meta_last_daily_report_date != today:
+            daily_report = self.build_daily_meta_report(report_date=now)
+            self._meta_last_daily_report_date = today
+            self.log_message.emit(
+                f"[META_REPORT] daily generated: {daily_report.get('files', {}).get('markdown', 'n/a')}"
+            )
+        if self._meta_last_weekly_report_iso != iso_week:
+            weekly_report = self.build_weekly_meta_report(end_time=now)
+            self._meta_last_weekly_report_iso = iso_week
+            self.log_message.emit(
+                f"[META_REPORT] weekly generated: {weekly_report.get('files', {}).get('markdown', 'n/a')}"
+            )
 
     def _symbols_for_interval(self, interval: str) -> list[str]:
         return [
@@ -5758,6 +10051,9 @@ class BacktestThread(QThread):
     _LOG_MODE_DEBUG = "debug"
     _HISTORY_PROGRESS_LOG_PREFIX = "[HISTORY_PROGRESS]"
     _SIGNAL_CACHE_PROGRESS_LOG_PREFIX = "[SIGNAL_CACHE_PROGRESS]"
+    _PRIMARY_DB_PERSIST_MAX_ATTEMPTS = 120
+    _PRIMARY_DB_PERSIST_RETRY_SECONDS = 0.5
+    _PRIMARY_DB_PERSIST_LOG_EVERY_ATTEMPTS = 10
 
     def __init__(
         self,
@@ -5776,6 +10072,8 @@ class BacktestThread(QThread):
         history_requested_start_utc: datetime | None = None,
         history_end_utc: datetime | None = None,
         log_mode: str = _LOG_MODE_STANDARD,
+        batch_history_cache: dict[str, dict[str, object]] | None = None,
+        batch_history_cache_lock: RLock | None = None,
     ) -> None:
         super().__init__()
         self._symbol = symbol
@@ -5833,10 +10131,17 @@ class BacktestThread(QThread):
         self._hmm_regime_labels: list[str] | None = None
         self._last_runtime_trace: dict[str, object] | None = None
         self._last_strategy_diagnostics: dict[str, object] | None = None
+        self._checkpoint_backtest_run_id: int | None = None
         self._history_progress_last_emit_monotonic = 0.0
         self._history_progress_last_percent = -1
         self._history_progress_last_stage = ""
         self._log_mode = self._normalize_log_mode(log_mode)
+        self._batch_history_cache = (
+            batch_history_cache
+            if isinstance(batch_history_cache, dict)
+            else None
+        )
+        self._batch_history_cache_lock = batch_history_cache_lock
 
     @classmethod
     def _normalize_log_mode(cls, raw_mode: str | None) -> str:
@@ -5985,6 +10290,160 @@ class BacktestThread(QThread):
                 break
         return corrected_start, shifted_candles
 
+    @contextmanager
+    def _batch_history_cache_guard(self):
+        lock = self._batch_history_cache_lock
+        if lock is None:
+            yield
+            return
+        with lock:
+            yield
+
+    def _build_batch_history_cache_key(
+        self,
+        *,
+        requested_start_utc: datetime,
+        requested_end_utc: datetime | None,
+        explicit_history_window: bool,
+    ) -> str | None:
+        if self._batch_history_cache is None:
+            return None
+        start_token = requested_start_utc.strftime("%Y-%m-%d %H:%M:%S")
+        end_token = (
+            requested_end_utc.strftime("%Y-%m-%d %H:%M:%S")
+            if requested_end_utc is not None
+            else "latest"
+        )
+        window_mode_token = "date_range" if explicit_history_window else "tail_window"
+        setup_gate_token = "setup_gate_on" if self._use_setup_gate else "setup_gate_off"
+        optimize_token = "optimizer" if self._optimize_profile else "backtest"
+        return (
+            f"{self._symbol}|{self._interval}|{window_mode_token}|"
+            f"{start_token}|{end_token}|{setup_gate_token}|{optimize_token}"
+        )
+
+    def _load_batch_history_cache_entry(
+        self,
+        cache_key: str | None,
+    ) -> dict[str, object] | None:
+        if cache_key is None or self._batch_history_cache is None:
+            return None
+        with self._batch_history_cache_guard():
+            cache_entry = self._batch_history_cache.get(cache_key)
+            if not isinstance(cache_entry, dict):
+                return None
+            return cache_entry
+
+    def _store_batch_history_cache_entry(
+        self,
+        cache_key: str | None,
+        cache_entry: dict[str, object],
+    ) -> None:
+        if cache_key is None or self._batch_history_cache is None:
+            return
+        with self._batch_history_cache_guard():
+            self._batch_history_cache[cache_key] = cache_entry
+
+    def _load_candles_dataframe_from_batch_history_cache(
+        self,
+        *,
+        cache_key: str | None,
+        required_candles: int,
+        allow_insufficient: bool = False,
+    ) -> tuple[pd.DataFrame | None, dict[str, object] | None]:
+        cache_entry = self._load_batch_history_cache_entry(cache_key)
+        if cache_entry is None:
+            return None, None
+        cached_candles_df = cache_entry.get("candles_df")
+        if not isinstance(cached_candles_df, pd.DataFrame):
+            return None, None
+        if cached_candles_df.empty:
+            return None, None
+        if len(cached_candles_df) < required_candles and not allow_insufficient:
+            return None, None
+        cached_metadata = cache_entry.get("metadata")
+        if not isinstance(cached_metadata, dict):
+            return None, None
+        return cached_candles_df.copy(deep=True), dict(cached_metadata)
+
+    def _cache_history_and_prepare_run_dataframe(
+        self,
+        *,
+        cache_key: str | None,
+        candles: Sequence[CandleRecord],
+        metadata: dict[str, object],
+    ) -> pd.DataFrame:
+        base_candles_df = _candles_to_dataframe(candles).copy(deep=True)
+        if cache_key is not None and self._batch_history_cache is not None:
+            cache_entry: dict[str, object] = {
+                "candles_df": base_candles_df,
+                "metadata": dict(metadata),
+                "regime_masks": {},
+                "regime_labels": {},
+            }
+            self._store_batch_history_cache_entry(cache_key, cache_entry)
+        return base_candles_df.copy(deep=True)
+
+    def _resolve_hmm_regime_mask_with_batch_cache(
+        self,
+        *,
+        cache_key: str | None,
+        candles_df: pd.DataFrame,
+        strategy_name: str,
+    ) -> list[int] | None:
+        self._hmm_regime_labels = None
+        cache_entry = self._load_batch_history_cache_entry(cache_key)
+        if cache_entry is not None:
+            cached_masks = cache_entry.get("regime_masks")
+            if not isinstance(cached_masks, dict):
+                cached_masks = {}
+                cache_entry["regime_masks"] = cached_masks
+            if strategy_name in cached_masks:
+                cached_mask = cached_masks.get(strategy_name)
+                cached_labels_map = cache_entry.get("regime_labels")
+                cached_labels = None
+                if isinstance(cached_labels_map, dict):
+                    cached_labels = cached_labels_map.get(strategy_name)
+                if isinstance(cached_mask, list) and len(cached_mask) == len(candles_df):
+                    if isinstance(cached_labels, list) and len(cached_labels) == len(candles_df):
+                        self._hmm_regime_labels = list(cached_labels)
+                    self.log_message.emit(
+                        "Batch history cache hit: "
+                        f"reusing regime payload for {self._symbol} {self._interval} ({strategy_name})."
+                    )
+                    return list(cached_mask)
+                if cached_mask is None:
+                    self.log_message.emit(
+                        "Batch history cache hit: "
+                        f"reusing neutral regime payload for {self._symbol} {self._interval} ({strategy_name})."
+                    )
+                    return None
+
+        resolved_mask = self._prepare_hmm_regime_mask(
+            candles_df,
+            strategy_name=strategy_name,
+        )
+        if cache_entry is not None:
+            cached_masks = cache_entry.get("regime_masks")
+            if not isinstance(cached_masks, dict):
+                cached_masks = {}
+                cache_entry["regime_masks"] = cached_masks
+            cached_masks[strategy_name] = (
+                list(resolved_mask)
+                if isinstance(resolved_mask, list)
+                else None
+            )
+            cached_labels_map = cache_entry.get("regime_labels")
+            if not isinstance(cached_labels_map, dict):
+                cached_labels_map = {}
+                cache_entry["regime_labels"] = cached_labels_map
+            cached_labels_map[strategy_name] = (
+                list(self._hmm_regime_labels)
+                if isinstance(self._hmm_regime_labels, list)
+                else None
+            )
+        return resolved_mask
+
     def _resolve_strategy_diagnostics_payload(
         self,
         *,
@@ -6042,6 +10501,7 @@ class BacktestThread(QThread):
                                             symbols=[symbol],
                                             interval=interval,
                                             candles_per_symbol=MAX_BACKTEST_CANDLES,
+                                            should_abort=self._should_stop,
                                             on_progress=self._emit_history_download_progress,
                                         )
                             except Exception:
@@ -6094,6 +10554,11 @@ class BacktestThread(QThread):
                                 symbol=symbol,
                                 interval=interval,
                             )
+                            if _is_1m_research_interval(interval):
+                                self.log_message.emit(
+                                    f"Research optimizer grid active: {symbol} {strategy_name} @ 1m "
+                                    f"(tag={RESEARCH_1M_GRID_PROFILE_TAG})."
+                                )
                             # _optimization_grid entries are capped by generator, but ensure global cap
                             if len(self._optimization_grid) > MAX_OPTIMIZATION_GRID_PROFILES:
                                 self._optimization_grid = _cap_profiles(
@@ -6148,6 +10613,7 @@ class BacktestThread(QThread):
 
     def run(self) -> None:
         temp_workspace: TemporaryDirectory[str] | None = None
+        self._checkpoint_backtest_run_id = None
         try:
             working_db_path = self._db_path
             if self._isolated_db:
@@ -6251,6 +10717,10 @@ class BacktestThread(QThread):
                 requested_history_start_time, requested_history_end_time = (
                     self._resolve_requested_history_window()
                 )
+                explicit_history_window = (
+                    self._history_requested_start_utc is not None
+                    or self._history_end_utc is not None
+                )
                 required_warmup_candles, required_candles = self._resolve_required_runtime_candles(
                     strategy_name=resolved_strategy_name,
                     strategy_profile=selected_strategy_profile,
@@ -6264,6 +10734,12 @@ class BacktestThread(QThread):
                     symbol=self._symbol,
                     interval=self._interval,
                 )
+                if self._optimize_profile and _is_1m_research_interval(self._interval):
+                    self.log_message.emit(
+                        "Research optimizer grid active: "
+                        f"{self._symbol} {resolved_strategy_name} @ 1m "
+                        f"(tag={RESEARCH_1M_GRID_PROFILE_TAG})."
+                    )
                 self.log_message.emit(
                     f"Backtest strategy selected: {self._symbol} -> {resolved_strategy_name}"
                 )
@@ -6284,10 +10760,17 @@ class BacktestThread(QThread):
                         if requested_history_end_time is not None
                         else "latest available"
                     )
-                    self.log_message.emit(
-                        "Backtest history window fixed: "
-                        f"{requested_history_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC -> {requested_end_text}."
-                    )
+                    if explicit_history_window:
+                        self.log_message.emit(
+                            "Backtest history window fixed: "
+                            f"{requested_history_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC -> {requested_end_text}."
+                        )
+                    else:
+                        self.log_message.emit(
+                            "Backtest history base from config: "
+                            f"{requested_history_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC -> {requested_end_text} "
+                            "(runtime may still use incremental tail sync when no explicit date-range is requested)."
+                        )
                 if self._use_setup_gate:
                     if self._optimize_profile:
                         self.log_message.emit(
@@ -6314,112 +10797,243 @@ class BacktestThread(QThread):
                     },
                 )
                 self.progress_update.emit(10, "Downloading history...")
+                now_utc_naive = datetime.now(tz=UTC).replace(tzinfo=None)
+                requested_history_sync_end_time = (
+                    now_utc_naive
+                    if requested_history_end_time is None
+                    else min(requested_history_end_time, now_utc_naive)
+                )
+                if requested_history_sync_end_time <= requested_history_start_time:
+                    requested_history_sync_end_time = requested_history_start_time + timedelta(
+                        seconds=max(_interval_total_seconds(self._interval), 60)
+                    )
+                full_history_seed_required = False
+                full_history_seed_reason = "not-applicable"
+                if explicit_history_window:
+                    (
+                        full_history_seed_required,
+                        full_history_seed_reason,
+                    ) = _is_full_history_seed_required(
+                        symbol=self._symbol,
+                        interval=self._interval,
+                        requested_start_utc=requested_history_start_time,
+                        requested_end_utc=requested_history_sync_end_time,
+                    )
+                history_cache_key = self._build_batch_history_cache_key(
+                    requested_start_utc=requested_history_start_time,
+                    requested_end_utc=requested_history_sync_end_time,
+                    explicit_history_window=explicit_history_window,
+                )
+                candles_df: pd.DataFrame | None = None
                 candles: list[CandleRecord] = []
                 total_candles = 0
                 oldest_time: datetime | None = None
                 newest_time: datetime | None = None
                 last_history_error: Exception | None = None
-                try:
-                    for source_index, (history_db, source_label) in enumerate(history_sources):
-                        try:
-                            self.log_message.emit(
-                                f"Downloading historical data for backtest via {source_label}..."
-                            )
-                            with BitunixClient(max_retries=6, backoff_factor=1.0) as client:
-                                with HistoryManager(history_db, client) as history_manager:
-                                    self._reset_history_download_progress()
-                                    explicit_history_window = (
-                                        self._history_requested_start_utc is not None
-                                        or self._history_end_utc is not None
-                                    )
-                                    if explicit_history_window:
-                                        sync_start_utc, sync_end_utc = self._resolve_history_sync_window(
+                full_history_seed_performed = False
+                cached_candles_df, cached_history_metadata = (
+                    self._load_candles_dataframe_from_batch_history_cache(
+                        cache_key=history_cache_key,
+                        required_candles=required_candles,
+                        allow_insufficient=True,
+                    )
+                )
+                if cached_candles_df is not None and cached_history_metadata is not None:
+                    candles_df = cached_candles_df
+                    total_candles = int(
+                        cached_history_metadata.get("history_candles", len(cached_candles_df))
+                        or len(cached_candles_df)
+                    )
+                    oldest_time = cached_history_metadata.get("history_start_utc")
+                    newest_time = cached_history_metadata.get("history_end_utc")
+                    effective_history_start_time = (
+                        cached_history_metadata.get("history_effective_start_utc")
+                        if isinstance(
+                            cached_history_metadata.get("history_effective_start_utc"),
+                            datetime,
+                        )
+                        else requested_history_start_time
+                    )
+                    effective_history_end_time = (
+                        cached_history_metadata.get("history_effective_end_utc")
+                        if isinstance(
+                            cached_history_metadata.get("history_effective_end_utc"),
+                            datetime,
+                        )
+                        else requested_history_end_time
+                    )
+                    history_loader_mode = str(
+                        cached_history_metadata.get("history_loader_mode", "session_cache")
+                        or "session_cache"
+                    )
+                    warmup_shifted_candles = int(
+                        cached_history_metadata.get("history_warmup_shifted_candles", 0)
+                        or 0
+                    )
+                    self.log_message.emit(
+                        "Batch history cache hit: "
+                        f"{self._symbol} {self._interval} "
+                        f"({total_candles} candles, loader={history_loader_mode})."
+                    )
+                    history_loader_mode = f"{history_loader_mode}|session_cache"
+                else:
+                    try:
+                        for source_index, (history_db, source_label) in enumerate(history_sources):
+                            try:
+                                self.log_message.emit(
+                                    f"Downloading historical data for backtest via {source_label}..."
+                                )
+                                with BitunixClient(max_retries=6, backoff_factor=1.0) as client:
+                                    with HistoryManager(history_db, client) as history_manager:
+                                        self._reset_history_download_progress()
+                                        if explicit_history_window:
+                                            if full_history_seed_required:
+                                                sync_start_utc, sync_end_utc = self._resolve_history_sync_window(
+                                                    requested_start_utc=requested_history_start_time,
+                                                    requested_end_utc=requested_history_sync_end_time,
+                                                    required_warmup_candles=required_warmup_candles,
+                                                )
+                                                sync_end_label = (
+                                                    sync_end_utc.strftime("%Y-%m-%d %H:%M:%S")
+                                                    if sync_end_utc is not None
+                                                    else "latest"
+                                                )
+                                                self.log_message.emit(
+                                                    "Date-range history sync active: "
+                                                    f"{sync_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC -> {sync_end_label} UTC."
+                                                )
+                                                history_manager.sync_candles_since(
+                                                    symbols=[self._symbol],
+                                                    interval=self._interval,
+                                                    start_time=sync_start_utc,
+                                                    end_time=sync_end_utc,
+                                                    on_progress=self._emit_history_download_progress,
+                                                    on_log=self.log_message.emit,
+                                                    should_abort=self._should_stop,
+                                                )
+                                                full_history_seed_performed = True
+                                            else:
+                                                self.log_message.emit(
+                                                    "Date-range baseline already seeded: "
+                                                    f"{self._symbol} {self._interval} "
+                                                    f"(reason={full_history_seed_reason}). "
+                                                    "Running incremental tail refresh only."
+                                                )
+                                                history_manager.sync_recent_candles(
+                                                    symbols=[self._symbol],
+                                                    interval=self._interval,
+                                                    candles_per_symbol=max(
+                                                        int(OPTIMIZER_INCREMENTAL_SYNC_MIN_CANDLES),
+                                                        5_000,
+                                                    ),
+                                                    should_abort=self._should_stop,
+                                                    on_progress=self._emit_history_download_progress,
+                                                )
+                                        else:
+                                            self.log_message.emit(
+                                                "Incremental history sync active: "
+                                                f"refreshing latest tail window ({MAX_BACKTEST_CANDLES} candles)."
+                                            )
+                                            history_manager.sync_recent_candles(
+                                                symbols=[self._symbol],
+                                                interval=self._interval,
+                                                candles_per_symbol=MAX_BACKTEST_CANDLES,
+                                                should_abort=self._should_stop,
+                                                on_progress=self._emit_history_download_progress,
+                                            )
+                                if self._should_stop():
+                                    return
+                                if explicit_history_window:
+                                    effective_history_start_time, warmup_shifted_candles = (
+                                        self._apply_history_warmup_correction(
+                                            history_db,
                                             requested_start_utc=requested_history_start_time,
-                                            requested_end_utc=requested_history_end_time,
+                                            requested_end_utc=requested_history_sync_end_time,
                                             required_warmup_candles=required_warmup_candles,
                                         )
-                                        sync_end_label = (
-                                            sync_end_utc.strftime("%Y-%m-%d %H:%M:%S")
-                                            if sync_end_utc is not None
-                                            else "latest"
-                                        )
-                                        self.log_message.emit(
-                                            "Date-range history sync active: "
-                                            f"{sync_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC -> {sync_end_label} UTC."
-                                        )
-                                        history_manager.sync_candles_since(
-                                            symbols=[self._symbol],
-                                            interval=self._interval,
-                                            start_time=sync_start_utc,
-                                            end_time=sync_end_utc,
-                                            on_progress=self._emit_history_download_progress,
-                                            on_log=self.log_message.emit,
-                                        )
-                                    else:
-                                        self.log_message.emit(
-                                            "Incremental history sync active: "
-                                            f"refreshing latest tail window ({MAX_BACKTEST_CANDLES} candles)."
-                                        )
-                                        history_manager.sync_recent_candles(
-                                            symbols=[self._symbol],
-                                            interval=self._interval,
-                                            candles_per_symbol=MAX_BACKTEST_CANDLES,
-                                            on_progress=self._emit_history_download_progress,
-                                        )
-                            explicit_history_window = (
-                                self._history_requested_start_utc is not None
-                                or self._history_end_utc is not None
-                            )
-                            if explicit_history_window:
-                                effective_history_start_time, warmup_shifted_candles = (
-                                    self._apply_history_warmup_correction(
-                                        history_db,
-                                        requested_start_utc=requested_history_start_time,
-                                        requested_end_utc=requested_history_end_time,
-                                        required_warmup_candles=required_warmup_candles,
                                     )
-                                )
-                                effective_history_end_time = requested_history_end_time
-                                candles = _load_backtest_candles_in_time_range(
-                                    history_db,
-                                    symbol=self._symbol,
-                                    interval=self._interval,
-                                    start_time=effective_history_start_time,
-                                    end_time=effective_history_end_time,
-                                )
-                                history_loader_mode = "date_range_window"
-                            else:
-                                candles = _load_latest_backtest_candles(
-                                    history_db,
-                                    symbol=self._symbol,
-                                    interval=self._interval,
-                                    limit=MAX_BACKTEST_CANDLES,
-                                )
-                                effective_history_start_time = requested_history_start_time
-                                effective_history_end_time = requested_history_end_time
-                                history_loader_mode = "latest_tail_window"
-                            total_candles = len(candles)
-                            if candles:
-                                oldest_time = candles[0].open_time
-                                newest_time = candles[-1].open_time
-                            break
-                        except Exception as exc:
-                            last_history_error = exc
-                            if source_index < len(history_sources) - 1:
-                                next_label = history_sources[source_index + 1][1]
-                                self.log_message.emit(
-                                    f"History sync via {source_label} failed: {exc}. "
-                                    f"Retrying via {next_label}."
-                                )
-                                continue
-                            raise
-                finally:
-                    if shared_history_db is not None:
-                        with suppress(Exception):
-                            shared_history_db.close()
-                        shared_history_db = None
-                if not candles and last_history_error is not None:
-                    raise last_history_error
+                                    effective_history_end_time = requested_history_sync_end_time
+                                    candles = _load_backtest_candles_in_time_range(
+                                        history_db,
+                                        symbol=self._symbol,
+                                        interval=self._interval,
+                                        start_time=effective_history_start_time,
+                                        end_time=effective_history_end_time,
+                                    )
+                                    history_loader_mode = "date_range_window"
+                                else:
+                                    candles = _load_latest_backtest_candles(
+                                        history_db,
+                                        symbol=self._symbol,
+                                        interval=self._interval,
+                                        limit=MAX_BACKTEST_CANDLES,
+                                    )
+                                    effective_history_start_time = requested_history_start_time
+                                    effective_history_end_time = requested_history_sync_end_time
+                                    history_loader_mode = "latest_tail_window"
+                                total_candles = len(candles)
+                                if self._should_stop():
+                                    return
+                                if candles:
+                                    oldest_time = candles[0].open_time
+                                    newest_time = candles[-1].open_time
+                                    if explicit_history_window and full_history_seed_performed:
+                                        _mark_history_seed_completed(
+                                            symbol=self._symbol,
+                                            interval=self._interval,
+                                            seeded_start_utc=requested_history_start_time,
+                                            seeded_end_utc=max(
+                                                newest_time,
+                                                requested_history_sync_end_time,
+                                            ),
+                                            mode="date_range",
+                                        )
+                                break
+                            except Exception as exc:
+                                last_history_error = exc
+                                if source_index < len(history_sources) - 1:
+                                    next_label = history_sources[source_index + 1][1]
+                                    self.log_message.emit(
+                                        f"History sync via {source_label} failed: {exc}. "
+                                        f"Retrying via {next_label}."
+                                    )
+                                    continue
+                                raise
+                    finally:
+                        if shared_history_db is not None:
+                            with suppress(Exception):
+                                shared_history_db.close()
+                            shared_history_db = None
+                    if not candles and last_history_error is not None:
+                        raise last_history_error
+                    cache_metadata: dict[str, object] = {
+                        "history_effective_start_utc": effective_history_start_time,
+                        "history_effective_end_utc": effective_history_end_time,
+                        "history_start_utc": oldest_time,
+                        "history_end_utc": newest_time,
+                        "history_candles": int(total_candles),
+                        "history_loader_mode": history_loader_mode,
+                        "history_warmup_shifted_candles": int(warmup_shifted_candles),
+                    }
+                    candles_df = self._cache_history_and_prepare_run_dataframe(
+                        cache_key=history_cache_key,
+                        candles=candles,
+                        metadata=cache_metadata,
+                    )
+                    if history_cache_key is not None:
+                        self.log_message.emit(
+                            "Batch history cache store: "
+                            f"{self._symbol} {self._interval} "
+                            f"({total_candles} candles, loader={history_loader_mode})."
+                        )
+                if candles_df is None:
+                    raise RuntimeError(
+                        "History load failed: candles dataframe could not be prepared."
+                    )
+                if shared_history_db is not None:
+                    with suppress(Exception):
+                        shared_history_db.close()
+                    shared_history_db = None
 
                 if total_candles > 0 and oldest_time is not None and newest_time is not None:
                     self.log_message.emit(
@@ -6428,7 +11042,7 @@ class BacktestThread(QThread):
                         f"{newest_time.strftime('%Y-%m-%d %H:%M:%S')} "
                         f"({total_candles} candles, interval={self._interval})"
                     )
-                    if history_loader_mode == "date_range_window":
+                    if str(history_loader_mode).startswith("date_range_window"):
                         self.log_message.emit(
                             "Backtest loader mode: "
                             f"using configured date-range window ({total_candles} candles)."
@@ -6438,11 +11052,12 @@ class BacktestThread(QThread):
                             "Backtest loader mode: "
                             f"using latest tail window ({min(total_candles, MAX_BACKTEST_CANDLES)}/{MAX_BACKTEST_CANDLES} candles)."
                         )
-                if candles:
+                if total_candles > 0 and oldest_time is not None and newest_time is not None:
                     self.log_message.emit(
                         "Backtest window in use: "
-                        f"{self._format_candle_range(candles)} "
-                        f"({len(candles)} candles)"
+                        f"{oldest_time.strftime('%Y-%m-%d %H:%M:%S')} -> "
+                        f"{newest_time.strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"({total_candles} candles)"
                     )
                 self._emit_trace_event(
                     "history_loaded",
@@ -6471,14 +11086,25 @@ class BacktestThread(QThread):
                         "required_candles": int(required_candles),
                     },
                 )
-                if len(candles) < required_candles:
+                if len(candles_df) < required_candles:
+                    loaded_range_text = "unknown range"
+                    if oldest_time is not None and newest_time is not None:
+                        loaded_range_text = (
+                            f"{oldest_time.strftime('%Y-%m-%d %H:%M:%S')} -> "
+                            f"{newest_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                    missing_candles = max(0, int(required_candles - len(candles_df)))
                     raise RuntimeError(
-                        f"Not enough candles for backtest: have {len(candles)}, need {required_candles}."
+                        "Not enough candles for backtest: "
+                        f"have {len(candles_df)}, need {required_candles} "
+                        f"(missing {missing_candles}) for {self._symbol} {self._interval}. "
+                        f"Loaded range: {loaded_range_text}. "
+                        "The symbol is likely newly listed or has limited exchange history for this timeframe."
                     )
 
-                candles_df = _candles_to_dataframe(candles).copy(deep=True)
-                self._hmm_regime_mask = self._prepare_hmm_regime_mask(
-                    candles_df,
+                self._hmm_regime_mask = self._resolve_hmm_regime_mask_with_batch_cache(
+                    cache_key=history_cache_key,
+                    candles_df=candles_df,
                     strategy_name=resolved_strategy_name,
                 )
                 if self._optimize_profile:
@@ -6621,23 +11247,22 @@ class BacktestThread(QThread):
                     },
                 )
                 if self._isolated_db:
-                    persist_error: Exception | None = None
-                    for attempt in range(5):
-                        try:
-                            with Database(self._db_path) as result_db:
-                                self._persist_backtest_result(
-                                    result_db,
-                                    result,
-                                    strategy_name=resolved_strategy_name,
-                                )
-                            persist_error = None
-                            break
-                        except Exception as exc:
-                            persist_error = exc
-                            if attempt < 4:
-                                sleep(0.25)
-                    if persist_error is not None:
-                        raise persist_error
+                    if (
+                        self._optimize_profile
+                        and self._checkpoint_backtest_run_id is not None
+                    ):
+                        self._update_backtest_result_in_primary_db_with_retry(
+                            self._checkpoint_backtest_run_id,
+                            result,
+                            strategy_name=resolved_strategy_name,
+                            stage_label="final_result_update",
+                        )
+                    else:
+                        self._persist_backtest_result_to_primary_db_with_retry(
+                            result,
+                            strategy_name=resolved_strategy_name,
+                            stage_label="final_result",
+                        )
                 else:
                     self._persist_backtest_result(
                         db,
@@ -6647,12 +11272,14 @@ class BacktestThread(QThread):
                 self.log_message.emit(
                     f"Backtest result saved to DB for {self._symbol} {self._interval} ({resolved_strategy_name})."
                 )
+                self._checkpoint_backtest_run_id = None
         except Exception as exc:
             if not self._should_stop():
                 self.backtest_error.emit(str(exc))
             return
         finally:
             self._hmm_regime_mask = None
+            self._checkpoint_backtest_run_id = None
             self._clear_signal_caches_and_gc()
             gc.collect()
             if temp_workspace is not None:
@@ -6714,6 +11341,20 @@ class BacktestThread(QThread):
             if isinstance(strategy_profile, dict) and "tight_trailing_distance_pct" in strategy_profile
             else None
         )
+        profile_chandelier_period = (
+            int(float(strategy_profile["chandelier_period"]))
+            if isinstance(strategy_profile, dict) and "chandelier_period" in strategy_profile
+            else int(settings.trading.chandelier_period)
+        )
+        profile_chandelier_multiplier = (
+            float(strategy_profile["chandelier_multiplier"])
+            if isinstance(strategy_profile, dict) and "chandelier_multiplier" in strategy_profile
+            else float(
+                strategy_profile.get("chandelier_mult", settings.trading.chandelier_multiplier)
+            )
+            if isinstance(strategy_profile, dict)
+            else float(settings.trading.chandelier_multiplier)
+        )
         engine = self._build_backtest_engine(
             db,
             take_profit_pct=profile_tp,
@@ -6774,6 +11415,8 @@ class BacktestThread(QThread):
             dynamic_stop_loss_pcts=normalized_dynamic_stop_loss_pcts,
             dynamic_take_profit_pcts=normalized_dynamic_take_profit_pcts,
             enable_chandelier_exit=True,
+            chandelier_period=profile_chandelier_period,
+            chandelier_multiplier=profile_chandelier_multiplier,
             strategy_exit_pre_take_profit=False,
             strategy_name=strategy_name,
         )
@@ -7001,6 +11644,31 @@ class BacktestThread(QThread):
                 ),
             )
             detection = detector.detect(candles_df)
+            transmat_warning_events = [
+                event
+                for event in tuple(getattr(detection, "warning_events", tuple()) or tuple())
+                if isinstance(event, Mapping)
+                and str(event.get("warning_kind", "")).strip().lower()
+                == "transmat_zero_sum_no_transition"
+            ]
+            if transmat_warning_events:
+                warning_detail = _format_hmm_warning_detail(
+                    detection,
+                    warning_kind="transmat_zero_sum_no_transition",
+                )
+                self.log_message.emit(
+                    "HMM regime analytics detector structural warning. "
+                    f"symbol={self._symbol} interval={self._interval} {warning_detail}."
+                )
+            if not bool(getattr(detection, "converged", True)):
+                non_convergence_detail = _format_hmm_non_convergence_detail(detection)
+                self.log_message.emit(
+                    "HMM regime analytics detector non-converged. "
+                    f"symbol={self._symbol} interval={self._interval} "
+                    f"{non_convergence_detail}. Falling back to neutral regime view."
+                )
+                self._hmm_regime_labels = None
+                return None
             labels = list(detection.regime_labels)
             if len(labels) == len(candles_df):
                 self._hmm_regime_labels = labels
@@ -7483,6 +12151,8 @@ class BacktestThread(QThread):
             strategy_name=strategy_name,
             interval=self._interval,
         )
+        raw_grid_profile_count = int(len(raw_grid_profiles))
+        constrained_grid_profile_count = int(len(full_grid_profiles))
         if len(full_grid_profiles) < len(raw_grid_profiles) and not self._is_quiet_mode():
             self.log_message.emit(
                 "Optimizer strategy/interval constraints active: "
@@ -7518,6 +12188,15 @@ class BacktestThread(QThread):
             if isinstance(worker_cap, int) and worker_cap > 0
             else None
         )
+        if worker_cap_value is None:
+            if _is_1m_research_interval(self._interval):
+                worker_cap_value = (
+                    int(OPTIMIZER_1M_RESEARCH_PYTHON_MAX_WORKERS)
+                    if strategy_name == "ema_band_rejection"
+                    else int(OPTIMIZER_1M_RESEARCH_MAX_WORKERS)
+                )
+            else:
+                worker_cap_value = int(OPTIMIZER_GUI_DEFAULT_MAX_WORKERS)
         configured_search_window = int(_resolve_optimizer_search_window_candles(self._interval))
         stage1_evaluated_profiles = 0
         stage2_evaluated_profiles = 0
@@ -7529,15 +12208,28 @@ class BacktestThread(QThread):
         optimizer_quality_status = "STRICT_PASS"
         optimizer_low_edge_fallback_used = False
         optimizer_low_edge_reason = ""
+        stage1_gate_stats: dict[str, int] = {
+            "total": 0,
+            "fail_min_trades": 0,
+            "fail_breakeven": 0,
+            "fail_avg_profit": 0,
+            "fail_multi": 0,
+            "eligible": 0,
+        }
+        stage2_gate_stats: dict[str, int] = {
+            "total": 0,
+            "fail_min_trades": 0,
+            "fail_breakeven": 0,
+            "fail_avg_profit": 0,
+            "fail_multi": 0,
+            "eligible": 0,
+        }
+        effective_grid_profiles_for_edge: list[OptimizationProfile] = []
 
         if worker_cap_value is not None and not self._is_quiet_mode():
             self.log_message.emit(
                 "Optimizer worker policy active: "
                 f"strategy cap={worker_cap_value}, global max={MAX_OPTIMIZATION_WORKERS}."
-            )
-        elif not self._is_quiet_mode():
-            self.log_message.emit(
-                f"Optimizer worker lock active: forcing {MAX_OPTIMIZATION_WORKERS} isolated worker processes."
             )
 
         if self._use_setup_gate and not self._is_quiet_mode():
@@ -7647,7 +12339,7 @@ class BacktestThread(QThread):
             if not stage1_phase_summaries:
                 raise RuntimeError("Stage 1 did not produce any optimization result.")
 
-            stage1_ranked_eligible, stage1_ranked_all, _stage1_stats = self._analyze_optimization_phase_summaries(
+            stage1_ranked_eligible, stage1_ranked_all, stage1_gate_stats = self._analyze_optimization_phase_summaries(
                 strategy_name=strategy_name,
                 stage_label="Stage 1",
                 phase_summaries=stage1_phase_summaries,
@@ -7684,6 +12376,10 @@ class BacktestThread(QThread):
                 stage2_candidate_profiles.append(candidate_profile)
             if not stage2_candidate_profiles:
                 raise RuntimeError("Stage 2 candidate set is empty after Stage 1 ranking.")
+            effective_grid_profiles_for_edge = [
+                dict(profile)
+                for profile in stage2_candidate_profiles
+            ]
 
             stage2_evaluated_profiles = len(stage2_candidate_profiles)
             scan_profile_count = int(stage1_evaluated_profiles + stage2_evaluated_profiles)
@@ -7726,7 +12422,7 @@ class BacktestThread(QThread):
             if not stage2_phase_summaries:
                 raise RuntimeError("Stage 2 did not produce any optimization result.")
 
-            stage2_ranked_eligible, stage2_ranked_all, _stage2_stats = self._analyze_optimization_phase_summaries(
+            stage2_ranked_eligible, stage2_ranked_all, stage2_gate_stats = self._analyze_optimization_phase_summaries(
                 strategy_name=strategy_name,
                 stage_label="Stage 2",
                 phase_summaries=stage2_phase_summaries,
@@ -7819,6 +12515,10 @@ class BacktestThread(QThread):
                 interval=self._interval,
                 random_seed=OPTIMIZER_SAMPLE_RANDOM_SEED,
             )
+            effective_grid_profiles_for_edge = [
+                dict(profile)
+                for profile in sampled_grid_profiles
+            ]
             scan_profile_count = len(sampled_grid_profiles)
             is_sample_scan = scan_profile_count < theoretical_profiles
             coverage_ratio = scan_profile_count / float(theoretical_profiles)
@@ -7886,7 +12586,7 @@ class BacktestThread(QThread):
                 return {}
             if not optimization_phase_summaries:
                 raise RuntimeError("Optimization did not produce any result.")
-            ranked_eligible, _ranked_all, _stage_stats = self._analyze_optimization_phase_summaries(
+            ranked_eligible, _ranked_all, stage1_gate_stats = self._analyze_optimization_phase_summaries(
                 strategy_name=strategy_name,
                 stage_label="Stage 1",
                 phase_summaries=optimization_phase_summaries,
@@ -8248,6 +12948,29 @@ class BacktestThread(QThread):
             len(ranked_optimization_summaries),
             max(1, int(settings.trading.optimization_validation_top_n)),
         )
+        optimizer_effective_grid_bounds = _summarize_profile_grid_bounds(
+            effective_grid_profiles_for_edge
+        )
+        if not optimizer_effective_grid_bounds:
+            optimizer_effective_grid_bounds = _summarize_profile_grid_bounds(
+                [best_profile] if best_profile else []
+            )
+        rejected_min_trades = int(
+            stage1_gate_stats.get("fail_min_trades", 0)
+            + stage2_gate_stats.get("fail_min_trades", 0)
+        )
+        rejected_breakeven_activation = int(
+            stage1_gate_stats.get("fail_breakeven", 0)
+            + stage2_gate_stats.get("fail_breakeven", 0)
+        )
+        rejected_avg_profit_per_trade_net = int(
+            stage1_gate_stats.get("fail_avg_profit", 0)
+            + stage2_gate_stats.get("fail_avg_profit", 0)
+        )
+        rejected_risk_guard = int(
+            max(0, raw_grid_profile_count - constrained_grid_profile_count)
+        )
+        rejected_other = 0
         optimization_summaries_compact = [
             dict(summary)
             for summary in ranked_optimization_summaries[:keep_top_count]
@@ -8292,6 +13015,22 @@ class BacktestThread(QThread):
                 "optimizer_low_edge": bool(optimizer_quality_status == "LOW_EDGE"),
                 "optimizer_low_edge_fallback_used": bool(optimizer_low_edge_fallback_used),
                 "optimizer_low_edge_reason": str(optimizer_low_edge_reason),
+                "optimizer_grid_profile_tag": str(
+                    _grid_profile_tag_for_interval(self._interval) or "standard_grid_v1"
+                ),
+                "optimizer_grid_total_before_guards": int(raw_grid_profile_count),
+                "optimizer_grid_total_after_guards": int(constrained_grid_profile_count),
+                "optimizer_effective_grid_profile_count": int(
+                    len(effective_grid_profiles_for_edge)
+                ),
+                "optimizer_effective_grid_bounds": dict(optimizer_effective_grid_bounds),
+                "optimizer_stage1_gate_stats": dict(stage1_gate_stats),
+                "optimizer_stage2_gate_stats": dict(stage2_gate_stats),
+                "rejected_min_trades": int(rejected_min_trades),
+                "rejected_breakeven_activation": int(rejected_breakeven_activation),
+                "rejected_avg_profit_per_trade_net": int(rejected_avg_profit_per_trade_net),
+                "rejected_risk_guard": int(rejected_risk_guard),
+                "rejected_other": int(rejected_other),
             }
         )
         # Persist winner immediately (batch-saving) so each strategy/coin result is durable
@@ -8301,6 +13040,23 @@ class BacktestThread(QThread):
         except Exception:
             # Don't fail if persistence fails; continue to clear caches.
             self.log_message.emit("Warning: failed to persist optimization winner to DB.")
+        if self._isolated_db:
+            try:
+                checkpoint_run_id = self._persist_backtest_result_to_primary_db_with_retry(
+                    best_result,
+                    strategy_name=strategy_name,
+                    stage_label="optimizer_checkpoint",
+                )
+                self._checkpoint_backtest_run_id = int(checkpoint_run_id)
+                self.log_message.emit(
+                    f"Optimizer checkpoint saved to primary DB for {self._symbol} {self._interval} ({strategy_name}) "
+                    f"(run_id={self._checkpoint_backtest_run_id})."
+                )
+            except Exception as exc:
+                self.log_message.emit(
+                    "Warning: optimizer checkpoint persistence to primary DB failed: "
+                    f"{exc}"
+                )
 
         # Free large worker-side caches to avoid memory growth between coin runs
         self._clear_signal_caches_and_gc()
@@ -8324,14 +13080,6 @@ class BacktestThread(QThread):
         if total_profiles == 0:
             return []
 
-        worker_count = _memory_safe_worker_count(
-            total_profiles,
-            worker_cap_override=worker_cap_override,
-        )
-        if worker_cap_override is not None and not self._is_quiet_mode():
-            self.log_message.emit(
-                f"{phase_label}: strategy worker cap active ({worker_cap_override}); using {worker_count} workers."
-            )
         strategy_signal_cache: dict[object, dict[str, object]] | None = None
         precomputed_signals: list[int] | None = None
         total_signals = 0
@@ -8339,6 +13087,51 @@ class BacktestThread(QThread):
         blocked_signals = 0
         use_jit_strategy = _jit_strategy_code(strategy_name) != 0
         force_python_path = False
+        if _is_1m_research_interval(self._interval):
+            if strategy_name == "ema_band_rejection":
+                use_jit_strategy = False
+                force_python_path = True
+                self.log_message.emit(
+                    f"1m research grid active ({RESEARCH_1M_GRID_PROFILE_TAG}): "
+                    f"{self._symbol} {strategy_name} keeps python strategy-evaluation path "
+                    "(consistency lock)."
+                )
+            elif use_jit_strategy:
+                self.log_message.emit(
+                    f"1m research grid active ({RESEARCH_1M_GRID_PROFILE_TAG}): "
+                    f"{self._symbol} {strategy_name} uses JIT-accelerated optimizer path."
+                )
+            else:
+                force_python_path = True
+                self.log_message.emit(
+                    f"1m research grid active ({RESEARCH_1M_GRID_PROFILE_TAG}): "
+                    f"{self._symbol} {strategy_name} has no JIT kernel; using python strategy-evaluation path."
+                )
+
+        runtime_worker_cap = worker_cap_override
+        if _is_1m_research_interval(self._interval):
+            suggested_cap = (
+                int(OPTIMIZER_1M_RESEARCH_PYTHON_MAX_WORKERS)
+                if force_python_path
+                else int(OPTIMIZER_1M_RESEARCH_MAX_WORKERS)
+            )
+        else:
+            suggested_cap = int(OPTIMIZER_GUI_DEFAULT_MAX_WORKERS)
+        runtime_worker_cap = (
+            suggested_cap
+            if runtime_worker_cap is None
+            else min(int(runtime_worker_cap), suggested_cap)
+        )
+        worker_count = _memory_safe_worker_count(
+            total_profiles,
+            worker_cap_override=int(runtime_worker_cap),
+        )
+        if not self._is_quiet_mode():
+            self.log_message.emit(
+                f"{phase_label}: runtime worker governor active "
+                f"(requested_cap={runtime_worker_cap}, workers={worker_count}, "
+                f"force_python_path={'yes' if force_python_path else 'no'})."
+            )
 
         if use_jit_strategy and strategy_name == "ema_band_rejection":
             try:
@@ -8511,19 +13304,54 @@ class BacktestThread(QThread):
                     f"Python vector path active for {strategy_name}: worker evaluation uses signal payload + backtest engine."
                 )
             variant_profiles = _collect_strategy_variant_profiles(strategy_name, profiles)
-            strategy_signal_cache = self._build_parallel_strategy_signal_cache(
-                candles_df,
+            estimated_cache_bytes = _estimate_strategy_signal_cache_bytes(
                 strategy_name=strategy_name,
-                worker_count=worker_count,
-                variant_profiles=variant_profiles,
-                progress_start=cache_progress_start,
-                progress_span=cache_progress_span,
-                regime_mask=regime_mask,
+                candle_count=len(candles_df),
+                variant_count=len(variant_profiles),
             )
+            estimated_replicated_cache_bytes = int(estimated_cache_bytes) * int(worker_count)
+            should_build_shared_cache = True
+            cache_skip_reason = ""
+            if estimated_cache_bytes > int(OPTIMIZER_SIGNAL_CACHE_MAX_PARENT_BYTES):
+                should_build_shared_cache = False
+                cache_skip_reason = (
+                    "parent cache estimate exceeds limit "
+                    f"({estimated_cache_bytes / (1024 ** 2):.1f} MiB > "
+                    f"{OPTIMIZER_SIGNAL_CACHE_MAX_PARENT_BYTES / (1024 ** 2):.1f} MiB)"
+                )
+            elif estimated_replicated_cache_bytes > int(OPTIMIZER_SIGNAL_CACHE_MAX_REPLICATED_BYTES):
+                should_build_shared_cache = False
+                cache_skip_reason = (
+                    "replicated worker cache estimate exceeds limit "
+                    f"({estimated_replicated_cache_bytes / (1024 ** 3):.2f} GiB > "
+                    f"{OPTIMIZER_SIGNAL_CACHE_MAX_REPLICATED_BYTES / (1024 ** 3):.2f} GiB)"
+                )
+            if should_build_shared_cache:
+                self.log_message.emit(
+                    f"{phase_label}: preparing shared signal cache for {len(variant_profiles)} profile variants."
+                )
+                strategy_signal_cache = self._build_parallel_strategy_signal_cache(
+                    candles_df,
+                    strategy_name=strategy_name,
+                    worker_count=worker_count,
+                    variant_profiles=variant_profiles,
+                    progress_start=cache_progress_start,
+                    progress_span=cache_progress_span,
+                    regime_mask=regime_mask,
+                )
+            else:
+                strategy_signal_cache = None
+                self.log_message.emit(
+                    f"{phase_label}: shared signal cache disabled ({cache_skip_reason}). "
+                    "Workers will compute signals on demand per profile to protect GUI stability."
+                )
 
         self.progress_update.emit(
             optimization_progress_start,
             f"{phase_label} 0/{total_profiles}",
+        )
+        self.log_message.emit(
+            f"{phase_label}: started ({total_profiles} profiles on {worker_count} workers)."
         )
 
         if use_jit_strategy:
@@ -8531,7 +13359,22 @@ class BacktestThread(QThread):
         candles_payload = _candles_dataframe_to_worker_payload(candles_df)
         first_summary_logged = strategy_signal_cache is None
         completed_profiles = 0
-        batch_size = worker_count
+        if _is_1m_research_interval(self._interval):
+            chunk_min, chunk_max = 4, 6
+        else:
+            chunk_min, chunk_max = 8, 12
+        target_chunk_size = int(
+            math.ceil(
+                total_profiles
+                / float(max(1, worker_count * 4))
+            )
+        )
+        profile_chunk_size = max(chunk_min, min(chunk_max, target_chunk_size))
+        dispatch_profile_batch_size = max(1, worker_count * profile_chunk_size)
+        self.log_message.emit(
+            f"{phase_label}: optimizer chunking active "
+            f"(chunk_size={profile_chunk_size}, dispatch_profiles={dispatch_profile_batch_size}, workers={worker_count})."
+        )
         pool = _create_optimizer_pool(
             worker_count,
             candles_payload,
@@ -8564,74 +13407,89 @@ class BacktestThread(QThread):
                 "Intermediate optimizer checkpoint cache active: "
                 f"streaming summaries to {phase_cache_path}."
             )
+        def _build_profile_task(profile: OptimizationProfile) -> dict[str, object]:
+            cache_key = (
+                _strategy_cache_key(strategy_name, profile)
+                if strategy_signal_cache is not None
+                else None
+            )
+            cached_group = (
+                strategy_signal_cache.get(cache_key)
+                if strategy_signal_cache is not None and cache_key is not None
+                else None
+            )
+            return {
+                "strategy_name": strategy_name,
+                "strategy_profile": profile,
+                "force_python_path": bool(force_python_path),
+                "symbol": self._symbol,
+                "interval": self._interval,
+                "leverage_override": self._leverage_override,
+                "use_setup_gate": self._use_setup_gate,
+                "min_confidence_pct": self._min_confidence_pct,
+                "precomputed_cache_key": (
+                    cache_key
+                    if cached_group is not None
+                    else None
+                ),
+                "precomputed_signals": (
+                    None
+                    if cached_group is not None
+                    else precomputed_signals
+                ),
+                "precomputed_long_exit_flags": (
+                    None
+                    if cached_group is not None
+                    else None
+                ),
+                "precomputed_short_exit_flags": (
+                    None
+                    if cached_group is not None
+                    else None
+                ),
+                "total_signals": (
+                    int(cached_group["total_signals"])
+                    if cached_group is not None
+                    else total_signals
+                ),
+                "approved_signals": (
+                    int(cached_group["approved_signals"])
+                    if cached_group is not None
+                    else approved_signals
+                ),
+                "blocked_signals": (
+                    int(cached_group["blocked_signals"])
+                    if cached_group is not None
+                    else blocked_signals
+                ),
+            }
         try:
-            for batch_start in range(0, total_profiles, batch_size):
+            for batch_start in range(0, total_profiles, dispatch_profile_batch_size):
                 if self._should_stop():
                     interrupted = True
                     return []
 
-                batch_profiles = list(profiles[batch_start : batch_start + batch_size])
+                batch_profiles = list(
+                    profiles[batch_start : batch_start + dispatch_profile_batch_size]
+                )
+                profile_chunks: list[list[OptimizationProfile]] = [
+                    batch_profiles[index : index + profile_chunk_size]
+                    for index in range(0, len(batch_profiles), profile_chunk_size)
+                ]
                 tasks: list[dict[str, object]] = []
-                for profile in batch_profiles:
-                    cache_key = (
-                        _strategy_cache_key(strategy_name, profile)
-                        if strategy_signal_cache is not None
-                        else None
-                    )
-                    cached_group = (
-                        strategy_signal_cache.get(cache_key)
-                        if strategy_signal_cache is not None and cache_key is not None
-                        else None
-                    )
+                for profile_chunk in profile_chunks:
                     tasks.append(
                         {
-                            "strategy_name": strategy_name,
-                            "strategy_profile": profile,
-                            "force_python_path": bool(force_python_path),
-                            "symbol": self._symbol,
-                            "interval": self._interval,
-                            "leverage_override": self._leverage_override,
-                            "use_setup_gate": self._use_setup_gate,
-                            "min_confidence_pct": self._min_confidence_pct,
-                            "precomputed_cache_key": (
-                                cache_key
-                                if cached_group is not None
-                                else None
-                            ),
-                            "precomputed_signals": (
-                                None
-                                if cached_group is not None
-                                else precomputed_signals
-                            ),
-                            "precomputed_long_exit_flags": (
-                                None
-                                if cached_group is not None
-                                else None
-                            ),
-                            "precomputed_short_exit_flags": (
-                                None
-                                if cached_group is not None
-                                else None
-                            ),
-                            "total_signals": (
-                                int(cached_group["total_signals"])
-                                if cached_group is not None
-                                else total_signals
-                            ),
-                            "approved_signals": (
-                                int(cached_group["approved_signals"])
-                                if cached_group is not None
-                                else approved_signals
-                            ),
-                            "blocked_signals": (
-                                int(cached_group["blocked_signals"])
-                                if cached_group is not None
-                                else blocked_signals
-                            ),
+                            "profile_tasks": [
+                                _build_profile_task(profile)
+                                for profile in profile_chunk
+                            ],
                         }
                     )
 
-                async_result = pool.map_async(_run_optimization_profile_worker, tasks)
+                async_result = pool.map_async(_run_optimization_profile_chunk_worker, tasks)
+                batch_wait_started_monotonic = time.monotonic()
+                next_wait_heartbeat_monotonic = batch_wait_started_monotonic + 8.0
                 while True:
                     if self._should_stop():
                         interrupted = True
@@ -8640,41 +13498,80 @@ class BacktestThread(QThread):
                         batch_results = async_result.get(timeout=0.25)
                         break
                     except PoolTimeoutError:
+                        now_monotonic = time.monotonic()
+                        if now_monotonic >= next_wait_heartbeat_monotonic:
+                            batch_elapsed_sec = max(
+                                0.0,
+                                now_monotonic - batch_wait_started_monotonic,
+                            )
+                            remaining_profiles = max(0, total_profiles - completed_profiles)
+                            self.log_message.emit(
+                                f"{phase_label}: running... completed={completed_profiles}/{total_profiles} "
+                                f"(remaining={remaining_profiles}) | waiting on current worker batch "
+                                f"({len(batch_profiles)} profiles in {len(tasks)} chunk-tasks, "
+                                f"chunk_size={profile_chunk_size}, {worker_count} workers, {batch_elapsed_sec:.0f}s elapsed)."
+                            )
+                            next_wait_heartbeat_monotonic = now_monotonic + 8.0
                         continue
 
-                for batch_result in batch_results:
-                    if batch_result is None:
+                submitted_profiles_in_batch = 0
+                for chunk_result in batch_results:
+                    if chunk_result is None:
                         continue
-                    summary = dict(batch_result["summary"])
-                    if phase_cache_handle is not None:
-                        phase_cache_handle.write(
-                            json.dumps(summary, separators=(",", ":")) + "\n"
+                    chunk_profile_results: list[dict[str, object]]
+                    if isinstance(chunk_result, Mapping) and "chunk_results" in chunk_result:
+                        raw_chunk_results = chunk_result.get("chunk_results", [])
+                        chunk_profile_results = (
+                            [dict(item) for item in raw_chunk_results if isinstance(item, Mapping)]
+                            if isinstance(raw_chunk_results, Sequence)
+                            else []
                         )
+                        submitted_profiles_in_batch += int(
+                            chunk_result.get(
+                                "submitted_profiles",
+                                len(chunk_profile_results),
+                            )
+                            or 0
+                        )
+                    elif isinstance(chunk_result, Mapping):
+                        chunk_profile_results = [dict(chunk_result)]
+                        submitted_profiles_in_batch += 1
                     else:
-                        phase_results.append(summary)
-                    if (
-                        not first_summary_logged
-                        and strategy_signal_cache is not None
-                        and not self._is_quiet_mode()
-                    ):
-                        self.log_message.emit(
-                            "Backtest summary: "
-                            f"Total Signals: {int(batch_result['total_signals'])} | "
-                            f"Approved by Gate: {int(batch_result['approved_signals'])} | "
-                            f"Blocked: {int(batch_result['blocked_signals'])}"
-                        )
-                        first_summary_logged = True
-                    if best_summary is None or _optimization_sort_key(
-                        summary,
-                        strategy_name=strategy_name,
-                    ) > _optimization_sort_key(
-                        best_summary,
-                        strategy_name=strategy_name,
-                    ):
-                        best_summary = summary
-                        best_profile = _extract_profile_from_summary(summary)
+                        chunk_profile_results = []
+                    for profile_result in chunk_profile_results:
+                        summary = dict(profile_result["summary"])
+                        if phase_cache_handle is not None:
+                            phase_cache_handle.write(
+                                json.dumps(summary, separators=(",", ":")) + "\n"
+                            )
+                        else:
+                            phase_results.append(summary)
+                        if (
+                            not first_summary_logged
+                            and strategy_signal_cache is not None
+                            and not self._is_quiet_mode()
+                        ):
+                            self.log_message.emit(
+                                "Backtest summary: "
+                                f"Total Signals: {int(profile_result['total_signals'])} | "
+                                f"Approved by Gate: {int(profile_result['approved_signals'])} | "
+                                f"Blocked: {int(profile_result['blocked_signals'])}"
+                            )
+                            first_summary_logged = True
+                        if best_summary is None or _optimization_sort_key(
+                            summary,
+                            strategy_name=strategy_name,
+                        ) > _optimization_sort_key(
+                            best_summary,
+                            strategy_name=strategy_name,
+                        ):
+                            best_summary = summary
+                            best_profile = _extract_profile_from_summary(summary)
 
-                completed_profiles += len(batch_results)
+                if submitted_profiles_in_batch <= 0:
+                    submitted_profiles_in_batch = len(batch_profiles)
+                completed_profiles += submitted_profiles_in_batch
+                completed_profiles = min(completed_profiles, total_profiles)
                 if phase_cache_handle is not None:
                     phase_cache_handle.flush()
                 best_profile_text = _format_profile_dict(best_profile) if best_profile is not None else "{}"
@@ -9199,7 +14096,7 @@ class BacktestThread(QThread):
         result: dict[str, object],
         *,
         strategy_name: str,
-    ) -> None:
+    ) -> int:
         summary_payload = {
             key: value
             for key, value in result.items()
@@ -9211,7 +14108,8 @@ class BacktestThread(QThread):
                 "equity_curve_events",
             }
         }
-        db.insert_backtest_run(
+        return int(
+            db.insert_backtest_run(
             symbol=self._symbol,
             strategy_name=strategy_name,
             interval=self._interval,
@@ -9233,7 +14131,107 @@ class BacktestThread(QThread):
                 else None
             ),
             summary=summary_payload,
-        )
+        ))
+
+    def _persist_backtest_result_to_primary_db_with_retry(
+        self,
+        result: dict[str, object],
+        *,
+        strategy_name: str,
+        stage_label: str,
+    ) -> int:
+        persist_error: Exception | None = None
+        for attempt in range(1, self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS + 1):
+            try:
+                with Database(self._db_path) as result_db:
+                    run_id = self._persist_backtest_result(
+                        result_db,
+                        result,
+                        strategy_name=strategy_name,
+                    )
+                return int(run_id)
+            except Exception as exc:
+                persist_error = exc
+                if (
+                    attempt == 1
+                    or attempt % self._PRIMARY_DB_PERSIST_LOG_EVERY_ATTEMPTS == 0
+                    or attempt == self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS
+                ):
+                    self.log_message.emit(
+                        "Primary DB persistence retry "
+                        f"({stage_label}) {attempt}/{self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS}: "
+                        f"{exc}"
+                    )
+                if attempt < self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS:
+                    sleep(self._PRIMARY_DB_PERSIST_RETRY_SECONDS)
+        if persist_error is not None:
+            raise persist_error
+        raise RuntimeError("Primary DB persistence failed without explicit error.")
+
+    def _update_backtest_result_in_primary_db_with_retry(
+        self,
+        run_id: int,
+        result: dict[str, object],
+        *,
+        strategy_name: str,
+        stage_label: str,
+    ) -> None:
+        persist_error: Exception | None = None
+        summary_payload = {
+            key: value
+            for key, value in result.items()
+            if key
+            not in {
+                "closed_trades",
+                "optimization_results",
+                "decision_matrix_summaries",
+                "equity_curve_events",
+            }
+        }
+        for attempt in range(1, self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS + 1):
+            try:
+                with Database(self._db_path) as result_db:
+                    result_db.update_backtest_run(
+                        int(run_id),
+                        symbol=self._symbol,
+                        strategy_name=strategy_name,
+                        interval=self._interval,
+                        optimization_mode=bool(result.get("optimization_mode", False)),
+                        leverage=self._configured_leverage,
+                        min_confidence_pct=self._min_confidence_pct,
+                        total_pnl_usd=float(result.get("total_pnl_usd", 0.0) or 0.0),
+                        win_rate_pct=float(result.get("win_rate_pct", 0.0) or 0.0),
+                        profit_factor=float(result.get("profit_factor", 0.0) or 0.0),
+                        total_trades=int(result.get("total_trades", 0) or 0),
+                        evaluated_profiles=(
+                            int(result["evaluated_profiles"])
+                            if result.get("evaluated_profiles") is not None
+                            else None
+                        ),
+                        best_profile=(
+                            dict(result.get("best_profile", {}))
+                            if isinstance(result.get("best_profile"), dict)
+                            else None
+                        ),
+                        summary=summary_payload,
+                    )
+                return
+            except Exception as exc:
+                persist_error = exc
+                if (
+                    attempt == 1
+                    or attempt % self._PRIMARY_DB_PERSIST_LOG_EVERY_ATTEMPTS == 0
+                    or attempt == self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS
+                ):
+                    self.log_message.emit(
+                        "Primary DB update retry "
+                        f"({stage_label}) {attempt}/{self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS}: "
+                        f"{exc}"
+                    )
+                if attempt < self._PRIMARY_DB_PERSIST_MAX_ATTEMPTS:
+                    sleep(self._PRIMARY_DB_PERSIST_RETRY_SECONDS)
+        if persist_error is not None:
+            raise persist_error
 
     def _prepare_hmm_regime_mask(
         self,
@@ -9267,6 +14265,32 @@ class BacktestThread(QThread):
                 allowed_regimes=allowed_regimes,
             )
             detection = detector.detect(candles_df)
+            transmat_warning_events = [
+                event
+                for event in tuple(getattr(detection, "warning_events", tuple()) or tuple())
+                if isinstance(event, Mapping)
+                and str(event.get("warning_kind", "")).strip().lower()
+                == "transmat_zero_sum_no_transition"
+            ]
+            if transmat_warning_events:
+                warning_detail = _format_hmm_warning_detail(
+                    detection,
+                    warning_kind="transmat_zero_sum_no_transition",
+                )
+                self.log_message.emit(
+                    "HMM regime filter structural warning. "
+                    f"symbol={self._symbol} interval={self._interval} strategy={strategy_name} "
+                    f"{warning_detail}."
+                )
+            if not bool(getattr(detection, "converged", True)):
+                non_convergence_detail = _format_hmm_non_convergence_detail(detection)
+                self.log_message.emit(
+                    "HMM regime filter non-converged. "
+                    f"symbol={self._symbol} interval={self._interval} strategy={strategy_name} "
+                    f"(non_converged_windows={int(getattr(detection, 'non_converged_windows', 0) or 0)}). "
+                    f"{non_convergence_detail}. Falling back to unfiltered signals."
+                )
+                return None
             regime_mask = detection.regime_mask.astype("int8").tolist()
             if len(detection.regime_labels) == len(candles_df):
                 self._hmm_regime_labels = list(detection.regime_labels)

@@ -1,0 +1,18 @@
+# Weekly Meta Report
+
+- Generated At: 2026-04-14T04:23:10.538626
+- Report Type: weekly_meta_report
+
+## Overview
+- weekly_meta_pnl: -420.0
+- closed_trades: 1
+- review_coverage: 1.0
+- paused_symbols: 0
+- paper_only_symbols: 1
+- deterioration_events: 1
+- improvement_events: 2
+
+## Highlights
+- Weekly pnl: -420.00
+- Top error: strategy_regime_mismatch
+- Paused rows: 0, paper_only rows: 1

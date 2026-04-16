@@ -1,0 +1,22 @@
+# Daily Meta Report
+
+- Generated At: 2026-04-15T17:09:25.108498
+- Report Type: daily_meta_report
+
+## Overview
+- daily_meta_pnl: -6.871875
+- closed_trades: 1
+- healthy_count: 1
+- degraded_count: 0
+- watchlist_count: 0
+- paper_only_count: 0
+- paused_count: 0
+
+## Rows
+| symbol | strategy_name | interval | trade_count | pnl_sum | winrate | late_entry_rate | regime_mismatch_rate | avoidable_loss_rate | health_state | risk_multiplier |
+|---|---|---|---|---|---|---|---|---|---|---|
+| BTCUSDT | frama_cross | 1m | 1 | -6.871875 | 0.0 | 0.0 | 1.0 | 1.0 | healthy | 1.0 |
+
+## Highlights
+- Worst row pnl: BTCUSDT frama_cross 1m -> -6.8719
+- Best row pnl: BTCUSDT frama_cross 1m -> -6.8719

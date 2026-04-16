@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from contextlib import suppress
 import atexit
 import importlib
@@ -103,7 +103,12 @@ BACKTEST_INTERVAL_OPTIONS = tuple(
     for interval in dict.fromkeys(("1m", "5m", "15m", "1h", "4h", str(settings.trading.interval)))
     if interval in settings.api.timeframes
 )
-BACKTEST_SYMBOL_GRID_COLUMNS = 5
+BACKTEST_SYMBOL_GRID_COLUMNS = 6
+BACKTEST_SYMBOL_ROW_BUTTON_WIDTH = 36
+BACKTEST_SYMBOL_CARD_MIN_WIDTH = 190
+BACKTEST_SYMBOL_SELECTOR_MIN_HEIGHT = 170
+BACKTEST_SYMBOL_SELECTOR_MAX_HEIGHT = 380
+BACKTEST_LOG_PANEL_MIN_WIDTH = 240
 BACKTEST_INTERVAL_GRID_COLUMNS = 4
 BACKTEST_TRADE_WARNING_THRESHOLD = 20
 BACKTEST_DEPLOY_MIN_TRADE_COUNT = 25
@@ -111,6 +116,11 @@ BACKTEST_DEPLOY_MIN_WIN_RATE_PCT = 55.0
 BACKTEST_DEPLOY_MIN_ROBUST_PF = 1.2
 BACKTEST_REPORT_LOW_SAMPLE_TRADES_THRESHOLD = 25
 BACKTEST_REPORT_STRONG_SAMPLE_TRADES_THRESHOLD = 100
+BACKTEST_REPORT_RUN_TAG_PREFIX = "backtest_compact"
+BACKTEST_REPORT_OPTIMIZER_GRID_VERSION = "optimizer_grid_v1"
+BACKTEST_REPORT_STRATEGY_LOGIC_VERSION = "strategy_logic_v1"
+BACKTEST_REPORT_RISK_GUARD_VERSION = "risk_guard_v1"
+BACKTEST_REPORT_SUMMARY_SCHEMA_VERSION = "summary_schema_v2"
 GUI_LOG_DIRECTORY = Path("logs")
 GUI_RUNTIME_LOG_PATH = GUI_LOG_DIRECTORY / "gui_runtime.log"
 GUI_CRASH_LOG_PATH = GUI_LOG_DIRECTORY / "gui_crash.log"
@@ -120,6 +130,14 @@ _GUI_LOGGING_INITIALIZED = False
 _FAULTHANDLER_FILE_HANDLE = None
 BacktestBatchItem = tuple[str, str, str | None]
 BacktestRunContext = dict[str, object]
+META_REPORTS_DIRECTORY = Path("data/meta_reports")
+META_GUI_REFRESH_INTERVAL_MS = 5000
+META_HEALTH_STATES: tuple[str, ...] = (
+    "healthy",
+    "degraded",
+    "watchlist",
+    "paused",
+)
 
 
 def _configured_backtest_symbols() -> tuple[str, ...]:
@@ -158,6 +176,211 @@ def _safe_numeric(value: object, default: float = 0.0) -> float:
     if math.isnan(numeric):
         return float(default)
     return numeric
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    with suppress(Exception):
+        return int(value)
+    return int(default)
+
+
+def _normalize_grid_bounds(raw_bounds: object) -> dict[str, tuple[float, float]]:
+    if not isinstance(raw_bounds, dict):
+        return {}
+    normalized: dict[str, tuple[float, float]] = {}
+    for field_name, raw_value in raw_bounds.items():
+        if not isinstance(raw_value, dict):
+            continue
+        min_value = _safe_numeric(raw_value.get("min"), float("nan"))
+        max_value = _safe_numeric(raw_value.get("max"), float("nan"))
+        if not (math.isfinite(min_value) and math.isfinite(max_value)):
+            continue
+        normalized[str(field_name)] = (
+            float(min(min_value, max_value)),
+            float(max(min_value, max_value)),
+        )
+    return normalized
+
+
+def _build_grid_bounds_from_profiles(
+    profiles: object,
+    *,
+    profile_keys: Sequence[str],
+) -> dict[str, tuple[float, float]]:
+    if not isinstance(profiles, list) or not profile_keys:
+        return {}
+    bounds: dict[str, tuple[float, float]] = {}
+    key_set = {str(key) for key in profile_keys}
+    for row in profiles:
+        if not isinstance(row, dict):
+            continue
+        for field_name in key_set:
+            if field_name not in row:
+                continue
+            numeric_value = _safe_numeric(row.get(field_name), float("nan"))
+            if not math.isfinite(numeric_value):
+                continue
+            existing = bounds.get(field_name)
+            if existing is None:
+                bounds[field_name] = (float(numeric_value), float(numeric_value))
+            else:
+                bounds[field_name] = (
+                    float(min(existing[0], numeric_value)),
+                    float(max(existing[1], numeric_value)),
+                )
+    return bounds
+
+
+def _is_close_to(value: float, target: float) -> bool:
+    tolerance = max(1e-9, abs(target) * 1e-6)
+    return abs(value - target) <= tolerance
+
+
+def _resolve_edge_hits(
+    *,
+    best_profile: dict[str, object],
+    result: dict[str, object],
+) -> tuple[dict[str, str], int, list[str]]:
+    if not best_profile:
+        return {}, 0, []
+    profile_keys = tuple(str(key) for key in best_profile.keys())
+    bounds = _normalize_grid_bounds(result.get("optimizer_effective_grid_bounds"))
+    if not bounds:
+        bounds = _build_grid_bounds_from_profiles(
+            result.get("optimization_results"),
+            profile_keys=profile_keys,
+        )
+    edge_hits: dict[str, str] = {}
+    edge_params: list[str] = []
+    for field_name, raw_value in best_profile.items():
+        field_key = str(field_name)
+        if field_key not in bounds:
+            continue
+        numeric_value = _safe_numeric(raw_value, float("nan"))
+        if not math.isfinite(numeric_value):
+            continue
+        min_value, max_value = bounds[field_key]
+        if _is_close_to(float(numeric_value), float(min_value)):
+            status = "AT_GRID_MIN"
+        elif _is_close_to(float(numeric_value), float(max_value)):
+            status = "AT_GRID_MAX"
+        else:
+            status = "INSIDE_GRID"
+        edge_hits[field_key] = status
+        if status != "INSIDE_GRID":
+            edge_params.append(field_key)
+    edge_params_sorted = sorted(edge_params)
+    return edge_hits, len(edge_params_sorted), edge_params_sorted
+
+
+def _resolve_estimated_round_trip_cost_pct(result: dict[str, object]) -> float:
+    direct_value = _safe_numeric(result.get("estimated_round_trip_cost_pct"), float("nan"))
+    if math.isfinite(direct_value) and direct_value >= 0.0:
+        return float(direct_value)
+    fee_pct_side = max(0.0, _safe_numeric(result.get("effective_taker_fee_pct"), 0.0))
+    slippage_pct_trade = max(0.0, _safe_numeric(result.get("slippage_penalty_pct_per_trade"), 0.0))
+    return float((fee_pct_side * 2.0) + slippage_pct_trade)
+
+
+def _resolve_trade_net_efficiency(result: dict[str, object]) -> tuple[float, float, float]:
+    avg_profit_per_trade_net_pct = _safe_numeric(
+        result.get("avg_profit_per_trade_net_pct"),
+        float("nan"),
+    )
+    start_capital_usd = max(
+        0.0,
+        _safe_numeric(result.get("start_capital_usd"), float(settings.trading.start_capital)),
+    )
+    trade_net_pct_values: list[float] = []
+    closed_trades = result.get("closed_trades")
+    if isinstance(closed_trades, list):
+        for trade in closed_trades:
+            if not isinstance(trade, dict):
+                continue
+            direct_pct = _safe_numeric(
+                trade.get("net_profit_pct", trade.get("pnl_pct")),
+                float("nan"),
+            )
+            if math.isfinite(direct_pct):
+                trade_net_pct_values.append(float(direct_pct))
+                continue
+            if start_capital_usd <= 0.0:
+                continue
+            trade_pnl = _safe_numeric(trade.get("pnl"), float("nan"))
+            if not math.isfinite(trade_pnl):
+                continue
+            trade_net_pct_values.append(float((trade_pnl / start_capital_usd) * 100.0))
+    if not math.isfinite(avg_profit_per_trade_net_pct):
+        if trade_net_pct_values:
+            avg_profit_per_trade_net_pct = float(
+                sum(trade_net_pct_values) / len(trade_net_pct_values)
+            )
+        else:
+            avg_profit_per_trade_net_pct = 0.0
+    if trade_net_pct_values:
+        median_profit_per_trade_net_pct = float(statistics.median(trade_net_pct_values))
+    else:
+        median_profit_per_trade_net_pct = float(avg_profit_per_trade_net_pct)
+    profit_per_100_trades_net_pct = float(avg_profit_per_trade_net_pct * 100.0)
+    return (
+        float(avg_profit_per_trade_net_pct),
+        float(median_profit_per_trade_net_pct),
+        float(profit_per_100_trades_net_pct),
+    )
+
+
+def _resolve_reject_breakdown(result: dict[str, object]) -> dict[str, int]:
+    stage1_stats = (
+        dict(result.get("optimizer_stage1_gate_stats"))
+        if isinstance(result.get("optimizer_stage1_gate_stats"), dict)
+        else {}
+    )
+    stage2_stats = (
+        dict(result.get("optimizer_stage2_gate_stats"))
+        if isinstance(result.get("optimizer_stage2_gate_stats"), dict)
+        else {}
+    )
+    rejected_min_trades = _safe_int(
+        result.get(
+            "rejected_min_trades",
+            _safe_int(stage1_stats.get("fail_min_trades"), 0)
+            + _safe_int(stage2_stats.get("fail_min_trades"), 0),
+        ),
+        0,
+    )
+    rejected_breakeven_activation = _safe_int(
+        result.get(
+            "rejected_breakeven_activation",
+            _safe_int(stage1_stats.get("fail_breakeven"), 0)
+            + _safe_int(stage2_stats.get("fail_breakeven"), 0),
+        ),
+        0,
+    )
+    rejected_avg_profit_per_trade_net = _safe_int(
+        result.get(
+            "rejected_avg_profit_per_trade_net",
+            _safe_int(stage1_stats.get("fail_avg_profit"), 0)
+            + _safe_int(stage2_stats.get("fail_avg_profit"), 0),
+        ),
+        0,
+    )
+    grid_total_before = _safe_int(result.get("optimizer_grid_total_before_guards"), 0)
+    grid_total_after = _safe_int(
+        result.get("optimizer_grid_total_after_guards", result.get("theoretical_profiles")),
+        0,
+    )
+    rejected_risk_guard = _safe_int(
+        result.get("rejected_risk_guard"),
+        max(0, grid_total_before - grid_total_after),
+    )
+    rejected_other = _safe_int(result.get("rejected_other"), 0)
+    return {
+        "rejected_min_trades": int(max(0, rejected_min_trades)),
+        "rejected_breakeven_activation": int(max(0, rejected_breakeven_activation)),
+        "rejected_avg_profit_per_trade_net": int(max(0, rejected_avg_profit_per_trade_net)),
+        "rejected_risk_guard": int(max(0, rejected_risk_guard)),
+        "rejected_other": int(max(0, rejected_other)),
+    }
 
 
 def calculate_fitness_score(summary_data: object) -> float:
@@ -455,6 +678,7 @@ class LiveSymbolCard(QFrame):
         meta_layout.addStretch(1)
         self.status_label = QLabel(self._status_text)
         self.status_label.setObjectName("CoinStatusBadge")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         meta_layout.addWidget(self.status_label)
         root_layout.addLayout(meta_layout)
 
@@ -686,6 +910,7 @@ class LiveSymbolCard(QFrame):
         border_color = ACCENT_PRIMARY if self._is_selected else BORDER_COLOR
         symbol_font_size = "12px" if self._compact else "14px"
         badge_font_size = "9px" if self._compact else "10px"
+        status_badge_min_width = "64px" if self._compact else "76px"
         metrics_font_size = "10px" if self._compact else "11px"
         self.setStyleSheet(
             f"""
@@ -719,6 +944,7 @@ class LiveSymbolCard(QFrame):
                 color: {self._status_color};
                 border: 1px solid {BORDER_COLOR};
                 border-radius: 6px;
+                min-width: {status_badge_min_width};
                 padding: 2px 8px;
                 font-size: {badge_font_size};
                 font-weight: 700;
@@ -893,6 +1119,11 @@ class TradingTerminalWindow(QMainWindow):
     _MAX_BACKTEST_RESULT_TRADES = 5000
     _MAX_BACKTEST_TABLE_ROWS = 5000
     _MAX_BACKTEST_OPTIMIZATION_RESULTS = 200
+    _BACKTEST_LOG_FLUSH_INTERVAL_MS = 50
+    _BACKTEST_LOG_MAX_MESSAGES_PER_FLUSH = 40
+    _BACKTEST_LOG_QUEUE_MAX = 2000
+    _BACKTEST_DETAIL_LOG_FLUSH_INTERVAL_MS = 500
+    _BACKTEST_DETAIL_LOG_BUFFER_MAX = 5000
 
     def __init__(self) -> None:
         super().__init__()
@@ -916,6 +1147,7 @@ class TradingTerminalWindow(QMainWindow):
         self._coin_cards: dict[str, LiveSymbolCard] = {}
         self._selected_live_symbols: set[str] = set()
         self._backtest_coin_cards: dict[str, LiveSymbolCard] = {}
+        self._backtest_row_select_buttons: dict[int, QPushButton] = {}
         self._selected_backtest_symbols: set[str] = set()
         self._backtest_strategy_buttons: dict[str, QPushButton] = {}
         self._selected_backtest_strategies: set[str] = set()
@@ -931,6 +1163,11 @@ class TradingTerminalWindow(QMainWindow):
         self._readiness_config_file = Path(getattr(config_module, "__file__", "config.py")).resolve()
         self._readiness_config_mtime_ns = 0
         self._readiness_config_reload_error_mtime_ns: int | None = None
+        self._meta_refresh_last_ts = 0.0
+        self._meta_refresh_interval_seconds = float(META_GUI_REFRESH_INTERVAL_MS / 1000.0)
+        self._meta_reports_last_text = ""
+        self._meta_reports_last_refresh_at = ""
+        self._meta_last_refresh_error = ""
         with suppress(OSError):
             self._readiness_config_mtime_ns = self._readiness_config_file.stat().st_mtime_ns
         self._heartbeat_generation = 0
@@ -947,6 +1184,8 @@ class TradingTerminalWindow(QMainWindow):
         self._batch_started_symbols: set[str] = set()
         self._batch_completed_symbols: set[str] = set()
         self._batch_symbol_remaining_runs: dict[str, int] = {}
+        self._batch_history_cache: dict[str, dict[str, object]] = {}
+        self._batch_history_cache_lock = threading.RLock()
         self._live_vs_challenger_coin_results: dict[str, dict[str, object]] = {}
         self._live_vs_challenger_last_export_path: Path | None = None
         self._backtest_report_started_at: datetime | None = None
@@ -959,9 +1198,42 @@ class TradingTerminalWindow(QMainWindow):
         self._backtest_progress_log_active = False
         self._active_backtest_log_mode = self._BACKTEST_LOG_MODE_STANDARD
         self._active_backtest_log_context: dict[str, int] = {"coins": 1, "strategies": 1, "timeframes": 1}
+        self._pending_backtest_log_messages: deque[str] = deque()
+        self._pending_backtest_progress_message: str | None = None
+        self._dropped_backtest_log_messages = 0
+        self._pending_backtest_detail_log_lines: deque[str] = deque()
         self.backtest_table = None
         self._backtest_period_user_modified = False
         self._pending_close_request = False
+        self._pending_progress_hide_generation = 0
+        self._pending_market_pulse_generation = 0
+        self._deferred_resize_timer = QTimer(self)
+        self._deferred_resize_timer.setSingleShot(True)
+        self._deferred_resize_timer.setInterval(0)
+        self._deferred_resize_timer.timeout.connect(self._run_deferred_resize_tasks)
+        self._batch_poll_timer = QTimer(self)
+        self._batch_poll_timer.setSingleShot(True)
+        self._batch_poll_timer.timeout.connect(self._process_next_in_batch)
+        self._progress_hide_timer = QTimer(self)
+        self._progress_hide_timer.setSingleShot(True)
+        self._progress_hide_timer.setInterval(2000)
+        self._progress_hide_timer.timeout.connect(self._on_progress_hide_timer_timeout)
+        self._market_pulse_fade_timer = QTimer(self)
+        self._market_pulse_fade_timer.setSingleShot(True)
+        self._market_pulse_fade_timer.setInterval(260)
+        self._market_pulse_fade_timer.timeout.connect(self._on_market_pulse_fade_timer_timeout)
+        self._backtest_log_flush_timer = QTimer(self)
+        self._backtest_log_flush_timer.setSingleShot(False)
+        self._backtest_log_flush_timer.setInterval(self._BACKTEST_LOG_FLUSH_INTERVAL_MS)
+        self._backtest_log_flush_timer.timeout.connect(self._flush_backtest_log_queue)
+        self._backtest_detail_log_flush_timer = QTimer(self)
+        self._backtest_detail_log_flush_timer.setSingleShot(False)
+        self._backtest_detail_log_flush_timer.setInterval(self._BACKTEST_DETAIL_LOG_FLUSH_INTERVAL_MS)
+        self._backtest_detail_log_flush_timer.timeout.connect(self._flush_backtest_detail_log_buffer)
+        self._meta_refresh_timer = QTimer(self)
+        self._meta_refresh_timer.setSingleShot(False)
+        self._meta_refresh_timer.setInterval(META_GUI_REFRESH_INTERVAL_MS)
+        self._meta_refresh_timer.timeout.connect(self._on_meta_refresh_timer)
 
         self.setWindowTitle("Bitunix Quant Station")
         self.resize(2048, 1152)
@@ -970,6 +1242,8 @@ class TradingTerminalWindow(QMainWindow):
         self._build_ui()
         self._apply_theme()
         self._load_startup_state()
+        self._refresh_meta_views(force=True)
+        self._meta_refresh_timer.start()
         self._sync_positions_table()
         self._update_status_label()
         self._apply_button_states()
@@ -1000,6 +1274,9 @@ class TradingTerminalWindow(QMainWindow):
             event.ignore()
             return
 
+        self._meta_refresh_timer.stop()
+        self._flush_backtest_log_queue()
+        self._flush_backtest_detail_log_buffer()
         self._pending_close_request = False
         super().closeEvent(event)
 
@@ -1065,6 +1342,8 @@ class TradingTerminalWindow(QMainWindow):
 
         self.analytics_tab = self._build_analytics_tab()
         self.tabs.addTab(self.analytics_tab, "Analytics & Backtest")
+        self.meta_tab = self._build_meta_tab()
+        self.tabs.addTab(self.meta_tab, "Meta Bot")
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -1514,11 +1793,471 @@ class TradingTerminalWindow(QMainWindow):
         analytics_splitter.setStretchFactor(0, 6)
         analytics_splitter.setStretchFactor(1, 4)
         analytics_main.setMinimumWidth(640)
-        backtest_log_panel.setMinimumWidth(420)
+        backtest_log_panel.setMinimumWidth(BACKTEST_LOG_PANEL_MIN_WIDTH)
         analytics_layout.addWidget(analytics_splitter, 1)
-        QTimer.singleShot(0, self._apply_backtest_splitter_sizes)
+        self._schedule_deferred_resize_tasks()
         self._apply_backtest_mode_ui_state()
         return analytics_tab
+
+    def _build_meta_tab(self) -> QWidget:
+        meta_tab = QWidget()
+        meta_layout = QVBoxLayout(meta_tab)
+        meta_layout.setContentsMargins(0, 0, 0, 0)
+        meta_layout.setSpacing(10)
+
+        header_panel = QFrame()
+        header_panel.setObjectName("DashboardPanel")
+        header_layout = QHBoxLayout(header_panel)
+        header_layout.setContentsMargins(10, 10, 10, 10)
+        header_layout.setSpacing(8)
+
+        title = QLabel("Meta Bot")
+        title.setStyleSheet("font-weight: 700;")
+        subtitle = QLabel("Health, Reviews, Adaptation und Learning Reports (Read-First)")
+        subtitle.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.meta_runtime_status_label = QLabel("INACTIVE")
+        self.meta_runtime_status_label.setStyleSheet(f"color: {ACCENT_WARNING}; font-weight: 700;")
+        self.meta_last_refresh_label = QLabel("Last refresh: -")
+        self.meta_last_refresh_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.meta_refresh_button = QPushButton("Refresh")
+        self.meta_refresh_button.clicked.connect(lambda: self._refresh_meta_views(force=True))
+        self.meta_copy_reports_button = QPushButton("Copy Report")
+        self.meta_copy_reports_button.clicked.connect(self._copy_meta_reports_to_clipboard)
+
+        header_layout.addWidget(title)
+        header_layout.addSpacing(6)
+        header_layout.addWidget(subtitle)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.meta_runtime_status_label)
+        header_layout.addSpacing(8)
+        header_layout.addWidget(self.meta_last_refresh_label)
+        header_layout.addSpacing(6)
+        header_layout.addWidget(self.meta_refresh_button)
+        header_layout.addWidget(self.meta_copy_reports_button)
+        meta_layout.addWidget(header_panel)
+
+        cards_panel = QFrame()
+        cards_panel.setObjectName("DashboardPanel")
+        cards_layout = QVBoxLayout(cards_panel)
+        cards_layout.setContentsMargins(10, 10, 10, 10)
+        cards_layout.setSpacing(10)
+        cards_row_top = QHBoxLayout()
+        cards_row_top.setContentsMargins(0, 0, 0, 0)
+        cards_row_top.setSpacing(8)
+        cards_row_bottom = QHBoxLayout()
+        cards_row_bottom.setContentsMargins(0, 0, 0, 0)
+        cards_row_bottom.setSpacing(8)
+
+        self.meta_healthy_card = MetricCard("healthy", ACCENT_PROFIT)
+        self.meta_degraded_card = MetricCard("degraded", ACCENT_WARNING)
+        self.meta_watchlist_card = MetricCard("watchlist", "#ff9800")
+        self.meta_paper_only_card = MetricCard("paper_only", "#ff7043")
+        self.meta_paused_card = MetricCard("paused", ACCENT_DANGER)
+        self.meta_daily_pnl_card = MetricCard("daily_meta_pnl", ACCENT_PRIMARY)
+        self.meta_blocks_card = MetricCard("active_blocks", ACCENT_WARNING)
+        self.meta_global_risk_card = MetricCard("global_risk_state", TEXT_PRIMARY)
+
+        cards_row_top.addWidget(self.meta_healthy_card, 1)
+        cards_row_top.addWidget(self.meta_degraded_card, 1)
+        cards_row_top.addWidget(self.meta_watchlist_card, 1)
+        cards_row_top.addWidget(self.meta_paper_only_card, 1)
+        cards_row_top.addWidget(self.meta_paused_card, 1)
+        cards_row_bottom.addWidget(self.meta_daily_pnl_card, 1)
+        cards_row_bottom.addWidget(self.meta_blocks_card, 1)
+        cards_row_bottom.addWidget(self.meta_global_risk_card, 1)
+        cards_layout.addLayout(cards_row_top)
+        cards_layout.addLayout(cards_row_bottom)
+        meta_layout.addWidget(cards_panel)
+
+        self.meta_views_tabs = QTabWidget()
+        self.meta_views_tabs.setDocumentMode(True)
+        self.meta_views_tabs.addTab(self._build_meta_overview_view(), "Meta Overview")
+        self.meta_views_tabs.addTab(self._build_meta_health_view(), "Strategy Health")
+        self.meta_views_tabs.addTab(self._build_meta_reviews_view(), "Trade Reviews")
+        self.meta_views_tabs.addTab(self._build_meta_adaptation_view(), "Adaptation Log")
+        self.meta_views_tabs.addTab(self._build_meta_reports_view(), "Learning Reports")
+        meta_layout.addWidget(self.meta_views_tabs, 1)
+        return meta_tab
+
+    def _build_meta_overview_view(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        policy_panel = QFrame()
+        policy_panel.setObjectName("DashboardPanel")
+        policy_layout = QVBoxLayout(policy_panel)
+        policy_layout.setContentsMargins(10, 10, 10, 10)
+        policy_layout.setSpacing(6)
+        policy_header = QHBoxLayout()
+        policy_header.setContentsMargins(0, 0, 0, 0)
+        policy_header.setSpacing(6)
+        policy_title = QLabel("Current Meta Policy")
+        policy_title.setStyleSheet("font-weight: 700;")
+        policy_hint = QLabel("Per Symbol / Strategy / Interval (state, risk, block reason)")
+        policy_hint.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.meta_copy_policy_button = QPushButton("Copy Table")
+        self.meta_copy_policy_button.clicked.connect(
+            lambda: self._copy_table_to_clipboard(self.meta_policy_table, "Meta policy table")
+        )
+        policy_header.addWidget(policy_title)
+        policy_header.addSpacing(6)
+        policy_header.addWidget(policy_hint)
+        policy_header.addStretch(1)
+        policy_header.addWidget(self.meta_copy_policy_button)
+        policy_layout.addLayout(policy_header)
+        self.meta_policy_table = self._build_meta_table(
+            [
+                "Symbol",
+                "Strategy",
+                "Interval",
+                "State",
+                "Allow",
+                "Risk",
+                "Health",
+                "Block Reason",
+                "Warning",
+                "Source",
+            ],
+            stretch_last=True,
+        )
+        policy_layout.addWidget(self.meta_policy_table, 1)
+        layout.addWidget(policy_panel, 1)
+
+        blocks_panel = QFrame()
+        blocks_panel.setObjectName("DashboardPanel")
+        blocks_layout = QVBoxLayout(blocks_panel)
+        blocks_layout.setContentsMargins(10, 10, 10, 10)
+        blocks_layout.setSpacing(6)
+        blocks_header = QHBoxLayout()
+        blocks_header.setContentsMargins(0, 0, 0, 0)
+        blocks_header.setSpacing(6)
+        blocks_title = QLabel("Active Blocks / Meta Events")
+        blocks_title.setStyleSheet("font-weight: 700;")
+        blocks_hint = QLabel("Recent guard triggers, cooldowns and fail-safe events")
+        blocks_hint.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.meta_copy_blocks_button = QPushButton("Copy Table")
+        self.meta_copy_blocks_button.clicked.connect(
+            lambda: self._copy_table_to_clipboard(self.meta_blocks_table, "Meta blocks table")
+        )
+        blocks_header.addWidget(blocks_title)
+        blocks_header.addSpacing(6)
+        blocks_header.addWidget(blocks_hint)
+        blocks_header.addStretch(1)
+        blocks_header.addWidget(self.meta_copy_blocks_button)
+        blocks_layout.addLayout(blocks_header)
+        self.meta_blocks_table = self._build_meta_table(
+            [
+                "Created",
+                "Symbol",
+                "Strategy",
+                "Interval",
+                "Event",
+                "Reason",
+                "Source",
+            ],
+            stretch_last=True,
+        )
+        blocks_layout.addWidget(self.meta_blocks_table, 1)
+        layout.addWidget(blocks_panel, 1)
+        return panel
+
+    def _build_meta_health_view(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        table_panel = QFrame()
+        table_panel.setObjectName("DashboardPanel")
+        table_layout = QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(10, 10, 10, 10)
+        table_layout.setSpacing(6)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(6)
+        filter_title = QLabel("Strategy Health Filter")
+        filter_title.setStyleSheet("font-weight: 700;")
+        filter_row.addWidget(filter_title)
+        filter_row.addSpacing(6)
+
+        self.meta_health_symbol_filter = QLineEdit()
+        self.meta_health_symbol_filter.setPlaceholderText("Symbol (e.g. BTC)")
+        self.meta_health_symbol_filter.textChanged.connect(lambda _text: self._refresh_meta_views(force=True))
+        self.meta_health_symbol_filter.setFixedWidth(150)
+        filter_row.addWidget(self.meta_health_symbol_filter)
+
+        self.meta_health_strategy_filter = QComboBox()
+        self.meta_health_strategy_filter.addItem("All Strategies", "")
+        for strategy_name in settings.strategy.available_strategies:
+            self.meta_health_strategy_filter.addItem(
+                STRATEGY_LABELS.get(strategy_name, strategy_name),
+                strategy_name,
+            )
+        self.meta_health_strategy_filter.currentIndexChanged.connect(lambda _index: self._refresh_meta_views(force=True))
+        filter_row.addWidget(self.meta_health_strategy_filter)
+
+        self.meta_health_interval_filter = QComboBox()
+        self.meta_health_interval_filter.addItem("All TF", "")
+        for interval in settings.api.timeframes:
+            self.meta_health_interval_filter.addItem(str(interval), str(interval))
+        self.meta_health_interval_filter.currentIndexChanged.connect(lambda _index: self._refresh_meta_views(force=True))
+        filter_row.addWidget(self.meta_health_interval_filter)
+
+        self.meta_health_state_filter = QComboBox()
+        self.meta_health_state_filter.addItem("All States", "")
+        for state_name in META_HEALTH_STATES:
+            self.meta_health_state_filter.addItem(state_name, state_name)
+        self.meta_health_state_filter.currentIndexChanged.connect(lambda _index: self._refresh_meta_views(force=True))
+        filter_row.addWidget(self.meta_health_state_filter)
+        filter_row.addStretch(1)
+
+        self.meta_copy_health_button = QPushButton("Copy Table")
+        self.meta_copy_health_button.clicked.connect(
+            lambda: self._copy_table_to_clipboard(self.meta_health_table, "Meta strategy health table")
+        )
+        table_refresh_button = QPushButton("Refresh")
+        table_refresh_button.clicked.connect(lambda: self._refresh_meta_views(force=True))
+        filter_row.addWidget(table_refresh_button)
+        filter_row.addWidget(self.meta_copy_health_button)
+        table_layout.addLayout(filter_row)
+
+        self.meta_health_table = self._build_meta_table(
+            [
+                "Symbol",
+                "Strategy",
+                "Interval",
+                "State",
+                "Health",
+                "Risk",
+                "Trades",
+                "Winrate",
+                "Late",
+                "RegimeMismatch",
+                "AvoidableLoss",
+                "Last Review",
+            ],
+            stretch_last=False,
+        )
+        table_layout.addWidget(self.meta_health_table, 1)
+        layout.addWidget(table_panel, 1)
+        return panel
+
+    def _build_meta_reviews_view(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        table_panel = QFrame()
+        table_panel.setObjectName("DashboardPanel")
+        table_layout = QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(10, 10, 10, 10)
+        table_layout.setSpacing(6)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(6)
+        title = QLabel("Trade Reviews / Fehlerarten")
+        title.setStyleSheet("font-weight: 700;")
+        filter_row.addWidget(title)
+        filter_row.addSpacing(6)
+
+        self.meta_reviews_symbol_filter = QLineEdit()
+        self.meta_reviews_symbol_filter.setPlaceholderText("Symbol filter")
+        self.meta_reviews_symbol_filter.setFixedWidth(150)
+        self.meta_reviews_symbol_filter.textChanged.connect(lambda _text: self._refresh_meta_views(force=True))
+        filter_row.addWidget(self.meta_reviews_symbol_filter)
+
+        self.meta_reviews_error_filter = QComboBox()
+        self.meta_reviews_error_filter.addItem("All Errors", "")
+        for error_name in (
+            "late_entry_after_expansion",
+            "entry_into_exhaustion",
+            "entry_against_regime",
+            "entry_without_sufficient_confirmation",
+            "stop_too_tight",
+            "stop_too_wide",
+            "tp_too_conservative",
+            "tp_too_ambitious",
+            "strategy_regime_mismatch",
+            "strategy_coin_mismatch",
+            "should_not_have_traded",
+        ):
+            self.meta_reviews_error_filter.addItem(error_name, error_name)
+        self.meta_reviews_error_filter.currentIndexChanged.connect(lambda _index: self._refresh_meta_views(force=True))
+        filter_row.addWidget(self.meta_reviews_error_filter)
+        filter_row.addStretch(1)
+
+        self.meta_copy_reviews_button = QPushButton("Copy Table")
+        self.meta_copy_reviews_button.clicked.connect(
+            lambda: self._copy_table_to_clipboard(self.meta_reviews_table, "Meta trade review table")
+        )
+        table_refresh_button = QPushButton("Refresh")
+        table_refresh_button.clicked.connect(lambda: self._refresh_meta_views(force=True))
+        filter_row.addWidget(table_refresh_button)
+        filter_row.addWidget(self.meta_copy_reviews_button)
+        table_layout.addLayout(filter_row)
+
+        self.meta_reviews_table = self._build_meta_table(
+            [
+                "Updated",
+                "Trade ID",
+                "Symbol",
+                "Strategy",
+                "Interval",
+                "Error Primary",
+                "Error Secondary",
+                "Quality",
+                "Better No Trade",
+                "Late Entry",
+                "Regime@Entry",
+                "PnL",
+                "Review Status",
+            ],
+            stretch_last=False,
+        )
+        table_layout.addWidget(self.meta_reviews_table, 1)
+        layout.addWidget(table_panel, 1)
+        return panel
+
+    def _build_meta_adaptation_view(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        table_panel = QFrame()
+        table_panel.setObjectName("DashboardPanel")
+        table_layout = QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(10, 10, 10, 10)
+        table_layout.setSpacing(6)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(6)
+        title = QLabel("Adaptation Log")
+        title.setStyleSheet("font-weight: 700;")
+        filter_row.addWidget(title)
+        filter_row.addSpacing(6)
+
+        self.meta_adaptation_symbol_filter = QLineEdit()
+        self.meta_adaptation_symbol_filter.setPlaceholderText("Symbol filter")
+        self.meta_adaptation_symbol_filter.setFixedWidth(150)
+        self.meta_adaptation_symbol_filter.textChanged.connect(lambda _text: self._refresh_meta_views(force=True))
+        filter_row.addWidget(self.meta_adaptation_symbol_filter)
+
+        self.meta_adaptation_event_filter = QComboBox()
+        self.meta_adaptation_event_filter.addItem("All Events", "")
+        for event_name in (
+            "meta_state_change",
+            "meta_guard_triggered",
+            "meta_cooldown_started",
+            "learning_log_entry",
+            "warning_hook",
+            "fail_safe_activated",
+            "operational_error",
+            "health_state_transition",
+        ):
+            self.meta_adaptation_event_filter.addItem(event_name, event_name)
+        self.meta_adaptation_event_filter.currentIndexChanged.connect(lambda _index: self._refresh_meta_views(force=True))
+        filter_row.addWidget(self.meta_adaptation_event_filter)
+        filter_row.addStretch(1)
+
+        self.meta_copy_adaptation_button = QPushButton("Copy Table")
+        self.meta_copy_adaptation_button.clicked.connect(
+            lambda: self._copy_table_to_clipboard(self.meta_adaptation_table, "Meta adaptation table")
+        )
+        table_refresh_button = QPushButton("Refresh")
+        table_refresh_button.clicked.connect(lambda: self._refresh_meta_views(force=True))
+        filter_row.addWidget(table_refresh_button)
+        filter_row.addWidget(self.meta_copy_adaptation_button)
+        table_layout.addLayout(filter_row)
+
+        self.meta_adaptation_table = self._build_meta_table(
+            [
+                "Created",
+                "Symbol",
+                "Strategy",
+                "Interval",
+                "Event",
+                "Reason",
+                "Source",
+            ],
+            stretch_last=True,
+        )
+        table_layout.addWidget(self.meta_adaptation_table, 1)
+        layout.addWidget(table_panel, 1)
+        return panel
+
+    def _build_meta_reports_view(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        report_panel = QFrame()
+        report_panel.setObjectName("DashboardPanel")
+        report_layout = QVBoxLayout(report_panel)
+        report_layout.setContentsMargins(10, 10, 10, 10)
+        report_layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+        title = QLabel("Learning Reports")
+        title.setStyleSheet("font-weight: 700;")
+        hint = QLabel("Latest Daily/Weekly Reports + Machine Learning Log")
+        hint.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.meta_reports_file_hint = QLabel("No report file loaded.")
+        self.meta_reports_file_hint.setStyleSheet(f"color: {TEXT_MUTED};")
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(lambda: self._refresh_meta_views(force=True))
+        copy_button = QPushButton("Copy")
+        copy_button.clicked.connect(self._copy_meta_reports_to_clipboard)
+        header.addWidget(title)
+        header.addSpacing(6)
+        header.addWidget(hint)
+        header.addStretch(1)
+        header.addWidget(self.meta_reports_file_hint)
+        header.addSpacing(8)
+        header.addWidget(refresh_button)
+        header.addWidget(copy_button)
+        report_layout.addLayout(header)
+
+        self.meta_reports_output = QTextEdit()
+        self.meta_reports_output.setReadOnly(True)
+        self.meta_reports_output.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.meta_reports_output.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.meta_reports_output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.meta_reports_output.setFont(QFont("Consolas", 10))
+        report_layout.addWidget(self.meta_reports_output, 1)
+
+        layout.addWidget(report_panel, 1)
+        return panel
+
+    def _build_meta_table(self, columns: list[str], *, stretch_last: bool) -> QTableWidget:
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setSortingEnabled(True)
+        header = table.horizontalHeader()
+        for index in range(max(0, len(columns) - 1)):
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
+        if columns:
+            if stretch_last:
+                header.setSectionResizeMode(len(columns) - 1, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(len(columns) - 1, QHeaderView.ResizeMode.ResizeToContents)
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        return table
 
     def _build_backtest_log_panel(self) -> QFrame:
         panel = QFrame()
@@ -1638,8 +2377,10 @@ class TradingTerminalWindow(QMainWindow):
         self.backtest_symbols_scroll.setWidgetResizable(True)
         self.backtest_symbols_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.backtest_symbols_scroll.setObjectName("CoinCardScroll")
-        self.backtest_symbols_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.backtest_symbols_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.backtest_symbols_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.backtest_symbols_scroll.setMinimumHeight(BACKTEST_SYMBOL_SELECTOR_MIN_HEIGHT)
+        self.backtest_symbols_scroll.setMaximumHeight(BACKTEST_SYMBOL_SELECTOR_MAX_HEIGHT)
 
         self.backtest_symbols_container = QWidget()
         self.backtest_symbols_layout = QGridLayout(self.backtest_symbols_container)
@@ -1647,13 +2388,14 @@ class TradingTerminalWindow(QMainWindow):
         self.backtest_symbols_layout.setSpacing(4)
         for symbol in _configured_backtest_symbols():
             card = LiveSymbolCard(symbol, compact=True, show_deploy_button=True)
+            card.setMinimumWidth(BACKTEST_SYMBOL_CARD_MIN_WIDTH)
             card.clicked.connect(self._toggle_backtest_symbol_selection)
             card.deploy_requested.connect(self._deploy_backtest_symbol_to_live)
             self._backtest_coin_cards[symbol] = card
         self._rebuild_backtest_symbol_grid()
         self.backtest_symbols_scroll.setWidget(self.backtest_symbols_container)
         layout.addWidget(self.backtest_symbols_scroll, 1)
-        QTimer.singleShot(0, self._sync_backtest_symbol_selector_viewport)
+        self._schedule_deferred_resize_tasks()
 
         self._select_default_backtest_symbols()
         self._sync_backtest_symbol_universe()
@@ -2845,13 +3587,26 @@ class TradingTerminalWindow(QMainWindow):
         }
 
     def _write_backtest_detail_log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if len(self._pending_backtest_detail_log_lines) >= self._BACKTEST_DETAIL_LOG_BUFFER_MAX:
+            self._pending_backtest_detail_log_lines.popleft()
+        self._pending_backtest_detail_log_lines.append(f"[{timestamp}] {message}\n")
+        if not self._backtest_detail_log_flush_timer.isActive():
+            self._backtest_detail_log_flush_timer.start()
+
+    def _flush_backtest_detail_log_buffer(self) -> None:
+        if not self._pending_backtest_detail_log_lines:
+            self._backtest_detail_log_flush_timer.stop()
+            return
         try:
             GUI_BACKTEST_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with GUI_BACKTEST_DEBUG_LOG_PATH.open("a", encoding="utf-8") as detail_file:
-                detail_file.write(f"[{timestamp}] {message}\n")
+                while self._pending_backtest_detail_log_lines:
+                    detail_file.write(self._pending_backtest_detail_log_lines.popleft())
         except Exception:
             pass
+        if not self._pending_backtest_detail_log_lines:
+            self._backtest_detail_log_flush_timer.stop()
 
     @staticmethod
     def _summarize_profile_blob(profile_blob: str) -> str:
@@ -2986,7 +3741,44 @@ class TradingTerminalWindow(QMainWindow):
         compact_message = self._compact_backtest_thread_log_message(message)
         if compact_message is None:
             return
-        self._append_backtest_log(compact_message)
+        self._enqueue_backtest_log_message(compact_message)
+
+    def _enqueue_backtest_log_message(self, message: str) -> None:
+        if (
+            message.startswith(self._HISTORY_PROGRESS_PREFIX)
+            or message.startswith(self._SIGNAL_CACHE_PROGRESS_PREFIX)
+        ):
+            self._pending_backtest_progress_message = message
+        else:
+            if len(self._pending_backtest_log_messages) >= self._BACKTEST_LOG_QUEUE_MAX:
+                self._pending_backtest_log_messages.popleft()
+                self._dropped_backtest_log_messages += 1
+            self._pending_backtest_log_messages.append(message)
+        if not self._backtest_log_flush_timer.isActive():
+            self._backtest_log_flush_timer.start()
+
+    def _flush_backtest_log_queue(self) -> None:
+        processed = 0
+        while (
+            self._pending_backtest_log_messages
+            and processed < self._BACKTEST_LOG_MAX_MESSAGES_PER_FLUSH
+        ):
+            self._append_backtest_log(self._pending_backtest_log_messages.popleft())
+            processed += 1
+        if self._dropped_backtest_log_messages > 0:
+            dropped_count = int(self._dropped_backtest_log_messages)
+            self._dropped_backtest_log_messages = 0
+            self._append_backtest_log(
+                f"[GUI] Backtest log queue overload: {dropped_count} old log messages compacted."
+            )
+        if self._pending_backtest_progress_message is not None:
+            self._append_backtest_log(self._pending_backtest_progress_message)
+            self._pending_backtest_progress_message = None
+        if (
+            not self._pending_backtest_log_messages
+            and self._pending_backtest_progress_message is None
+        ):
+            self._backtest_log_flush_timer.stop()
 
     def _start_backtest(
         self,
@@ -3151,6 +3943,10 @@ class TradingTerminalWindow(QMainWindow):
                 "Live vs Challenger fairness lock active: "
                 f"{symbol} uses fixed comparison interval {backtest_interval} for baseline and challengers."
             )
+        batch_history_cache = self._batch_history_cache if self._batch_active else None
+        batch_history_cache_lock = (
+            self._batch_history_cache_lock if self._batch_active else None
+        )
 
         self.backtest_button.setEnabled(False)
         backtest_thread = BacktestThread(
@@ -3172,6 +3968,8 @@ class TradingTerminalWindow(QMainWindow):
             history_requested_start_utc=history_requested_start_utc,
             history_end_utc=history_end_utc,
             log_mode=log_mode,
+            batch_history_cache=batch_history_cache,
+            batch_history_cache_lock=batch_history_cache_lock,
         )
         self._backtest_thread = backtest_thread
         backtest_thread.log_message.connect(self._handle_backtest_thread_log)
@@ -3213,6 +4011,7 @@ class TradingTerminalWindow(QMainWindow):
 
         optimize_profile = self._is_optimization_mode_active()
         self._backtest_stop_requested = False
+        self._reset_batch_history_cache()
         self._begin_backtest_report_session(
             mode=(
                 BACKTEST_MODE_LIVE_VS_CHALLENGER
@@ -3310,6 +4109,7 @@ class TradingTerminalWindow(QMainWindow):
 
         optimize_profile = self._is_optimization_mode_active()
         self._backtest_stop_requested = False
+        self._reset_batch_history_cache()
         self._begin_backtest_report_session(
             mode=(
                 BACKTEST_MODE_LIVE_VS_CHALLENGER
@@ -3371,11 +4171,13 @@ class TradingTerminalWindow(QMainWindow):
 
     def _process_next_in_batch(self) -> None:
         if not self._batch_active:
+            self._batch_poll_timer.stop()
             return
         if self._backtest_thread is not None and self._backtest_thread.isRunning():
-            QTimer.singleShot(50, self._process_next_in_batch)
+            self._schedule_next_batch_poll(50)
             return
         if not self._batch_queue:
+            self._batch_poll_timer.stop()
             self._batch_active = False
             self._batch_mode = BACKTEST_MODE_STANDARD
             self._batch_auto_strategy_flags.clear()
@@ -3385,6 +4187,7 @@ class TradingTerminalWindow(QMainWindow):
             self._batch_started_symbols.clear()
             self._batch_completed_symbols.clear()
             self._batch_symbol_remaining_runs.clear()
+            self._reset_batch_history_cache()
             self._set_active_backtest_log_mode(
                 self._BACKTEST_LOG_MODE_STANDARD,
                 {"coins": 1, "strategies": 1, "timeframes": 1},
@@ -3460,6 +4263,13 @@ class TradingTerminalWindow(QMainWindow):
             allow_auto_interval_override=False,
         )
 
+    def _schedule_next_batch_poll(self, delay_ms: int = 0) -> None:
+        if not self._batch_active:
+            self._batch_poll_timer.stop()
+            return
+        self._batch_poll_timer.setInterval(max(0, int(delay_ms)))
+        self._batch_poll_timer.start()
+
     def _stop_bot(self) -> None:
         if self._bot_thread is None:
             return
@@ -3481,6 +4291,7 @@ class TradingTerminalWindow(QMainWindow):
         if batch_active:
             remaining_runs = len(self._batch_queue) + (1 if backtest_running else 0)
             self._batch_active = False
+            self._batch_poll_timer.stop()
             self._batch_mode = BACKTEST_MODE_STANDARD
             self._batch_queue.clear()
             self._batch_auto_strategy_flags.clear()
@@ -3490,6 +4301,7 @@ class TradingTerminalWindow(QMainWindow):
             self._batch_started_symbols.clear()
             self._batch_completed_symbols.clear()
             self._batch_symbol_remaining_runs.clear()
+            self._reset_batch_history_cache()
             self._set_active_backtest_log_mode(
                 self._BACKTEST_LOG_MODE_STANDARD,
                 {"coins": 1, "strategies": 1, "timeframes": 1},
@@ -3537,12 +4349,13 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_backtest_symbol_cards()
         if hasattr(self, "readiness_bars"):
             self.readiness_bars.clear_items()
+        self._refresh_meta_views(force=True)
         if self._pending_close_request:
             bot_running = self._bot_thread is not None and self._bot_thread.isRunning()
             backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
             if not bot_running and not backtest_running:
                 self._pending_close_request = False
-                QTimer.singleShot(0, self.close)
+                self.close()
 
     def _handle_backtest_finished(self, result: dict) -> None:
         run_context: BacktestRunContext | None = (
@@ -3623,6 +4436,7 @@ class TradingTerminalWindow(QMainWindow):
 
         if incoming_is_winner:
             compact_summary["strategy_name"] = strategy_name
+            compact_summary["interval"] = interval
             self._backtest_profit_factors[symbol] = profit_factor
             self._backtest_win_rates[symbol] = win_rate_pct
             self._backtest_trade_counts[symbol] = total_trades
@@ -3711,7 +4525,7 @@ class TradingTerminalWindow(QMainWindow):
         self._mark_batch_symbol_progress(symbol, success=True)
         self._active_backtest_run_context = None
         if self._batch_active:
-            QTimer.singleShot(0, self._process_next_in_batch)
+            self._schedule_next_batch_poll(0)
         else:
             final_status = "stopped" if self._backtest_stop_requested else "completed"
             self._finalize_backtest_report_session(status=final_status)
@@ -3719,22 +4533,53 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_backtest_symbol_cards()
 
     def _handle_backtest_error(self, message: str) -> None:
-        logging.getLogger("gui").error("Backtest failed: %s", message)
-        self._reset_progress(f"Backtest failed: {message}")
-        self._append_backtest_log(f"Backtest failed: {message}")
-        self._backtest_report_errors.append(str(message))
+        normalized_message = str(message or "").strip()
+        insufficient_history = normalized_message.startswith("Not enough candles for backtest:")
+        if insufficient_history:
+            logging.getLogger("gui").warning("Backtest skipped (insufficient history): %s", normalized_message)
+            self._reset_progress(f"Backtest skipped: {normalized_message}")
+            self._append_backtest_log(f"Backtest skipped: {normalized_message}")
+        else:
+            logging.getLogger("gui").error("Backtest failed: %s", normalized_message)
+            self._reset_progress(f"Backtest failed: {normalized_message}")
+            self._append_backtest_log(f"Backtest failed: {normalized_message}")
+            self._backtest_report_errors.append(normalized_message)
         self._record_live_vs_challenger_error(
             run_context=(
                 dict(self._active_backtest_run_context)
                 if isinstance(self._active_backtest_run_context, dict)
                 else None
             ),
-            message=message,
+            message=normalized_message,
         )
         self._active_backtest_run_context = None
-        self._mark_batch_symbol_progress(self._current_backtest_symbol(), success=False)
+        self._mark_batch_symbol_progress(
+            self._current_backtest_symbol(),
+            success=insufficient_history,
+        )
         if self._batch_active:
-            QTimer.singleShot(0, self._process_next_in_batch)
+            self._schedule_next_batch_poll(0)
+
+    def _reset_batch_history_cache(self) -> None:
+        with self._batch_history_cache_lock:
+            self._batch_history_cache.clear()
+
+    def _evict_batch_history_cache_for_symbol(self, symbol: str) -> int:
+        normalized_symbol = str(symbol).strip().upper()
+        if not normalized_symbol:
+            return 0
+        removed = 0
+        prefix = f"{normalized_symbol}|"
+        with self._batch_history_cache_lock:
+            stale_keys = [
+                cache_key
+                for cache_key in self._batch_history_cache
+                if str(cache_key).startswith(prefix)
+            ]
+            for cache_key in stale_keys:
+                self._batch_history_cache.pop(cache_key, None)
+                removed += 1
+        return removed
 
     def _initialize_batch_tracking(self, run_symbols: list[str]) -> None:
         self._batch_total_symbols = len(dict.fromkeys(run_symbols))
@@ -3761,11 +4606,18 @@ class TradingTerminalWindow(QMainWindow):
         )
         self._append_backtest_log(progress_message)
         self.statusBar().showMessage(progress_message, 5000)
+        evicted_entries = self._evict_batch_history_cache_for_symbol(symbol)
+        if evicted_entries > 0:
+            self._append_backtest_log(
+                f"Batch history cache cleanup: removed {evicted_entries} entry(s) for {symbol}."
+            )
 
     def _handle_backtest_thread_finished(
         self,
         finished_thread: BacktestThread | None = None,
     ) -> None:
+        self._flush_backtest_log_queue()
+        self._flush_backtest_detail_log_buffer()
         if finished_thread is not None:
             finished_thread.deleteLater()
             if finished_thread is self._backtest_thread:
@@ -3806,7 +4658,7 @@ class TradingTerminalWindow(QMainWindow):
             backtest_running = self._backtest_thread is not None and self._backtest_thread.isRunning()
             if not bot_running and not backtest_running:
                 self._pending_close_request = False
-                QTimer.singleShot(0, self.close)
+                self.close()
 
     def _on_leverage_changed(self, value: int) -> None:
         if self._bot_thread is not None:
@@ -3851,6 +4703,7 @@ class TradingTerminalWindow(QMainWindow):
         self._live_runtime_profiles[normalized_symbol] = dict(payload)
         self._refresh_live_symbol_cards()
         self._refresh_trade_readiness(force=True)
+        self._refresh_meta_views(force=False)
 
     def _update_heartbeat_display(self, status_dict: dict) -> None:
         self._heartbeat_snapshot = {
@@ -3883,6 +4736,7 @@ class TradingTerminalWindow(QMainWindow):
         for symbol in self._heartbeat_snapshot:
             self._apply_feed_row_heartbeat_style(symbol)
         self._refresh_live_symbol_cards()
+        self._refresh_meta_views(force=False)
 
     def _upsert_feed_row(self, symbol: str, price: float) -> None:
         row = self._price_rows.get(symbol)
@@ -4002,6 +4856,9 @@ class TradingTerminalWindow(QMainWindow):
         self._append_backtest_log("Backtest log copied to clipboard.")
 
     def _clear_backtest_log(self) -> None:
+        self._pending_backtest_log_messages.clear()
+        self._pending_backtest_progress_message = None
+        self._dropped_backtest_log_messages = 0
         self.backtest_log_output.clear()
         self.statusBar().showMessage("Backtest log cleared.", 3000)
 
@@ -4650,6 +5507,32 @@ class TradingTerminalWindow(QMainWindow):
                         }
                     )
         session_top = session_leaderboard[0] if session_leaderboard else {}
+        edge_hits, edge_hit_count, edge_hit_params = _resolve_edge_hits(
+            best_profile=best_profile,
+            result=result,
+        )
+        reject_breakdown = _resolve_reject_breakdown(result)
+        (
+            avg_profit_per_trade_net_pct,
+            median_profit_per_trade_net_pct,
+            profit_per_100_trades_net_pct,
+        ) = _resolve_trade_net_efficiency(result)
+        estimated_round_trip_cost_pct = _resolve_estimated_round_trip_cost_pct(result)
+        grid_total_before_guards = _safe_int(
+            result.get("optimizer_grid_total_before_guards", result.get("theoretical_profiles")),
+            0,
+        )
+        grid_total_after_guards = _safe_int(
+            result.get("optimizer_grid_total_after_guards", result.get("theoretical_profiles")),
+            0,
+        )
+        sampled_profiles = int(result.get("sampled_profiles", 0) or 0)
+        validated_profiles = int(result.get("validated_profiles", 0) or 0)
+        effective_search_share_pct = (
+            (float(sampled_profiles) / float(grid_total_after_guards) * 100.0)
+            if grid_total_after_guards > 0
+            else 0.0
+        )
 
         def _diag_int(field_name: str) -> int:
             with suppress(Exception):
@@ -4738,14 +5621,43 @@ class TradingTerminalWindow(QMainWindow):
             "low_sample": bool(low_sample),
             "sample_quality": sample_quality,
             "best_profile": best_profile,
+            "edge_hits": dict(edge_hits),
+            "edge_hit_count": int(edge_hit_count),
+            "edge_hit_params": list(edge_hit_params),
             "compact_summary": dict(compact_summary),
-            "sampled_profiles": int(result.get("sampled_profiles", 0) or 0),
+            "sampled_profiles": int(sampled_profiles),
             "evaluated_profiles": int(result.get("evaluated_profiles", 0) or 0),
-            "validated_profiles": int(result.get("validated_profiles", 0) or 0),
+            "validated_profiles": int(validated_profiles),
             "theoretical_profiles": int(result.get("theoretical_profiles", 0) or 0),
             "sampling_coverage_pct": float(result.get("sampling_coverage_pct", 0.0) or 0.0),
             "sampling_random_seed": int(result.get("sampling_random_seed", 0) or 0),
             "sampling_mode": str(result.get("sampling_mode", "") or "n/a"),
+            "optimizer_grid_profile_tag": str(
+                result.get("optimizer_grid_profile_tag", "")
+                or ("1m_research_v1" if str(result.get("interval", "")).strip().lower() == "1m" else "standard_grid_v1")
+            ),
+            "grid_total_before_guards": int(max(0, grid_total_before_guards)),
+            "grid_total_after_guards": int(max(0, grid_total_after_guards)),
+            "effective_search_share_pct": float(max(0.0, effective_search_share_pct)),
+            "rejected_min_trades": int(reject_breakdown["rejected_min_trades"]),
+            "rejected_breakeven_activation": int(reject_breakdown["rejected_breakeven_activation"]),
+            "rejected_avg_profit_per_trade_net": int(reject_breakdown["rejected_avg_profit_per_trade_net"]),
+            "rejected_risk_guard": int(reject_breakdown["rejected_risk_guard"]),
+            "rejected_other": int(reject_breakdown["rejected_other"]),
+            "avg_profit_per_trade_net_pct": float(avg_profit_per_trade_net_pct),
+            "median_profit_per_trade_net_pct": float(median_profit_per_trade_net_pct),
+            "estimated_round_trip_cost_pct": float(estimated_round_trip_cost_pct),
+            "profit_per_100_trades_net_pct": float(profit_per_100_trades_net_pct),
+            "chandelier_period": (
+                _safe_numeric(best_profile.get("chandelier_period"), 0.0)
+                if isinstance(best_profile, dict) and best_profile.get("chandelier_period") is not None
+                else None
+            ),
+            "chandelier_multiplier": (
+                _safe_numeric(best_profile.get("chandelier_multiplier"), 0.0)
+                if isinstance(best_profile, dict) and best_profile.get("chandelier_multiplier") is not None
+                else None
+            ),
             "optimizer_quality_status": str(
                 compact_summary.get("optimizer_quality_status")
                 or result.get("optimizer_quality_status")
@@ -4988,6 +5900,10 @@ class TradingTerminalWindow(QMainWindow):
             "single": "Single",
             BACKTEST_MODE_LIVE_VS_CHALLENGER: "Live vs Challenger",
         }.get(self._backtest_report_mode, str(self._backtest_report_mode).title())
+        run_tag = (
+            f"{BACKTEST_REPORT_RUN_TAG_PREFIX}_{mode_label.lower().replace(' ', '_')}_"
+            f"{started_at.strftime('%Y%m%d_%H%M%S')}"
+        )
 
         def _display_single_or_mixed(
             values: list[object],
@@ -5074,11 +5990,36 @@ class TradingTerminalWindow(QMainWindow):
             ],
             empty_label="n/a",
         )
+        rejected_min_trades_total = sum(
+            int(entry.get("rejected_min_trades", 0) or 0)
+            for entry in entries
+        )
+        rejected_breakeven_activation_total = sum(
+            int(entry.get("rejected_breakeven_activation", 0) or 0)
+            for entry in entries
+        )
+        rejected_avg_profit_per_trade_net_total = sum(
+            int(entry.get("rejected_avg_profit_per_trade_net", 0) or 0)
+            for entry in entries
+        )
+        rejected_risk_guard_total = sum(
+            int(entry.get("rejected_risk_guard", 0) or 0)
+            for entry in entries
+        )
+        rejected_other_total = sum(
+            int(entry.get("rejected_other", 0) or 0)
+            for entry in entries
+        )
 
         lines = [
             "Backtest Compact Summary",
             f"Mode: {mode_label}",
             f"Status: {status}",
+            f"run_tag: {run_tag}",
+            f"optimizer_grid_version: {BACKTEST_REPORT_OPTIMIZER_GRID_VERSION}",
+            f"strategy_logic_version: {BACKTEST_REPORT_STRATEGY_LOGIC_VERSION}",
+            f"risk_guard_version: {BACKTEST_REPORT_RISK_GUARD_VERSION}",
+            f"summary_schema_version: {BACKTEST_REPORT_SUMMARY_SCHEMA_VERSION}",
             f"Started (UTC): {started_at.strftime('%Y-%m-%d %H:%M:%S')}",
             f"Finished (UTC): {end_at.strftime('%Y-%m-%d %H:%M:%S')}",
             f"Duration (s): {duration_seconds}",
@@ -5126,7 +6067,7 @@ class TradingTerminalWindow(QMainWindow):
             f"Full-History Optimization: {full_history_optimization_display}",
             "",
             "Run Details",
-            "symbol | strategy | interval | leverage | real_leverage_avg | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | low_sample | sample_quality | optimization | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | session_top",
+            "symbol | strategy | interval | leverage | real_leverage_avg | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | avg_profit_per_trade_net_pct | median_profit_per_trade_net_pct | estimated_round_trip_cost_pct | profit_per_100_trades_net_pct | chandelier_period | chandelier_multiplier | low_sample | sample_quality | optimization | grid_profile_tag | grid_total_before_guards | grid_total_after_guards | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | effective_search_share_pct | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | rejected_min_trades | rejected_breakeven_activation | rejected_avg_profit_per_trade_net | rejected_risk_guard | rejected_other | edge_hit_count | edge_hit_params | session_top",
         ]
         for entry in entries:
             strategy_name = str(entry.get("strategy_name", ""))
@@ -5180,19 +6121,48 @@ class TradingTerminalWindow(QMainWindow):
                         f"{float(entry.get('avg_win_fee_ratio', 0.0) or 0.0):.2f}",
                         f"{float(entry.get('avg_win_usd', 0.0) or 0.0):.2f}",
                         f"{float(entry.get('real_rrr', 0.0) or 0.0):.2f}",
+                        f"{float(entry.get('avg_profit_per_trade_net_pct', 0.0) or 0.0):.4f}",
+                        f"{float(entry.get('median_profit_per_trade_net_pct', 0.0) or 0.0):.4f}",
+                        f"{float(entry.get('estimated_round_trip_cost_pct', 0.0) or 0.0):.4f}",
+                        f"{float(entry.get('profit_per_100_trades_net_pct', 0.0) or 0.0):.2f}",
+                        (
+                            f"{float(entry.get('chandelier_period', 0.0) or 0.0):.0f}"
+                            if entry.get("chandelier_period") is not None
+                            else "n/a"
+                        ),
+                        (
+                            f"{float(entry.get('chandelier_multiplier', 0.0) or 0.0):.2f}"
+                            if entry.get("chandelier_multiplier") is not None
+                            else "n/a"
+                        ),
                         str(bool(entry.get("low_sample"))).lower(),
                         str(entry.get("sample_quality", "-")),
                         "yes" if bool(entry.get("optimization_mode")) else "no",
+                        str(entry.get("optimizer_grid_profile_tag", "n/a") or "n/a"),
+                        str(int(entry.get("grid_total_before_guards", 0) or 0)),
+                        str(int(entry.get("grid_total_after_guards", 0) or 0)),
                         str(int(entry.get("evaluated_profiles", 0) or 0)),
                         str(int(entry.get("validated_profiles", 0) or 0)),
                         str(int(entry.get("sampled_profiles", 0) or 0)),
                         str(int(entry.get("theoretical_profiles", 0) or 0)),
+                        f"{float(entry.get('effective_search_share_pct', 0.0) or 0.0):.2f}",
                         str(entry.get("sampling_mode", "n/a") or "n/a"),
                         f"{float(entry.get('sampling_coverage_pct', 0.0) or 0.0):.2f}",
                         str(int(entry.get("search_window_candles", 0) or 0)),
                         str(int(entry.get("optimizer_worker_processes", 0) or 0)),
                         "yes" if bool(entry.get("full_history_optimization")) else "no",
                         "yes" if bool(entry.get("optimizer_force_full_scan")) else "no",
+                        str(int(entry.get("rejected_min_trades", 0) or 0)),
+                        str(int(entry.get("rejected_breakeven_activation", 0) or 0)),
+                        str(int(entry.get("rejected_avg_profit_per_trade_net", 0) or 0)),
+                        str(int(entry.get("rejected_risk_guard", 0) or 0)),
+                        str(int(entry.get("rejected_other", 0) or 0)),
+                        str(int(entry.get("edge_hit_count", 0) or 0)),
+                        (
+                            ",".join(str(param) for param in entry.get("edge_hit_params", []))
+                            if isinstance(entry.get("edge_hit_params"), list) and entry.get("edge_hit_params")
+                            else "-"
+                        ),
                         str(entry.get("session_top_session", "") or "-"),
                     ]
                 )
@@ -5202,6 +6172,12 @@ class TradingTerminalWindow(QMainWindow):
                 lines.append(
                     "  best_profile="
                     + json.dumps(best_profile, ensure_ascii=True, sort_keys=True)
+                )
+            edge_hits = entry.get("edge_hits")
+            if isinstance(edge_hits, dict) and edge_hits:
+                lines.append(
+                    "  edge_hits="
+                    + json.dumps(edge_hits, ensure_ascii=True, sort_keys=True)
                 )
             session_leaderboard = entry.get("session_leaderboard")
             if isinstance(session_leaderboard, list) and session_leaderboard:
@@ -5375,6 +6351,122 @@ class TradingTerminalWindow(QMainWindow):
                         ]
                     )
                 )
+            strategy_interval_groups: dict[tuple[str, str], list[dict[str, object]]] = {}
+            for entry in entries:
+                strategy_key = str(entry.get("strategy_name", "") or "").strip()
+                interval_key = str(entry.get("interval", "") or "").strip()
+                strategy_interval_groups.setdefault(
+                    (strategy_key, interval_key),
+                    [],
+                ).append(entry)
+            lines.extend(
+                [
+                    "",
+                    "Strategy Aggregates by Interval",
+                    "strategy | interval | runs | profitable_runs | total_pnl_usd | total_trades | median_pf_finite | avg_pf_ex_low_sample_finite | avg_win_rate_pct | avg_max_dd_pct",
+                ]
+            )
+            sorted_interval_groups = sorted(
+                strategy_interval_groups.items(),
+                key=lambda item: sum(
+                    float(group_entry.get("total_pnl_usd", 0.0) or 0.0)
+                    for group_entry in item[1]
+                ),
+                reverse=True,
+            )
+            for (strategy_key, interval_key), group_entries in sorted_interval_groups:
+                strategy_label = STRATEGY_LABELS.get(strategy_key, strategy_key)
+                group_runs = len(group_entries)
+                group_profitable_runs = sum(
+                    1
+                    for group_entry in group_entries
+                    if float(group_entry.get("total_pnl_usd", 0.0) or 0.0) > 0.0
+                )
+                group_total_pnl = sum(
+                    float(group_entry.get("total_pnl_usd", 0.0) or 0.0)
+                    for group_entry in group_entries
+                )
+                group_total_trades = sum(
+                    int(group_entry.get("total_trades", 0) or 0)
+                    for group_entry in group_entries
+                )
+                group_pf_finite = [
+                    float(group_entry.get("profit_factor", 0.0) or 0.0)
+                    for group_entry in group_entries
+                    if math.isfinite(float(group_entry.get("profit_factor", 0.0) or 0.0))
+                ]
+                group_median_pf = (
+                    statistics.median(group_pf_finite)
+                    if group_pf_finite
+                    else None
+                )
+                group_pf_ex_low_sample = [
+                    float(group_entry.get("profit_factor", 0.0) or 0.0)
+                    for group_entry in group_entries
+                    if (
+                        not bool(group_entry.get("low_sample"))
+                        and math.isfinite(float(group_entry.get("profit_factor", 0.0) or 0.0))
+                    )
+                ]
+                group_avg_pf_ex_low_sample = (
+                    sum(group_pf_ex_low_sample) / len(group_pf_ex_low_sample)
+                    if group_pf_ex_low_sample
+                    else None
+                )
+                group_avg_win_rate = (
+                    sum(
+                        float(group_entry.get("win_rate_pct", 0.0) or 0.0)
+                        for group_entry in group_entries
+                    )
+                    / group_runs
+                    if group_runs > 0
+                    else 0.0
+                )
+                group_avg_max_dd = (
+                    sum(
+                        float(group_entry.get("max_drawdown_pct", 0.0) or 0.0)
+                        for group_entry in group_entries
+                    )
+                    / group_runs
+                    if group_runs > 0
+                    else 0.0
+                )
+                lines.append(
+                    " | ".join(
+                        [
+                            strategy_label,
+                            interval_key or "-",
+                            str(group_runs),
+                            str(group_profitable_runs),
+                            f"{group_total_pnl:.2f}",
+                            str(group_total_trades),
+                            (
+                                self._format_report_profit_factor(float(group_median_pf))
+                                if group_median_pf is not None
+                                else "n/a"
+                            ),
+                            (
+                                self._format_report_profit_factor(float(group_avg_pf_ex_low_sample))
+                                if group_avg_pf_ex_low_sample is not None
+                                else "n/a"
+                            ),
+                            f"{group_avg_win_rate:.2f}",
+                            f"{group_avg_max_dd:.2f}",
+                        ]
+                    )
+                )
+
+        lines.extend(
+            [
+                "",
+                "Reject Breakdown (All Runs)",
+                f"rejected_min_trades: {rejected_min_trades_total}",
+                f"rejected_breakeven_activation: {rejected_breakeven_activation_total}",
+                f"rejected_avg_profit_per_trade_net: {rejected_avg_profit_per_trade_net_total}",
+                f"rejected_risk_guard: {rejected_risk_guard_total}",
+                f"rejected_other: {rejected_other_total}",
+            ]
+        )
 
         if errors:
             lines.extend(["", "Errors"])
@@ -5524,6 +6616,18 @@ class TradingTerminalWindow(QMainWindow):
         else:
             self._append_live_log(f"{table_name} copied to clipboard.")
 
+    def _copy_meta_reports_to_clipboard(self) -> None:
+        report_text = self._meta_reports_last_text.strip()
+        if not report_text and hasattr(self, "meta_reports_output"):
+            report_text = self.meta_reports_output.toPlainText().strip()
+        if not report_text:
+            self.statusBar().showMessage("Meta report output is empty.", 3000)
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setText(report_text)
+        self.statusBar().showMessage("Meta report copied to clipboard.", 3000)
+        self._append_live_log("Meta report copied to clipboard.")
+
     @staticmethod
     def _table_to_tsv(table: QTableWidget) -> str:
         if table.rowCount() == 0 or table.columnCount() == 0:
@@ -5570,6 +6674,695 @@ class TradingTerminalWindow(QMainWindow):
                 f"[RECOVERY] Loaded {len(self._positions)} active trade(s) from persistent state."
             )
         self._refresh_trade_readiness(force=True)
+
+    def _on_meta_refresh_timer(self) -> None:
+        self._refresh_meta_views(force=False)
+
+    def _refresh_meta_views(self, *, force: bool = False) -> None:
+        if not hasattr(self, "meta_views_tabs"):
+            return
+        now_monotonic = time.monotonic()
+        if (
+            not force
+            and self._meta_refresh_last_ts > 0.0
+            and (now_monotonic - self._meta_refresh_last_ts) < self._meta_refresh_interval_seconds
+        ):
+            return
+        self._meta_refresh_last_ts = now_monotonic
+
+        bot_active = self._bot_thread is not None and self._bot_thread.isRunning()
+        if bot_active:
+            self.meta_runtime_status_label.setText("ACTIVE")
+            self.meta_runtime_status_label.setStyleSheet(f"color: {ACCENT_PROFIT}; font-weight: 700;")
+        else:
+            self.meta_runtime_status_label.setText("DB-ONLY")
+            self.meta_runtime_status_label.setStyleSheet(f"color: {ACCENT_WARNING}; font-weight: 700;")
+
+        try:
+            with Database(self._db_path) as db:
+                health_rows = db.fetch_strategy_health_rows(limit=2000)
+                review_rows = db.fetch_recent_trade_reviews(limit=700)
+                adaptation_rows = db.fetch_adaptation_logs(limit=1200)
+                policy_rows = self._collect_meta_policy_rows(health_rows=health_rows)
+
+                self._refresh_meta_overview_cards(
+                    db=db,
+                    policy_rows=policy_rows,
+                )
+                self._refresh_meta_policy_table(policy_rows=policy_rows)
+                self._refresh_meta_blocks_table(adaptation_rows=adaptation_rows)
+                self._refresh_meta_health_table_rows(health_rows=health_rows)
+                self._refresh_meta_reviews_table_rows(review_rows=review_rows)
+                self._refresh_meta_adaptation_table_rows(adaptation_rows=adaptation_rows)
+                self._refresh_meta_reports_view(
+                    db=db,
+                    adaptation_rows=adaptation_rows,
+                )
+            stamp = datetime.now().strftime("%H:%M:%S")
+            self.meta_last_refresh_label.setText(f"Last refresh: {stamp}")
+            self.meta_last_refresh_label.setStyleSheet(f"color: {TEXT_MUTED};")
+            self._meta_last_refresh_error = ""
+        except Exception as exc:
+            self._meta_last_refresh_error = str(exc)
+            self.meta_last_refresh_label.setText(f"Last refresh failed: {exc}")
+            self.meta_last_refresh_label.setStyleSheet(f"color: {ACCENT_WARNING};")
+            logging.getLogger("gui").exception("Meta refresh failed")
+
+    def _refresh_meta_overview_cards(
+        self,
+        *,
+        db: Database,
+        policy_rows: list[dict[str, object]],
+    ) -> None:
+        day_start = self._today_start()
+        day_end = day_start + timedelta(days=1)
+        day_trades = db.fetch_closed_trades_since(
+            start_time=day_start,
+            end_time=day_end,
+            limit=5000,
+        )
+        daily_meta_pnl = float(sum(float(trade.pnl or 0.0) for trade in day_trades))
+        state_counts: dict[str, int] = {
+            "healthy": 0,
+            "degraded": 0,
+            "watchlist": 0,
+            "paused": 0,
+        }
+        risk_values: list[float] = []
+        hard_block_signatures: set[str] = set()
+        for row in policy_rows:
+            state_name = str(row.get("state", "")).strip().lower()
+            if state_name == "paper_only":
+                state_name = "watchlist"
+            if state_name in state_counts:
+                state_counts[state_name] += 1
+            risk_values.append(float(row.get("risk_multiplier", 1.0) or 1.0))
+            allow_trade = bool(row.get("allow_trade", True))
+            block_reason = str(row.get("block_reason", "") or "")
+            if allow_trade:
+                continue
+            if not self._is_hard_block_reason(block_reason):
+                continue
+            if block_reason.startswith("fail_safe_active:"):
+                hard_block_signatures.add(block_reason)
+            else:
+                hard_block_signatures.add(
+                    "|".join(
+                        [
+                            str(row.get("symbol", "")),
+                            str(row.get("strategy_name", "")),
+                            str(row.get("interval", "")),
+                            block_reason,
+                        ]
+                    )
+                )
+        active_blocks = int(len(hard_block_signatures))
+        global_state = self._resolve_global_meta_state(state_counts)
+        average_risk = float(statistics.fmean(risk_values)) if risk_values else 1.0
+
+        self.meta_healthy_card.set_value(str(int(state_counts.get("healthy", 0))), ACCENT_PROFIT)
+        self.meta_degraded_card.set_value(str(int(state_counts.get("degraded", 0))), ACCENT_WARNING)
+        self.meta_watchlist_card.set_value(str(int(state_counts.get("watchlist", 0))), "#ff9800")
+        self.meta_paper_only_card.set_value("0", TEXT_MUTED)
+        self.meta_paused_card.set_value(str(int(state_counts.get("paused", 0))), ACCENT_DANGER)
+        self.meta_daily_pnl_card.set_value(f"{daily_meta_pnl:+,.2f}", self._metric_color(daily_meta_pnl))
+        self.meta_blocks_card.set_value(
+            str(int(active_blocks)),
+            ACCENT_DANGER if active_blocks > 0 else ACCENT_PROFIT,
+        )
+        self.meta_global_risk_card.set_value(
+            f"{global_state} ({average_risk:.2f}x)",
+            self._meta_state_color(global_state),
+        )
+
+    def _collect_meta_policy_rows(self, *, health_rows: list) -> list[dict[str, object]]:
+        health_map: dict[tuple[str, str, str], object] = {}
+        for row in health_rows:
+            key = (
+                str(getattr(row, "symbol", "")).strip().upper(),
+                str(getattr(row, "strategy_name", "")).strip(),
+                str(getattr(row, "timeframe", "")).strip(),
+            )
+            health_map[key] = row
+
+        rows: list[dict[str, object]] = []
+        seen_keys: set[tuple[str, str, str]] = set()
+        fallback_strategy = self._current_live_strategy_name()
+
+        for symbol, snapshot in sorted(self._heartbeat_snapshot.items()):
+            normalized_symbol = str(symbol).strip().upper()
+            strategy_name = resolve_strategy_for_symbol(normalized_symbol, fallback_strategy)
+            interval = resolve_interval_for_symbol(normalized_symbol, self._live_interval)
+            key = (normalized_symbol, strategy_name, interval)
+            seen_keys.add(key)
+            health = health_map.get(key)
+            state = str(
+                snapshot.get("meta_state", "")
+                or ("" if health is None else getattr(health, "state", ""))
+            ).strip()
+            if not state:
+                state = "unknown"
+            normalized_state = state.lower()
+            if normalized_state == "paper_only":
+                normalized_state = "watchlist"
+                state = "watchlist"
+            allow_trade = bool(snapshot.get("meta_allow_trade", normalized_state not in {"paused"}))
+            block_reason = str(snapshot.get("meta_block_reason", "") or "")
+            if allow_trade:
+                block_reason = ""
+            rows.append(
+                {
+                    "symbol": normalized_symbol,
+                    "strategy_name": strategy_name,
+                    "interval": interval,
+                    "state": state,
+                    "allow_trade": allow_trade,
+                    "risk_multiplier": float(snapshot.get("meta_risk_multiplier", 1.0) or 1.0),
+                    "health_score": None if health is None else float(getattr(health, "health_score", 0.0)),
+                    "block_reason": block_reason,
+                    "warning_reason": "",
+                    "source": "heartbeat",
+                }
+            )
+
+        for row in health_rows:
+            key = (
+                str(getattr(row, "symbol", "")).strip().upper(),
+                str(getattr(row, "strategy_name", "")).strip(),
+                str(getattr(row, "timeframe", "")).strip(),
+            )
+            if key in seen_keys:
+                continue
+            state = str(getattr(row, "state", "")).strip().lower()
+            if state == "paper_only":
+                state = "watchlist"
+            allow_trade = state not in {"paused"}
+            rows.append(
+                {
+                    "symbol": key[0],
+                    "strategy_name": key[1],
+                    "interval": key[2],
+                    "state": state or "unknown",
+                    "allow_trade": allow_trade,
+                    "risk_multiplier": float(getattr(row, "risk_multiplier", 1.0) or 1.0),
+                    "health_score": float(getattr(row, "health_score", 0.0) or 0.0),
+                    "block_reason": "paused_emergency" if not allow_trade else "",
+                    "warning_reason": "",
+                    "source": "health",
+                }
+            )
+
+        state_rank = {name: idx for idx, name in enumerate(("paused", "watchlist", "degraded", "healthy"))}
+        rows.sort(
+            key=lambda payload: (
+                state_rank.get(str(payload.get("state", "")).lower(), 99),
+                str(payload.get("symbol", "")),
+                str(payload.get("strategy_name", "")),
+                str(payload.get("interval", "")),
+            )
+        )
+        return rows
+
+    def _refresh_meta_policy_table(self, *, policy_rows: list[dict[str, object]]) -> None:
+        if not hasattr(self, "meta_policy_table"):
+            return
+        table = self.meta_policy_table
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+
+        if not policy_rows:
+            self._set_meta_table_empty_state(table, "No meta policy rows available yet.")
+            table.setSortingEnabled(True)
+            return
+
+        for payload in policy_rows[:500]:
+            row_index = table.rowCount()
+            table.insertRow(row_index)
+            table.setItem(row_index, 0, self._make_item(str(payload.get("symbol", ""))))
+            table.setItem(row_index, 1, self._make_item(str(payload.get("strategy_name", ""))))
+            table.setItem(row_index, 2, self._make_item(str(payload.get("interval", ""))))
+            state_item = self._make_item(str(payload.get("state", "")))
+            state_item.setForeground(QColor(self._meta_state_color(str(payload.get("state", "")))))
+            table.setItem(row_index, 3, state_item)
+            allow_trade = bool(payload.get("allow_trade", True))
+            allow_item = self._make_item("yes" if allow_trade else "no")
+            allow_item.setForeground(QColor(ACCENT_PROFIT if allow_trade else ACCENT_DANGER))
+            table.setItem(row_index, 4, allow_item)
+            table.setItem(
+                row_index,
+                5,
+                self._make_item(f"{float(payload.get('risk_multiplier', 1.0) or 1.0):.2f}", True),
+            )
+            health_score = payload.get("health_score")
+            health_text = "-" if health_score is None else f"{float(health_score):.1f}"
+            table.setItem(row_index, 6, self._make_item(health_text, True))
+            table.setItem(row_index, 7, self._make_item(str(payload.get("block_reason", "") or "")))
+            table.setItem(row_index, 8, self._make_item(str(payload.get("warning_reason", "") or "")))
+            table.setItem(row_index, 9, self._make_item(str(payload.get("source", "") or "")))
+        table.setSortingEnabled(True)
+
+    def _refresh_meta_blocks_table(self, *, adaptation_rows: list) -> None:
+        if not hasattr(self, "meta_blocks_table"):
+            return
+        table = self.meta_blocks_table
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+
+        block_events: list[object] = []
+        for row in adaptation_rows:
+            event_type = str(getattr(row, "event_type", "")).strip().lower()
+            if event_type in {
+                "meta_state_change",
+                "meta_guard_triggered",
+                "meta_cooldown_started",
+                "warning_hook",
+                "fail_safe_activated",
+                "operational_error",
+            }:
+                block_events.append(row)
+
+        if not block_events:
+            self._set_meta_table_empty_state(table, "No meta blocks or warning events yet.")
+            table.setSortingEnabled(True)
+            return
+
+        for row in block_events[:350]:
+            payload = self._parse_meta_json(str(getattr(row, "payload_json", "") or ""))
+            reason = self._summarize_meta_payload(
+                payload=payload,
+                event_type=str(getattr(row, "event_type", "") or ""),
+            )
+            row_index = table.rowCount()
+            table.insertRow(row_index)
+            table.setItem(row_index, 0, self._make_item(self._format_timestamp(str(getattr(row, "created_at", "")))))
+            table.setItem(row_index, 1, self._make_item(str(getattr(row, "symbol", "") or "")))
+            table.setItem(row_index, 2, self._make_item(str(getattr(row, "strategy_name", "") or "")))
+            table.setItem(row_index, 3, self._make_item(str(getattr(row, "timeframe", "") or "")))
+            event_item = self._make_item(str(getattr(row, "event_type", "") or ""))
+            if "fail_safe" in str(getattr(row, "event_type", "")).lower():
+                event_item.setForeground(QColor(ACCENT_DANGER))
+            elif "warning" in str(getattr(row, "event_type", "")).lower():
+                event_item.setForeground(QColor(ACCENT_WARNING))
+            table.setItem(row_index, 4, event_item)
+            table.setItem(row_index, 5, self._make_item(reason))
+            table.setItem(row_index, 6, self._make_item(str(getattr(row, "source", "") or "")))
+        table.setSortingEnabled(True)
+
+    def _refresh_meta_health_table_rows(self, *, health_rows: list) -> None:
+        if not hasattr(self, "meta_health_table"):
+            return
+        table = self.meta_health_table
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+
+        symbol_filter = str(self.meta_health_symbol_filter.text()).strip().upper()
+        strategy_filter = str(self.meta_health_strategy_filter.currentData() or "").strip()
+        interval_filter = str(self.meta_health_interval_filter.currentData() or "").strip()
+        state_filter = str(self.meta_health_state_filter.currentData() or "").strip().lower()
+
+        filtered_rows: list[object] = []
+        for row in health_rows:
+            symbol = str(getattr(row, "symbol", "")).strip().upper()
+            strategy_name = str(getattr(row, "strategy_name", "")).strip()
+            timeframe = str(getattr(row, "timeframe", "")).strip()
+            state = str(getattr(row, "state", "")).strip().lower()
+            if state == "paper_only":
+                state = "watchlist"
+            if symbol_filter and symbol_filter not in symbol:
+                continue
+            if strategy_filter and strategy_name != strategy_filter:
+                continue
+            if interval_filter and timeframe != interval_filter:
+                continue
+            if state_filter and state != state_filter:
+                continue
+            filtered_rows.append(row)
+
+        state_rank = {name: idx for idx, name in enumerate(("paused", "watchlist", "degraded", "healthy"))}
+        filtered_rows.sort(
+            key=lambda row: (
+                state_rank.get(str(getattr(row, "state", "")).strip().lower(), 99),
+                float(getattr(row, "health_score", 0.0) or 0.0),
+                str(getattr(row, "symbol", "")),
+            )
+        )
+
+        if not filtered_rows:
+            self._set_meta_table_empty_state(table, "No strategy health rows for current filter.")
+            table.setSortingEnabled(True)
+            return
+
+        for row in filtered_rows[:1200]:
+            state = str(getattr(row, "state", "")).strip().lower()
+            if state == "paper_only":
+                state = "watchlist"
+            row_index = table.rowCount()
+            table.insertRow(row_index)
+            table.setItem(row_index, 0, self._make_item(str(getattr(row, "symbol", "") or "")))
+            table.setItem(row_index, 1, self._make_item(str(getattr(row, "strategy_name", "") or "")))
+            table.setItem(row_index, 2, self._make_item(str(getattr(row, "timeframe", "") or "")))
+            state_item = self._make_item(state)
+            state_item.setForeground(QColor(self._meta_state_color(state)))
+            table.setItem(row_index, 3, state_item)
+            table.setItem(row_index, 4, self._make_item(f"{float(getattr(row, 'health_score', 0.0) or 0.0):.1f}", True))
+            table.setItem(row_index, 5, self._make_item(f"{float(getattr(row, 'risk_multiplier', 1.0) or 1.0):.2f}", True))
+            table.setItem(row_index, 6, self._make_item(str(int(getattr(row, "trades_count", 0) or 0)), True))
+            table.setItem(row_index, 7, self._make_item(f"{float(getattr(row, 'winrate', 0.0) or 0.0):.2f}%", True))
+            table.setItem(row_index, 8, self._make_item(f"{float(getattr(row, 'late_entry_rate', 0.0) or 0.0):.2%}", True))
+            table.setItem(row_index, 9, self._make_item(f"{float(getattr(row, 'regime_mismatch_rate', 0.0) or 0.0):.2%}", True))
+            table.setItem(row_index, 10, self._make_item(f"{float(getattr(row, 'avoidable_loss_rate', 0.0) or 0.0):.2%}", True))
+            last_review_at = getattr(row, "last_review_at", None)
+            table.setItem(
+                row_index,
+                11,
+                self._make_item("-" if last_review_at is None else self._format_timestamp(str(last_review_at))),
+            )
+        table.setSortingEnabled(True)
+
+    def _refresh_meta_reviews_table_rows(self, *, review_rows: list[dict[str, object]]) -> None:
+        if not hasattr(self, "meta_reviews_table"):
+            return
+        table = self.meta_reviews_table
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+
+        symbol_filter = str(self.meta_reviews_symbol_filter.text()).strip().upper()
+        error_filter = str(self.meta_reviews_error_filter.currentData() or "").strip()
+        filtered: list[dict[str, object]] = []
+        for row in review_rows:
+            symbol = str(row.get("symbol", "") or "").strip().upper()
+            if symbol_filter and symbol_filter not in symbol:
+                continue
+            if error_filter:
+                error_primary = str(row.get("error_type_primary", "") or "").strip()
+                error_secondary = str(row.get("error_type_secondary", "") or "").strip()
+                if error_filter not in {error_primary, error_secondary}:
+                    continue
+            filtered.append(row)
+
+        if not filtered:
+            self._set_meta_table_empty_state(table, "No trade reviews for current filter.")
+            table.setSortingEnabled(True)
+            return
+
+        for row in filtered[:900]:
+            quality = float(row.get("trade_quality_score", 0.0) or 0.0)
+            row_index = table.rowCount()
+            table.insertRow(row_index)
+            table.setItem(
+                row_index,
+                0,
+                self._make_item(self._format_timestamp(str(row.get("updated_at", "") or ""))),
+            )
+            table.setItem(row_index, 1, self._make_item(str(int(row.get("trade_id", 0) or 0)), True))
+            table.setItem(row_index, 2, self._make_item(str(row.get("symbol", "") or "")))
+            table.setItem(row_index, 3, self._make_item(str(row.get("strategy_name", "") or "")))
+            table.setItem(row_index, 4, self._make_item(str(row.get("timeframe", "") or "")))
+            table.setItem(row_index, 5, self._make_item(str(row.get("error_type_primary", "") or "")))
+            table.setItem(row_index, 6, self._make_item(str(row.get("error_type_secondary", "") or "")))
+            quality_item = self._make_item(f"{quality:.1f}", True)
+            if quality >= 65.0:
+                quality_item.setForeground(QColor(ACCENT_PROFIT))
+            elif quality <= 45.0:
+                quality_item.setForeground(QColor(ACCENT_DANGER))
+            else:
+                quality_item.setForeground(QColor(ACCENT_WARNING))
+            table.setItem(row_index, 7, quality_item)
+            table.setItem(
+                row_index,
+                8,
+                self._make_item("yes" if bool(row.get("better_no_trade_flag", False)) else "no"),
+            )
+            table.setItem(
+                row_index,
+                9,
+                self._make_item("yes" if bool(row.get("late_entry_flag", False)) else "no"),
+            )
+            table.setItem(row_index, 10, self._make_item(str(row.get("regime_label_at_entry", "") or "")))
+            pnl_value = row.get("pnl")
+            if pnl_value is None:
+                table.setItem(row_index, 11, self._make_item("-", True))
+            else:
+                table.setItem(row_index, 11, self._make_pnl_item(float(pnl_value)))
+            table.setItem(row_index, 12, self._make_item(str(row.get("review_status", "") or "")))
+        table.setSortingEnabled(True)
+
+    def _refresh_meta_adaptation_table_rows(self, *, adaptation_rows: list) -> None:
+        if not hasattr(self, "meta_adaptation_table"):
+            return
+        table = self.meta_adaptation_table
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+
+        symbol_filter = str(self.meta_adaptation_symbol_filter.text()).strip().upper()
+        event_filter = str(self.meta_adaptation_event_filter.currentData() or "").strip().lower()
+        filtered_rows: list[object] = []
+        for row in adaptation_rows:
+            symbol = str(getattr(row, "symbol", "")).strip().upper()
+            event_type = str(getattr(row, "event_type", "")).strip().lower()
+            if symbol_filter and symbol_filter not in symbol:
+                continue
+            if event_filter and event_type != event_filter:
+                continue
+            filtered_rows.append(row)
+
+        if not filtered_rows:
+            self._set_meta_table_empty_state(table, "No adaptation rows for current filter.")
+            table.setSortingEnabled(True)
+            return
+
+        for row in filtered_rows[:1200]:
+            payload = self._parse_meta_json(str(getattr(row, "payload_json", "") or ""))
+            reason = self._summarize_meta_payload(
+                payload=payload,
+                event_type=str(getattr(row, "event_type", "") or ""),
+            )
+            row_index = table.rowCount()
+            table.insertRow(row_index)
+            table.setItem(row_index, 0, self._make_item(self._format_timestamp(str(getattr(row, "created_at", "") or ""))))
+            table.setItem(row_index, 1, self._make_item(str(getattr(row, "symbol", "") or "")))
+            table.setItem(row_index, 2, self._make_item(str(getattr(row, "strategy_name", "") or "")))
+            table.setItem(row_index, 3, self._make_item(str(getattr(row, "timeframe", "") or "")))
+            event_item = self._make_item(str(getattr(row, "event_type", "") or ""))
+            if "fail_safe" in str(getattr(row, "event_type", "")).lower():
+                event_item.setForeground(QColor(ACCENT_DANGER))
+            elif "warning" in str(getattr(row, "event_type", "")).lower():
+                event_item.setForeground(QColor(ACCENT_WARNING))
+            table.setItem(row_index, 4, event_item)
+            table.setItem(row_index, 5, self._make_item(reason))
+            table.setItem(row_index, 6, self._make_item(str(getattr(row, "source", "") or "")))
+        table.setSortingEnabled(True)
+
+    def _refresh_meta_reports_view(
+        self,
+        *,
+        db: Database,
+        adaptation_rows: list,
+    ) -> None:
+        if not hasattr(self, "meta_reports_output"):
+            return
+        daily_report_path = self._latest_meta_report_path("daily_meta_report_*.md")
+        weekly_report_path = self._latest_meta_report_path("weekly_meta_report_*.md")
+
+        report_sections: list[str] = []
+        report_header = ["Meta-Bot Learning Reports", ""]
+        report_header.append(f"Generated (GUI): {datetime.now().isoformat(timespec='seconds')}")
+        if self._meta_last_refresh_error:
+            report_header.append(f"Last Refresh Error: {self._meta_last_refresh_error}")
+        report_header.append("")
+        report_sections.append("\n".join(report_header))
+
+        if daily_report_path is not None:
+            with suppress(Exception):
+                daily_text = daily_report_path.read_text(encoding="utf-8")
+                report_sections.append("=== Daily Report ===")
+                report_sections.append(str(daily_report_path))
+                report_sections.append(daily_text.strip())
+                report_sections.append("")
+        else:
+            report_sections.append("=== Daily Report ===\nNo daily report file found.\n")
+
+        if weekly_report_path is not None:
+            with suppress(Exception):
+                weekly_text = weekly_report_path.read_text(encoding="utf-8")
+                report_sections.append("=== Weekly Report ===")
+                report_sections.append(str(weekly_report_path))
+                report_sections.append(weekly_text.strip())
+                report_sections.append("")
+        else:
+            report_sections.append("=== Weekly Report ===\nNo weekly report file found.\n")
+
+        learning_entries: list[str] = []
+        for row in adaptation_rows:
+            event_type = str(getattr(row, "event_type", "")).strip().lower()
+            if event_type != "learning_log_entry":
+                continue
+            payload = self._parse_meta_json(str(getattr(row, "payload_json", "") or ""))
+            timestamp_text = self._format_timestamp(str(getattr(row, "created_at", "") or ""))
+            change_type = str(payload.get("change_type", "") or "").strip()
+            symbol = str(payload.get("symbol", getattr(row, "symbol", "")) or "").strip()
+            strategy_name = str(payload.get("strategy_name", getattr(row, "strategy_name", "")) or "").strip()
+            interval = str(payload.get("interval", getattr(row, "timeframe", "")) or "").strip()
+            details = payload.get("details")
+            details_text = ""
+            if isinstance(details, dict) and details:
+                details_text = json.dumps(details, ensure_ascii=True, sort_keys=True)
+            learning_entries.append(
+                f"- {timestamp_text} | {change_type or 'learning_log_entry'} | {symbol} {strategy_name} {interval} {details_text}".strip()
+            )
+            if len(learning_entries) >= 50:
+                break
+        if not learning_entries:
+            learning_entries.append("- No learning_log_entry rows yet.")
+
+        report_sections.append("=== Learning Log Entries ===")
+        report_sections.extend(learning_entries)
+        report_sections.append("")
+
+        output_text = "\n".join(section for section in report_sections if section).strip() + "\n"
+        self.meta_reports_output.setPlainText(output_text)
+        self._meta_reports_last_text = output_text
+        self._meta_reports_last_refresh_at = datetime.now().isoformat(timespec="seconds")
+
+        files_hint: list[str] = []
+        if daily_report_path is not None:
+            files_hint.append(f"Daily: {daily_report_path.name}")
+        if weekly_report_path is not None:
+            files_hint.append(f"Weekly: {weekly_report_path.name}")
+        if files_hint:
+            self.meta_reports_file_hint.setText(" | ".join(files_hint))
+        else:
+            self.meta_reports_file_hint.setText("No report file loaded.")
+
+    @staticmethod
+    def _parse_meta_json(raw_payload: str) -> dict[str, object]:
+        text = str(raw_payload or "").strip()
+        if not text:
+            return {}
+        with suppress(Exception):
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    @staticmethod
+    def _set_meta_table_empty_state(table: QTableWidget, message: str) -> None:
+        table.setRowCount(1)
+        message_item = TradingTerminalWindow._make_item(message)
+        message_item.setForeground(QColor(TEXT_MUTED))
+        table.setItem(0, 0, message_item)
+        for column in range(1, table.columnCount()):
+            table.setItem(0, column, TradingTerminalWindow._make_item(""))
+
+    @staticmethod
+    def _meta_state_color(state: str) -> str:
+        normalized = str(state).strip().lower()
+        if normalized == "healthy":
+            return ACCENT_PROFIT
+        if normalized == "degraded":
+            return ACCENT_WARNING
+        if normalized == "watchlist":
+            return "#ff9800"
+        if normalized == "paper_only":
+            return "#ff7043"
+        if normalized == "paused":
+            return ACCENT_DANGER
+        return TEXT_MUTED
+
+    @staticmethod
+    def _resolve_global_meta_state(counts: dict[str, int]) -> str:
+        if int(counts.get("paused", 0)) > 0:
+            return "paused"
+        if int(counts.get("degraded", 0)) > 0:
+            return "degraded"
+        if int(counts.get("paper_only", 0)) > 0:
+            return "watchlist"
+        if int(counts.get("watchlist", 0)) > 0:
+            return "watchlist"
+        return "healthy"
+
+    @staticmethod
+    def _is_hard_block_reason(block_reason: str) -> bool:
+        reason = str(block_reason or "").strip().lower()
+        if not reason:
+            return False
+        hard_prefixes = (
+            "fail_safe_active:",
+            "max_daily_loss:",
+            "max_symbol_loss_streak:",
+            "max_strategy_drawdown:",
+            "max_open_positions:",
+            "max_pause_events_per_day:",
+            "cooldown_active_until:",
+            "positions_desync",
+            "duplicate_entries:",
+            "missing_exit_control:",
+            "hard_global_guard",
+            "paused_emergency",
+        )
+        return reason.startswith(hard_prefixes)
+
+    @staticmethod
+    def _summarize_meta_payload(*, payload: dict[str, object], event_type: str) -> str:
+        event_name = str(event_type).strip().lower()
+        if not payload:
+            return event_name
+        if event_name == "meta_state_change":
+            prev_state = str(payload.get("previous_state", "") or "-")
+            new_state = str(payload.get("new_state", "") or "-")
+            block_reason = str(payload.get("block_reason", "") or "")
+            warning_reason = str(payload.get("warning_reason", "") or "")
+            reasons = []
+            if block_reason:
+                reasons.append(f"block={block_reason}")
+            if warning_reason:
+                reasons.append(f"warn={warning_reason}")
+            reason_text = "; ".join(reasons)
+            return f"{prev_state}->{new_state}" + (f" ({reason_text})" if reason_text else "")
+        if event_name == "meta_guard_triggered":
+            state = str(payload.get("state", "-") or "-")
+            block_reason = str(payload.get("block_reason", "") or "")
+            warning_reason = str(payload.get("warning_reason", "") or "")
+            meta_flags = payload.get("meta_flags")
+            flags_text = ""
+            if isinstance(meta_flags, list) and meta_flags:
+                flags_text = f" flags={','.join(str(item) for item in meta_flags)}"
+            reason_parts = []
+            if block_reason:
+                reason_parts.append(f"block={block_reason}")
+            if warning_reason:
+                reason_parts.append(f"warn={warning_reason}")
+            reason_text = "; ".join(reason_parts)
+            return f"state={state}" + (f" ({reason_text})" if reason_text else "") + flags_text
+        if event_name == "meta_cooldown_started":
+            return f"cooldown_until={payload.get('cooldown_until', '-')}"
+        if event_name == "warning_hook":
+            return f"{payload.get('warning_code', '-')}: {payload.get('message', '-')}"
+        if event_name == "operational_error":
+            return f"{payload.get('reason', '-')}: {payload.get('exception_text', '-')}"
+        if event_name == "learning_log_entry":
+            return str(payload.get("change_type", "learning_log_entry"))
+        reason = payload.get("reason")
+        if reason:
+            return str(reason)
+        if "message" in payload:
+            return str(payload.get("message", ""))
+        compact = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        return compact[:220]
+
+    @staticmethod
+    def _latest_meta_report_path(pattern: str) -> Path | None:
+        report_directory = META_REPORTS_DIRECTORY
+        if not report_directory.exists():
+            return None
+        candidates = sorted(
+            report_directory.glob(pattern),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        return candidates[0]
 
     @staticmethod
     def _calculate_unrealized_net_pnl(trade: dict, last_price: float) -> float:
@@ -5735,6 +7528,7 @@ class TradingTerminalWindow(QMainWindow):
             if symbol in self._backtest_coin_cards:
                 continue
             card = LiveSymbolCard(symbol, compact=True, show_deploy_button=True)
+            card.setMinimumWidth(BACKTEST_SYMBOL_CARD_MIN_WIDTH)
             card.clicked.connect(self._toggle_backtest_symbol_selection)
             card.deploy_requested.connect(self._deploy_backtest_symbol_to_live)
             self._backtest_coin_cards[symbol] = card
@@ -5865,6 +7659,89 @@ class TradingTerminalWindow(QMainWindow):
         self._refresh_backtest_symbol_cards()
         self._update_status_label()
 
+    def _backtest_symbols_for_row(self, row_index: int) -> list[str]:
+        if row_index < 0:
+            return []
+        symbols = list(_configured_backtest_symbols())
+        columns = max(1, BACKTEST_SYMBOL_GRID_COLUMNS)
+        start = row_index * columns
+        end = start + columns
+        return symbols[start:end]
+
+    def _toggle_backtest_symbol_row_selection(self, row_index: int) -> None:
+        row_symbols = self._backtest_symbols_for_row(row_index)
+        if not row_symbols:
+            return
+
+        all_selected = all(symbol in self._selected_backtest_symbols for symbol in row_symbols)
+        if all_selected:
+            for symbol in row_symbols:
+                if len(self._selected_backtest_symbols) <= 1:
+                    break
+                self._selected_backtest_symbols.discard(symbol)
+            if not self._selected_backtest_symbols:
+                self._selected_backtest_symbols.add(row_symbols[0])
+            current_symbol = self._current_backtest_symbol()
+            if current_symbol not in self._selected_backtest_symbols:
+                next_symbol = self._get_selected_backtest_symbols()[0]
+                self._set_current_backtest_symbol(next_symbol, ensure_selected=False)
+            else:
+                self._refresh_backtest_symbol_cards()
+                self._update_status_label()
+            self.statusBar().showMessage(
+                f"Deselected row {row_index + 1} ({len(row_symbols)} coins).",
+                2500,
+            )
+            return
+
+        for symbol in row_symbols:
+            self._selected_backtest_symbols.add(symbol)
+        self._set_current_backtest_symbol(row_symbols[0], ensure_selected=True)
+        self.statusBar().showMessage(
+            f"Selected row {row_index + 1} ({len(row_symbols)} coins).",
+            2500,
+        )
+
+    def _refresh_backtest_row_select_buttons(self) -> None:
+        for row_index, button in self._backtest_row_select_buttons.items():
+            row_symbols = self._backtest_symbols_for_row(row_index)
+            if not row_symbols:
+                button.hide()
+                continue
+            button.show()
+            all_selected = all(symbol in self._selected_backtest_symbols for symbol in row_symbols)
+            button.setText(f"R{row_index + 1}")
+            if all_selected:
+                button.setToolTip(f"Row {row_index + 1}: click to deselect this row")
+                button.setStyleSheet(
+                    (
+                        "QPushButton {"
+                        f"background-color: {ACCENT_PRIMARY};"
+                        "color: #ffffff;"
+                        "font-weight: 700;"
+                        "border: 1px solid #47a7ff;"
+                        "border-radius: 6px;"
+                        "padding: 0;"
+                        "}"
+                        "QPushButton:hover { background-color: #3ca0ff; }"
+                    )
+                )
+            else:
+                button.setToolTip(f"Row {row_index + 1}: click to select this row")
+                button.setStyleSheet(
+                    (
+                        "QPushButton {"
+                        "background-color: #2c1b0d;"
+                        "color: #ffd089;"
+                        "font-weight: 700;"
+                        "border: 1px solid #ff9f40;"
+                        "border-radius: 6px;"
+                        "padding: 0;"
+                        "}"
+                        "QPushButton:hover { background-color: #3b2410; }"
+                    )
+                )
+
     def _refresh_live_symbol_cards(self) -> None:
         self._update_coin_radar_count()
         default_strategy_name = self._current_live_strategy_name()
@@ -5912,8 +7789,10 @@ class TradingTerminalWindow(QMainWindow):
             card.set_win_rate(self._backtest_win_rates.get(symbol))
             card.set_trade_count(self._backtest_trade_counts.get(symbol))
             winner_strategy_name = ""
+            winner_interval = ""
             if isinstance(compact_summary, dict):
                 winner_strategy_name = str(compact_summary.get("strategy_name", "") or "").strip()
+                winner_interval = str(compact_summary.get("interval", "") or "").strip()
                 if winner_strategy_name:
                     winner_strategy_name = self._sanitize_backtest_strategy_name(
                         symbol,
@@ -5927,6 +7806,7 @@ class TradingTerminalWindow(QMainWindow):
             card.set_strategy_badge(
                 get_strategy_badge(symbol, resolved_strategy, use_coin_override=False),
                 resolved_strategy,
+                winner_interval if winner_strategy_name else None,
             )
             if symbol in self._backtest_deployed_symbols:
                 card.set_deploy_state("deployed")
@@ -5938,7 +7818,9 @@ class TradingTerminalWindow(QMainWindow):
                 card.set_deploy_state("pending")
             status_text, status_color = self._determine_backtest_symbol_status(symbol, is_selected)
             card.set_status(status_text, status_color)
+        self._refresh_backtest_row_select_buttons()
         self._sync_backtest_symbol_selector_viewport()
+        self._schedule_deferred_resize_tasks()
 
     def _refresh_backtest_strategy_buttons(self) -> None:
         for strategy_name, button in self._backtest_strategy_buttons.items():
@@ -6019,20 +7901,54 @@ class TradingTerminalWindow(QMainWindow):
             return
 
         while self.backtest_symbols_layout.count():
-            self.backtest_symbols_layout.takeAt(0)
+            item = self.backtest_symbols_layout.takeAt(0)
+            if item is None:
+                continue
 
-        columns = BACKTEST_SYMBOL_GRID_COLUMNS
+        columns = max(1, BACKTEST_SYMBOL_GRID_COLUMNS)
         ordered_symbols = list(_configured_backtest_symbols())
-        for index, symbol in enumerate(ordered_symbols):
-            card = self._backtest_coin_cards[symbol]
-            row = index // columns
-            column = index % columns
-            self.backtest_symbols_layout.addWidget(card, row, column)
+        row_count = (len(ordered_symbols) + columns - 1) // columns
 
-        for column in range(columns):
+        existing_row_buttons = dict(self._backtest_row_select_buttons)
+        self._backtest_row_select_buttons = {}
+        for row in range(row_count):
+            row_button = existing_row_buttons.pop(row, None)
+            if row_button is None:
+                row_button = QPushButton(f"R{row + 1}")
+                row_button.setFixedWidth(BACKTEST_SYMBOL_ROW_BUTTON_WIDTH)
+                row_button.setFixedHeight(28)
+                row_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                row_button.clicked.connect(
+                    lambda _checked=False, current_row=row: self._toggle_backtest_symbol_row_selection(current_row)
+                )
+            self._backtest_row_select_buttons[row] = row_button
+            self.backtest_symbols_layout.addWidget(
+                row_button,
+                row,
+                0,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+            )
+
+            start = row * columns
+            row_symbols = ordered_symbols[start : start + columns]
+            for column_offset, symbol in enumerate(row_symbols, start=1):
+                card = self._backtest_coin_cards[symbol]
+                self.backtest_symbols_layout.addWidget(card, row, column_offset)
+
+        for stale_button in existing_row_buttons.values():
+            with suppress(Exception):
+                stale_button.setParent(None)
+            with suppress(Exception):
+                stale_button.deleteLater()
+
+        self.backtest_symbols_layout.setColumnStretch(0, 0)
+        self.backtest_symbols_layout.setColumnMinimumWidth(0, BACKTEST_SYMBOL_ROW_BUTTON_WIDTH)
+        for column in range(1, columns + 1):
             self.backtest_symbols_layout.setColumnStretch(column, 1)
-        final_row = (len(ordered_symbols) + columns - 1) // columns
+            self.backtest_symbols_layout.setColumnMinimumWidth(column, BACKTEST_SYMBOL_CARD_MIN_WIDTH)
+        final_row = row_count
         self.backtest_symbols_layout.setRowStretch(final_row, 1)
+        self._refresh_backtest_row_select_buttons()
         self._sync_backtest_symbol_selector_viewport()
 
     def _sync_backtest_symbol_selector_viewport(self) -> None:
@@ -6041,8 +7957,12 @@ class TradingTerminalWindow(QMainWindow):
 
         symbols = list(_configured_backtest_symbols())
         if not symbols:
-            self.backtest_symbols_scroll.setMinimumHeight(120)
-            self.backtest_symbols_scroll.setMaximumHeight(120)
+            if (
+                self.backtest_symbols_scroll.minimumHeight() != BACKTEST_SYMBOL_SELECTOR_MIN_HEIGHT
+                or self.backtest_symbols_scroll.maximumHeight() != BACKTEST_SYMBOL_SELECTOR_MIN_HEIGHT
+            ):
+                self.backtest_symbols_scroll.setMinimumHeight(BACKTEST_SYMBOL_SELECTOR_MIN_HEIGHT)
+                self.backtest_symbols_scroll.setMaximumHeight(BACKTEST_SYMBOL_SELECTOR_MIN_HEIGHT)
             return
 
         self.backtest_symbols_layout.activate()
@@ -6051,8 +7971,22 @@ class TradingTerminalWindow(QMainWindow):
             int(self.backtest_symbols_container.sizeHint().height()),
             int(self.backtest_symbols_container.minimumSizeHint().height()),
         )
+        viewport_width = max(
+            int(self.backtest_symbols_container.sizeHint().width()),
+            int(self.backtest_symbols_container.minimumSizeHint().width()),
+        )
+        if self.backtest_symbols_container.minimumWidth() != viewport_width:
+            self.backtest_symbols_container.setMinimumWidth(viewport_width)
         frame_height = max(self.backtest_symbols_scroll.frameWidth() * 2, 0)
-        target_height = max(120, viewport_height + frame_height)
+        target_height = max(
+            BACKTEST_SYMBOL_SELECTOR_MIN_HEIGHT,
+            min(BACKTEST_SYMBOL_SELECTOR_MAX_HEIGHT, viewport_height + frame_height),
+        )
+        if (
+            self.backtest_symbols_scroll.minimumHeight() == target_height
+            and self.backtest_symbols_scroll.maximumHeight() == target_height
+        ):
+            return
         self.backtest_symbols_scroll.setMinimumHeight(target_height)
         self.backtest_symbols_scroll.setMaximumHeight(target_height)
 
@@ -6334,7 +8268,8 @@ class TradingTerminalWindow(QMainWindow):
             )
 
     def _set_backtest_symbol_controls_enabled(self, enabled: bool) -> None:
-        self.backtest_symbols_scroll.setEnabled(enabled)
+        # Keep scroll usable while backtest controls are locked.
+        self.backtest_symbols_scroll.setEnabled(True)
         self.backtest_select_all_button.setEnabled(enabled)
         if hasattr(self, "backtest_clear_cards_button"):
             self.backtest_clear_cards_button.setEnabled(enabled)
@@ -6345,6 +8280,8 @@ class TradingTerminalWindow(QMainWindow):
             self.backtest_single_interval_button.setEnabled(enabled)
         for card in self._backtest_coin_cards.values():
             card.setEnabled(enabled)
+        for button in self._backtest_row_select_buttons.values():
+            button.setEnabled(enabled)
         for button in self._backtest_strategy_buttons.values():
             button.setEnabled(enabled)
         for button in self._backtest_interval_buttons.values():
@@ -6381,9 +8318,9 @@ class TradingTerminalWindow(QMainWindow):
     def _update_progress(self, value: int, text: str) -> None:
         progress_value = max(0, min(100, int(value)))
         self._progress_generation += 1
-        generation = self._progress_generation
         self.statusBar().showMessage(text)
         if progress_value <= 0:
+            self._progress_hide_timer.stop()
             self.progress_bar.hide()
             self.progress_bar.setValue(0)
             return
@@ -6392,7 +8329,10 @@ class TradingTerminalWindow(QMainWindow):
         self.progress_bar.setValue(progress_value)
         self.progress_bar.setFormat(f"{progress_value}%")
         if progress_value >= 100:
-            QTimer.singleShot(2000, lambda: self._hide_progress_bar(generation))
+            self._pending_progress_hide_generation = int(self._progress_generation)
+            self._progress_hide_timer.start()
+        else:
+            self._progress_hide_timer.stop()
 
     def _hide_progress_bar(self, generation: int) -> None:
         if generation != self._progress_generation:
@@ -6400,8 +8340,12 @@ class TradingTerminalWindow(QMainWindow):
         self.progress_bar.hide()
         self.progress_bar.setValue(0)
 
+    def _on_progress_hide_timer_timeout(self) -> None:
+        self._hide_progress_bar(int(self._pending_progress_hide_generation))
+
     def _reset_progress(self, message: str | None = None) -> None:
         self._progress_generation += 1
+        self._progress_hide_timer.stop()
         self.progress_bar.hide()
         self.progress_bar.setValue(0)
         if message:
@@ -6418,16 +8362,57 @@ class TradingTerminalWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._apply_backtest_splitter_sizes)
-        QTimer.singleShot(0, self._sync_backtest_symbol_selector_viewport)
+        self._schedule_deferred_resize_tasks()
+
+    def _schedule_deferred_resize_tasks(self) -> None:
+        self._deferred_resize_timer.start()
+
+    def _run_deferred_resize_tasks(self) -> None:
+        self._sync_backtest_symbol_selector_viewport()
+        self._apply_backtest_splitter_sizes()
+
+    def _required_backtest_main_width(self) -> int:
+        required_width = 640
+        if hasattr(self, "backtest_symbols_container"):
+            container_width = max(
+                int(self.backtest_symbols_container.minimumSizeHint().width()),
+                int(self.backtest_symbols_container.sizeHint().width()),
+                int(self.backtest_symbols_container.minimumWidth()),
+            )
+            required_width = max(required_width, container_width + 24)
+        if hasattr(self, "backtest_symbols_scroll"):
+            vertical_bar_width = int(self.backtest_symbols_scroll.verticalScrollBar().sizeHint().width())
+            required_width = max(
+                required_width,
+                int(self.backtest_symbols_scroll.minimumSizeHint().width()) + vertical_bar_width + 28,
+            )
+        return required_width
 
     def _apply_backtest_splitter_sizes(self) -> None:
         splitter = self._analytics_splitter
         if splitter is None or splitter.orientation() != Qt.Orientation.Horizontal:
             return
         total_width = max(splitter.width(), 1)
-        log_width = max(int(total_width * 0.40), 420)
-        main_width = max(total_width - log_width, 640)
+        required_main_width = max(640, self._required_backtest_main_width())
+        target_main_width = min(required_main_width, total_width)
+        preferred_log_width = max(int(total_width * 0.30), BACKTEST_LOG_PANEL_MIN_WIDTH)
+        minimum_log_width = BACKTEST_LOG_PANEL_MIN_WIDTH
+        max_log_width = max(0, total_width - target_main_width)
+        if max_log_width <= 0:
+            log_width = 0
+        else:
+            log_width = min(preferred_log_width, max_log_width)
+            if max_log_width >= minimum_log_width:
+                log_width = max(log_width, minimum_log_width)
+        main_width = total_width - log_width
+        current_sizes = splitter.sizes()
+        if len(current_sizes) != 2:
+            splitter.setSizes([main_width, log_width])
+            return
+        current_main = int(current_sizes[0])
+        current_log = int(current_sizes[1])
+        if abs(current_main - main_width) <= 2 and abs(current_log - log_width) <= 2:
+            return
         splitter.setSizes([main_width, log_width])
 
     def _current_live_timer_interval(self) -> str:
@@ -6468,13 +8453,17 @@ class TradingTerminalWindow(QMainWindow):
 
     def _flash_market_pulse(self) -> None:
         self._heartbeat_generation += 1
-        generation = self._heartbeat_generation
+        generation = int(self._heartbeat_generation)
         self.market_pulse_label.setStyleSheet(
             "background: #00e676;"
             "border: 1px solid #7dffb1;"
             "border-radius: 8px;"
         )
-        QTimer.singleShot(260, lambda: self._fade_market_pulse(generation))
+        self._pending_market_pulse_generation = generation
+        self._market_pulse_fade_timer.start()
+
+    def _on_market_pulse_fade_timer_timeout(self) -> None:
+        self._fade_market_pulse(int(self._pending_market_pulse_generation))
 
     def _fade_market_pulse(self, generation: int) -> None:
         if generation != self._heartbeat_generation:

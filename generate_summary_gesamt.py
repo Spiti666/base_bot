@@ -26,9 +26,14 @@ BACKTEST_FILE_PATTERNS: tuple[str, ...] = (
 
 STRATEGY_LABEL_TO_NAME: dict[str, str] = {
     "ema cross + volume": "ema_cross_volume",
+    "ema cross volume": "ema_cross_volume",
+    "ema_cross_volume": "ema_cross_volume",
     "ema band rejection": "ema_band_rejection",
+    "ema_band_rejection": "ema_band_rejection",
     "frama cross": "frama_cross",
+    "frama_cross": "frama_cross",
     "dual thrust": "dual_thrust",
+    "dual_thrust": "dual_thrust",
 }
 
 STRATEGY_NAME_TO_LABEL: dict[str, str] = {
@@ -36,6 +41,16 @@ STRATEGY_NAME_TO_LABEL: dict[str, str] = {
     "ema_band_rejection": "EMA Band Rejection",
     "frama_cross": "FRAMA Cross",
     "dual_thrust": "Dual Thrust",
+}
+
+INTERVAL_TO_MINUTES: dict[str, int] = {
+    "1m": 1,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "4h": 240,
+    "1d": 1440,
 }
 
 RISK_PARAM_ORDER: tuple[str, ...] = (
@@ -122,7 +137,31 @@ def _normalize_strategy_name(strategy_name: str | None) -> str:
 
 
 def _strategy_name_from_label(strategy_label: str) -> str:
-    return STRATEGY_LABEL_TO_NAME.get(str(strategy_label).strip().lower(), "")
+    raw_label = str(strategy_label or "").strip()
+    if not raw_label:
+        return ""
+    normalized = raw_label.lower()
+    normalized = re.sub(r"\[[^\]]*\]", "", normalized)
+    normalized = re.sub(r"\([^\)]*\)", "", normalized)
+    normalized = normalized.replace("_", " ")
+    normalized = normalized.replace("+", " + ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    candidates = {
+        normalized,
+        normalized.replace(" + ", " "),
+        normalized.replace("-", " "),
+    }
+    for candidate in candidates:
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+        if candidate in STRATEGY_LABEL_TO_NAME:
+            return STRATEGY_LABEL_TO_NAME[candidate]
+        canonical_candidate = candidate.replace(" ", "_").replace("-", "_")
+        canonical_candidate = PRODUCTION_STRATEGY_ALIASES.get(
+            canonical_candidate, canonical_candidate
+        )
+        if canonical_candidate in STRATEGY_NAME_TO_LABEL:
+            return canonical_candidate
+    return ""
 
 
 def _strategy_label_from_name(strategy_name: str) -> str:
@@ -172,6 +211,9 @@ def _collect_backtest_files() -> list[Path]:
         for path in PROJECT_ROOT.glob(pattern):
             if path.is_file():
                 files[path.resolve()] = None
+    for path in PROJECT_ROOT.rglob("backtest_compact_summary_*.txt"):
+        if path.is_file():
+            files[path.resolve()] = None
     return sorted(files.keys())
 
 
@@ -181,34 +223,71 @@ def _parse_backtest_rows(file_paths: list[Path]) -> list[BacktestRow]:
         source = path.name
         source_dt = _parse_source_dt(path)
         header_columns: list[str] = []
+        symbol_col_idx: int | None = None
+        strategy_col_idx: int | None = None
+        interval_col_idx: int | None = None
         last_row: BacktestRow | None = None
         for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
             lower = stripped.lower()
-            if lower.startswith("symbol | strategy | interval |"):
-                header_columns = [part.strip() for part in line.split("|")]
+            if (
+                "|" in line
+                and "symbol" in lower
+                and "strategy" in lower
+                and "interval" in lower
+            ):
+                raw_parts = [part.strip() for part in line.split("|")]
+                header_columns = list(raw_parts)
+                normalized_headers = [part.strip().lower() for part in raw_parts]
+                symbol_col_idx = (
+                    normalized_headers.index("symbol")
+                    if "symbol" in normalized_headers
+                    else None
+                )
+                if "strategy" in normalized_headers:
+                    strategy_col_idx = normalized_headers.index("strategy")
+                elif "strategy_name" in normalized_headers:
+                    strategy_col_idx = normalized_headers.index("strategy_name")
+                else:
+                    strategy_col_idx = None
+                interval_col_idx = (
+                    normalized_headers.index("interval")
+                    if "interval" in normalized_headers
+                    else None
+                )
                 last_row = None
                 continue
 
             if "|" in line:
                 parts = [part.strip() for part in line.split("|")]
-                if len(parts) >= 4 and re.fullmatch(r"[A-Z0-9]+USDT", parts[0]):
-                    strategy_name = _strategy_name_from_label(parts[1])
+                if symbol_col_idx is None or strategy_col_idx is None or interval_col_idx is None:
+                    continue
+                if (
+                    symbol_col_idx >= len(parts)
+                    or strategy_col_idx >= len(parts)
+                    or interval_col_idx >= len(parts)
+                ):
+                    continue
+                symbol_value = parts[symbol_col_idx].upper()
+                if re.fullmatch(r"[A-Z0-9]+USDT", symbol_value):
+                    strategy_label = parts[strategy_col_idx]
+                    strategy_name = _strategy_name_from_label(strategy_label)
                     if not strategy_name:
                         last_row = None
                         continue
+                    interval_value = parts[interval_col_idx]
                     columns: dict[str, str] = {}
                     if header_columns:
                         for index, column_name in enumerate(header_columns):
                             if index < len(parts):
                                 columns[column_name] = parts[index]
                     row = BacktestRow(
-                        symbol=parts[0],
+                        symbol=symbol_value,
                         strategy_name=strategy_name,
-                        strategy_label=parts[1],
-                        interval=parts[2],
+                        strategy_label=strategy_label,
+                        interval=interval_value,
                         source=source,
                         source_dt=source_dt,
                         columns=columns,
@@ -324,8 +403,16 @@ def _profile_distance(live_profile: dict[str, float], best_profile: dict[str, fl
     return distance
 
 
+def _interval_distance_minutes(left: str, right: str) -> int:
+    left_minutes = INTERVAL_TO_MINUTES.get(str(left).strip().lower())
+    right_minutes = INTERVAL_TO_MINUTES.get(str(right).strip().lower())
+    if left_minutes is None or right_minutes is None:
+        return 10_000
+    return abs(int(left_minutes) - int(right_minutes))
+
+
 def _select_match(live: LiveProfile, rows: list[BacktestRow]) -> MatchResult:
-    filtered = [
+    same_symbol_strategy_interval_rows = [
         row
         for row in rows
         if row.symbol == live.symbol
@@ -333,34 +420,70 @@ def _select_match(live: LiveProfile, rows: list[BacktestRow]) -> MatchResult:
         and row.interval == live.interval
         and row.best_profile
     ]
-    if not filtered:
-        return MatchResult(status="MISSING_PROFILE", source="-", row=None)
+    if same_symbol_strategy_interval_rows:
+        live_combined = live.combined_profile
+        exact_rows: list[BacktestRow] = []
+        scored_rows: list[tuple[float, float, float, BacktestRow]] = []
+
+        for row in same_symbol_strategy_interval_rows:
+            core = _profile_core(row.best_profile)
+            if _is_exact_profile_match(live_combined, core):
+                exact_rows.append(row)
+            distance = _profile_distance(live_combined, core)
+            pnl = _parse_float(row.columns.get("pnl_usd"))
+            scored_rows.append((distance, -row.source_dt.timestamp(), -(pnl or 0.0), row))
+
+        if exact_rows:
+            exact_rows.sort(
+                key=lambda row: (
+                    -row.source_dt.timestamp(),
+                    -(_parse_float(row.columns.get("pnl_usd")) or 0.0),
+                )
+            )
+            winner = exact_rows[0]
+            return MatchResult(status="EXACT_PROFILE", source=winner.source, row=winner)
+
+        scored_rows.sort(key=lambda item: (item[0], item[1], item[2]))
+        winner = scored_rows[0][3]
+        return MatchResult(
+            status="SAME_SYMBOL_STRATEGY_INTERVAL_BUT_DIFFERENT_PROFILE",
+            source=winner.source,
+            row=winner,
+        )
+
+    same_symbol_strategy_rows = [
+        row
+        for row in rows
+        if row.symbol == live.symbol
+        and row.strategy_name == live.strategy_name
+        and row.best_profile
+    ]
+    if not same_symbol_strategy_rows:
+        return MatchResult(status="NO_COMPARABLE_BACKTEST_ROW", source="-", row=None)
 
     live_combined = live.combined_profile
-    exact_rows: list[BacktestRow] = []
-    scored_rows: list[tuple[float, float, float, BacktestRow]] = []
-
-    for row in filtered:
+    scored_rows: list[tuple[int, float, float, float, BacktestRow]] = []
+    for row in same_symbol_strategy_rows:
         core = _profile_core(row.best_profile)
-        if _is_exact_profile_match(live_combined, core):
-            exact_rows.append(row)
+        interval_distance = _interval_distance_minutes(live.interval, row.interval)
         distance = _profile_distance(live_combined, core)
-        pnl = _parse_float(row.columns.get("pnl_usd"))
-        scored_rows.append((distance, -row.source_dt.timestamp(), -(pnl or 0.0), row))
-
-    if exact_rows:
-        exact_rows.sort(
-            key=lambda row: (
+        pnl = _parse_float(row.columns.get("pnl_usd")) or 0.0
+        scored_rows.append(
+            (
+                interval_distance,
+                distance,
                 -row.source_dt.timestamp(),
-                -(_parse_float(row.columns.get("pnl_usd")) or 0.0),
+                -pnl,
+                row,
             )
         )
-        winner = exact_rows[0]
-        return MatchResult(status="EXACT_PROFILE", source=winner.source, row=winner)
-
-    scored_rows.sort(key=lambda item: (item[0], item[1], item[2]))
-    winner = scored_rows[0][3]
-    return MatchResult(status="NEAREST_PROFILE", source=winner.source, row=winner)
+    scored_rows.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    winner = scored_rows[0][4]
+    return MatchResult(
+        status="SAME_SYMBOL_STRATEGY_DIFFERENT_INTERVAL",
+        source=winner.source,
+        row=winner,
+    )
 
 
 def _format_metrics(row: BacktestRow | None) -> str:
@@ -400,6 +523,10 @@ def generate_summary_gesamt(output_path: Path = DEFAULT_OUTPUT_PATH) -> str:
     lines.append("Live Strategy vs Backtest Performance (summary_gesamt.txt)")
     lines.append(f"Generated (UTC): {datetime.now(UTC).strftime('%Y-%m-%d')}")
     lines.append("Source of live truth: config.PRODUCTION_PROFILE_REGISTRY")
+    lines.append("Hinweis: Dieser Vergleich ist rein analytisch.")
+    lines.append("Hinweis: Das Live-Setup bleibt unveraendert.")
+    lines.append("Hinweis: Abweichungen zwischen Live und Backtest bedeuten hier NICHT automatisch, dass Live falsch ist.")
+    lines.append("Hinweis: Der aktuelle Backtest ist ein neuer Research-Stand und nicht automatisch der neue Live-Sollstand.")
     lines.append(f"Backtest rows scanned: {len(rows)}")
     lines.append(f"Live profiles scanned: {len(live_profiles)}")
     if not backtest_files:
@@ -408,18 +535,20 @@ def generate_summary_gesamt(output_path: Path = DEFAULT_OUTPUT_PATH) -> str:
     lines.append("")
 
     exact_count = 0
-    matched_count = 0
-    missing_symbols: list[str] = []
+    same_interval_diff_profile_count = 0
+    same_strategy_diff_interval_count = 0
+    no_comparable_count = 0
 
     for index, live in enumerate(live_profiles, start=1):
         match = _select_match(live, rows)
         if match.status == "EXACT_PROFILE":
             exact_count += 1
-            matched_count += 1
-        elif match.status == "NEAREST_PROFILE":
-            matched_count += 1
+        elif match.status == "SAME_SYMBOL_STRATEGY_INTERVAL_BUT_DIFFERENT_PROFILE":
+            same_interval_diff_profile_count += 1
+        elif match.status == "SAME_SYMBOL_STRATEGY_DIFFERENT_INTERVAL":
+            same_strategy_diff_interval_count += 1
         else:
-            missing_symbols.append(live.symbol)
+            no_comparable_count += 1
 
         lines.append(
             f"{index:02d}. {live.symbol} | {live.strategy_label} | {live.interval} | live_leverage={live.leverage}"
@@ -431,16 +560,30 @@ def generate_summary_gesamt(output_path: Path = DEFAULT_OUTPUT_PATH) -> str:
         else:
             lines.append(f"  best_profile={match.row.best_profile}")
         lines.append(f"  live_profile={live.summary_live_profile}")
+        lines.append('  live_profile_origin="legacy_live_profile"')
+        lines.append('  backtest_profile_origin="research_reference_only"')
+        lines.append("  migration_recommended=false")
+        lines.append("  auto_sync_allowed=false")
+        if match.status == "EXACT_PROFILE":
+            lines.append("  Bewertung: Exakter Match zwischen Legacy-Live und Research-Referenz")
+        else:
+            lines.append("  Bewertung: Legacy-Live-Profil laeuft bewusst unabhaengig vom aktuellen Backtest-Research")
         lines.append("")
 
     total = len(live_profiles)
     lines.append("Summary")
-    lines.append(f"Matched coins: {matched_count}/{total}")
-    lines.append(f"Exact param matches: {exact_count}/{total}")
-    if missing_symbols:
-        lines.append(f"Missing matches: {', '.join(missing_symbols)}")
-    else:
-        lines.append("Missing matches: none")
+    lines.append(f"exact_profile_matches: {exact_count}/{total}")
+    lines.append(
+        "same_symbol_strategy_interval_but_different_profile: "
+        f"{same_interval_diff_profile_count}/{total}"
+    )
+    lines.append(
+        "same_symbol_strategy_different_interval: "
+        f"{same_strategy_diff_interval_count}/{total}"
+    )
+    lines.append(f"no_comparable_backtest_row: {no_comparable_count}/{total}")
+    lines.append("auto_sync_allowed = false")
+    lines.append("live_registry_modified = false")
 
     report_text = "\n".join(lines).rstrip() + "\n"
     output_path.write_text(report_text, encoding="utf-8")

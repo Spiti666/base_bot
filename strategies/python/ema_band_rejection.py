@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from config import settings
 
 DEFAULT_EMA_FAST = 5
 DEFAULT_EMA_MID = 10
@@ -28,6 +29,20 @@ DEFAULT_USE_ATR_STOP_BUFFER = False
 DEFAULT_ATR_LENGTH = 14
 DEFAULT_ATR_STOP_BUFFER_MULT = 0.5
 DEFAULT_SIGNAL_COOLDOWN_BARS = 0
+DEFAULT_TREND_PERSISTENCE_BARS = 1
+DEFAULT_MAX_PULLBACK_BARS = 0
+DEFAULT_ENTRY_OFFSET_PCT = 0.0
+DEFAULT_USE_LATE_ENTRY_GUARD = False
+DEFAULT_LATE_ENTRY_MAX_MOVE_1_BAR_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_MOVE_2_BARS_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_MOVE_3_BARS_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_DISTANCE_REF_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_DISTANCE_FAST_REF_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_DISTANCE_MID_REF_PCT = 0.0
+DEFAULT_LATE_ENTRY_MAX_ATR_MULT = 0.0
+DEFAULT_USE_PULLBACK_REENTRY = False
+DEFAULT_PULLBACK_REENTRY_MIN_TOUCH = 0.0
+DEFAULT_PULLBACK_REENTRY_RECONFIRM_REQUIRED = False
 
 
 def _ensure_dataframe(candles_dataframe: Any) -> pd.DataFrame:
@@ -68,6 +83,16 @@ def _calculate_atr(
     return true_range.rolling(window=resolved_length, min_periods=1).mean()
 
 
+def _safe_pct_distance(
+    price_series: pd.Series,
+    reference_series: pd.Series,
+) -> pd.Series:
+    return (
+        (price_series - reference_series)
+        / reference_series.abs().replace(0.0, np.nan)
+    ) * 100.0
+
+
 def build_ema_band_rejection_signal_frame(
     candles_dataframe: Any,
     *,
@@ -93,6 +118,20 @@ def build_ema_band_rejection_signal_frame(
     atr_length: int = DEFAULT_ATR_LENGTH,
     atr_stop_buffer_mult: float = DEFAULT_ATR_STOP_BUFFER_MULT,
     signal_cooldown_bars: int = DEFAULT_SIGNAL_COOLDOWN_BARS,
+    trend_persistence_bars: int = DEFAULT_TREND_PERSISTENCE_BARS,
+    max_pullback_bars: int = DEFAULT_MAX_PULLBACK_BARS,
+    entry_offset_pct: float = DEFAULT_ENTRY_OFFSET_PCT,
+    use_late_entry_guard: bool = DEFAULT_USE_LATE_ENTRY_GUARD,
+    late_entry_max_move_1_bar_pct: float = DEFAULT_LATE_ENTRY_MAX_MOVE_1_BAR_PCT,
+    late_entry_max_move_2_bars_pct: float = DEFAULT_LATE_ENTRY_MAX_MOVE_2_BARS_PCT,
+    late_entry_max_move_3_bars_pct: float = DEFAULT_LATE_ENTRY_MAX_MOVE_3_BARS_PCT,
+    late_entry_max_distance_ref_pct: float = DEFAULT_LATE_ENTRY_MAX_DISTANCE_REF_PCT,
+    late_entry_max_distance_fast_ref_pct: float = DEFAULT_LATE_ENTRY_MAX_DISTANCE_FAST_REF_PCT,
+    late_entry_max_distance_mid_ref_pct: float = DEFAULT_LATE_ENTRY_MAX_DISTANCE_MID_REF_PCT,
+    late_entry_max_atr_mult: float = DEFAULT_LATE_ENTRY_MAX_ATR_MULT,
+    use_pullback_reentry: bool = DEFAULT_USE_PULLBACK_REENTRY,
+    pullback_reentry_min_touch: float = DEFAULT_PULLBACK_REENTRY_MIN_TOUCH,
+    pullback_reentry_reconfirm_required: bool = DEFAULT_PULLBACK_REENTRY_RECONFIRM_REQUIRED,
 ) -> pd.DataFrame:
     working_df = _ensure_dataframe(candles_dataframe)
     required_columns = {"open", "high", "low", "close", "volume"}
@@ -120,6 +159,26 @@ def build_ema_band_rejection_signal_frame(
     resolved_atr_length = max(2, int(atr_length))
     resolved_atr_mult = max(0.0, float(atr_stop_buffer_mult))
     resolved_signal_cooldown_bars = max(0, int(signal_cooldown_bars))
+    resolved_trend_persistence_bars = max(1, int(trend_persistence_bars))
+    resolved_max_pullback_bars = max(0, int(max_pullback_bars))
+    resolved_entry_offset_pct = max(0.0, float(entry_offset_pct))
+    resolved_use_late_entry_guard = bool(use_late_entry_guard)
+    resolved_late_entry_max_move_1_bar_pct = max(0.0, float(late_entry_max_move_1_bar_pct))
+    resolved_late_entry_max_move_2_bars_pct = max(0.0, float(late_entry_max_move_2_bars_pct))
+    resolved_late_entry_max_move_3_bars_pct = max(0.0, float(late_entry_max_move_3_bars_pct))
+    resolved_late_entry_max_distance_ref_pct = max(0.0, float(late_entry_max_distance_ref_pct))
+    resolved_late_entry_max_distance_fast_ref_pct = max(
+        0.0,
+        float(late_entry_max_distance_fast_ref_pct),
+    )
+    resolved_late_entry_max_distance_mid_ref_pct = max(
+        0.0,
+        float(late_entry_max_distance_mid_ref_pct),
+    )
+    resolved_late_entry_max_atr_mult = max(0.0, float(late_entry_max_atr_mult))
+    resolved_use_pullback_reentry = bool(use_pullback_reentry)
+    resolved_pullback_reentry_min_touch = max(0.0, float(pullback_reentry_min_touch))
+    resolved_pullback_reentry_reconfirm_required = bool(pullback_reentry_reconfirm_required)
     use_rsi = bool(use_rsi_filter)
     use_volume = bool(use_volume_filter)
     use_atr = bool(use_atr_stop_buffer)
@@ -129,6 +188,13 @@ def build_ema_band_rejection_signal_frame(
     low_series = pd.to_numeric(working_df["low"], errors="coerce")
     close_series = pd.to_numeric(working_df["close"], errors="coerce")
     volume_series = pd.to_numeric(working_df["volume"], errors="coerce")
+    # Compute ATR once early because both late-entry diagnostics and stop buffers depend on it.
+    # Keep a safe fallback so signal generation does not fail hard on unexpected ATR edge cases.
+    atr_series = pd.Series(np.nan, index=working_df.index, dtype="float64")
+    try:
+        atr_series = _calculate_atr(high_series, low_series, close_series, resolved_atr_length)
+    except Exception:
+        pass
 
     ema_fast_series = close_series.ewm(span=resolved_ema_fast, adjust=False).mean()
     ema_mid_series = close_series.ewm(span=resolved_ema_mid, adjust=False).mean()
@@ -191,6 +257,49 @@ def build_ema_band_rejection_signal_frame(
         & ema_slow_slope_pct.le(-resolved_min_slow_slope_pct)
         & spread_ok.fillna(False)
     )
+    if resolved_trend_persistence_bars > 1:
+        trend_long_confirmed = (
+            trend_long.fillna(False)
+            .rolling(
+                window=resolved_trend_persistence_bars,
+                min_periods=resolved_trend_persistence_bars,
+            )
+            .sum()
+            .ge(float(resolved_trend_persistence_bars))
+            .fillna(False)
+        )
+        trend_short_confirmed = (
+            trend_short.fillna(False)
+            .rolling(
+                window=resolved_trend_persistence_bars,
+                min_periods=resolved_trend_persistence_bars,
+            )
+            .sum()
+            .ge(float(resolved_trend_persistence_bars))
+            .fillna(False)
+        )
+    else:
+        trend_long_confirmed = trend_long.fillna(False)
+        trend_short_confirmed = trend_short.fillna(False)
+    if resolved_max_pullback_bars > 0:
+        pullback_window = resolved_max_pullback_bars + 1
+        pullback_long_recent = (
+            pullback_long.fillna(False)
+            .rolling(window=pullback_window, min_periods=1)
+            .max()
+            .fillna(0)
+            .astype(bool)
+        )
+        pullback_short_recent = (
+            pullback_short.fillna(False)
+            .rolling(window=pullback_window, min_periods=1)
+            .max()
+            .fillna(0)
+            .astype(bool)
+        )
+    else:
+        pullback_long_recent = pullback_long.fillna(False)
+        pullback_short_recent = pullback_short.fillna(False)
 
     if use_rsi:
         rsi_series = _calculate_rsi(close_series, resolved_rsi_length)
@@ -213,14 +322,214 @@ def build_ema_band_rejection_signal_frame(
         volume_ma = volume_series.rolling(window=resolved_volume_ma_length, min_periods=1).mean()
         volume_ok = pd.Series(True, index=working_df.index, dtype="bool")
 
-    setup_long = trend_long & pullback_long & rejection_long & long_rsi_ok & volume_ok
-    setup_short = trend_short & pullback_short & rejection_short & short_rsi_ok & volume_ok
+    setup_long = (
+        trend_long_confirmed
+        & pullback_long_recent
+        & rejection_long
+        & long_rsi_ok
+        & volume_ok
+    )
+    setup_short = (
+        trend_short_confirmed
+        & pullback_short_recent
+        & rejection_short
+        & short_rsi_ok
+        & volume_ok
+    )
 
     long_entry = setup_long.shift(1, fill_value=False).astype(bool)
     short_entry = setup_short.shift(1, fill_value=False).astype(bool)
     conflicting_entries = long_entry & short_entry
     long_entry = long_entry & ~conflicting_entries
     short_entry = short_entry & ~conflicting_entries
+    if resolved_entry_offset_pct > 0.0:
+        long_entry_offset_threshold = high_series.shift(1) * (
+            1.0 + (resolved_entry_offset_pct / 100.0)
+        )
+        short_entry_offset_threshold = low_series.shift(1) * (
+            1.0 - (resolved_entry_offset_pct / 100.0)
+        )
+        long_entry = long_entry & close_series.ge(long_entry_offset_threshold).fillna(False)
+        short_entry = short_entry & close_series.le(short_entry_offset_threshold).fillna(False)
+        conflicting_entries = long_entry & short_entry
+        long_entry = long_entry & ~conflicting_entries
+        short_entry = short_entry & ~conflicting_entries
+
+    move_last_1_bar_pct = (
+        (close_series - close_series.shift(1))
+        / close_series.shift(1).abs().replace(0.0, np.nan)
+    ) * 100.0
+    move_last_2_bars_pct = (
+        (close_series - close_series.shift(2))
+        / close_series.shift(2).abs().replace(0.0, np.nan)
+    ) * 100.0
+    move_last_3_bars_pct = (
+        (close_series - close_series.shift(3))
+        / close_series.shift(3).abs().replace(0.0, np.nan)
+    ) * 100.0
+    distance_fast_ref_pct = _safe_pct_distance(close_series, ema_fast_series)
+    distance_mid_ref_pct = _safe_pct_distance(close_series, ema_mid_series)
+    distance_ref_long_pct = np.maximum(distance_fast_ref_pct, distance_mid_ref_pct)
+    distance_ref_short_pct = np.maximum(-distance_fast_ref_pct, -distance_mid_ref_pct)
+    atr_safe = atr_series.replace(0.0, np.nan)
+    long_extension_price = np.maximum(close_series - ema_fast_series, close_series - ema_mid_series)
+    short_extension_price = np.maximum(ema_fast_series - close_series, ema_mid_series - close_series)
+    atr_extension_long_mult = long_extension_price / atr_safe
+    atr_extension_short_mult = short_extension_price / atr_safe
+    distance_to_reference_pct = pd.Series(np.nan, index=working_df.index, dtype="float64")
+    distance_to_reference_pct = distance_to_reference_pct.mask(
+        long_entry,
+        pd.to_numeric(distance_ref_long_pct, errors="coerce"),
+    )
+    distance_to_reference_pct = distance_to_reference_pct.mask(
+        short_entry,
+        pd.to_numeric(distance_ref_short_pct, errors="coerce"),
+    )
+    atr_extension_mult = pd.Series(np.nan, index=working_df.index, dtype="float64")
+    atr_extension_mult = atr_extension_mult.mask(
+        long_entry,
+        pd.to_numeric(atr_extension_long_mult, errors="coerce"),
+    )
+    atr_extension_mult = atr_extension_mult.mask(
+        short_entry,
+        pd.to_numeric(atr_extension_short_mult, errors="coerce"),
+    )
+
+    late_entry_guard_blocked = pd.Series(False, index=working_df.index, dtype="bool")
+    late_entry_guard_block_reason = pd.Series("", index=working_df.index, dtype="object")
+    if resolved_use_late_entry_guard or resolved_use_pullback_reentry:
+        long_entry_values = long_entry.to_numpy(dtype=bool, copy=False)
+        short_entry_values = short_entry.to_numpy(dtype=bool, copy=False)
+        move_1_values = pd.to_numeric(move_last_1_bar_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        move_2_values = pd.to_numeric(move_last_2_bars_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        move_3_values = pd.to_numeric(move_last_3_bars_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        distance_fast_values = pd.to_numeric(distance_fast_ref_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        distance_mid_values = pd.to_numeric(distance_mid_ref_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        distance_long_values = pd.to_numeric(distance_ref_long_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        distance_short_values = pd.to_numeric(distance_ref_short_pct, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        atr_long_values = pd.to_numeric(atr_extension_long_mult, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        atr_short_values = pd.to_numeric(atr_extension_short_mult, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        low_values = pd.to_numeric(low_series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        high_values = pd.to_numeric(high_series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        ema_mid_values = pd.to_numeric(ema_mid_series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        bullish_values = candle_bullish.fillna(False).to_numpy(dtype=bool, copy=False)
+        bearish_values = candle_bearish.fillna(False).to_numpy(dtype=bool, copy=False)
+        close_values = pd.to_numeric(close_series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+
+        blocked_values = np.zeros(len(working_df), dtype=bool)
+        reason_values = np.array([""] * len(working_df), dtype=object)
+        touch_tolerance = resolved_pullback_reentry_min_touch / 100.0
+        for index in range(len(working_df)):
+            is_long = bool(long_entry_values[index])
+            is_short = bool(short_entry_values[index])
+            if not is_long and not is_short:
+                continue
+            direction = 1 if is_long else -1
+            reason = ""
+            directional_move_1 = float(move_1_values[index]) if np.isfinite(move_1_values[index]) else 0.0
+            directional_move_2 = float(move_2_values[index]) if np.isfinite(move_2_values[index]) else 0.0
+            directional_move_3 = float(move_3_values[index]) if np.isfinite(move_3_values[index]) else 0.0
+            directional_fast_distance = (
+                float(distance_fast_values[index]) if np.isfinite(distance_fast_values[index]) else 0.0
+            )
+            directional_mid_distance = (
+                float(distance_mid_values[index]) if np.isfinite(distance_mid_values[index]) else 0.0
+            )
+            directional_distance_ref = (
+                float(distance_long_values[index]) if is_long else float(distance_short_values[index])
+            )
+            directional_atr_extension = (
+                float(atr_long_values[index]) if is_long else float(atr_short_values[index])
+            )
+            if direction < 0:
+                directional_move_1 = -directional_move_1
+                directional_move_2 = -directional_move_2
+                directional_move_3 = -directional_move_3
+                directional_fast_distance = -directional_fast_distance
+                directional_mid_distance = -directional_mid_distance
+            if not np.isfinite(directional_distance_ref):
+                directional_distance_ref = 0.0
+            if not np.isfinite(directional_atr_extension):
+                directional_atr_extension = 0.0
+            if resolved_use_late_entry_guard:
+                if (
+                    resolved_late_entry_max_move_3_bars_pct > 0.0
+                    and directional_move_3 > resolved_late_entry_max_move_3_bars_pct
+                ):
+                    reason = "overextended_last_3_bars"
+                elif (
+                    resolved_late_entry_max_move_2_bars_pct > 0.0
+                    and directional_move_2 > resolved_late_entry_max_move_2_bars_pct
+                ):
+                    reason = "overextended_last_2_bars"
+                elif (
+                    resolved_late_entry_max_move_1_bar_pct > 0.0
+                    and directional_move_1 > resolved_late_entry_max_move_1_bar_pct
+                ):
+                    reason = "overextended_last_1_bar"
+                elif (
+                    resolved_late_entry_max_distance_fast_ref_pct > 0.0
+                    and directional_fast_distance > resolved_late_entry_max_distance_fast_ref_pct
+                ):
+                    reason = "overextended_from_reference"
+                elif (
+                    resolved_late_entry_max_distance_mid_ref_pct > 0.0
+                    and directional_mid_distance > resolved_late_entry_max_distance_mid_ref_pct
+                ):
+                    reason = "overextended_from_reference"
+                elif (
+                    resolved_late_entry_max_distance_ref_pct > 0.0
+                    and directional_distance_ref > resolved_late_entry_max_distance_ref_pct
+                ):
+                    reason = "overextended_from_reference"
+                elif (
+                    resolved_late_entry_max_atr_mult > 0.0
+                    and directional_atr_extension > resolved_late_entry_max_atr_mult
+                ):
+                    reason = "late_entry_guard_long" if is_long else "late_entry_guard_short"
+            if not reason and resolved_use_pullback_reentry:
+                previous_index = max(0, index - 1)
+                previous_mid = ema_mid_values[previous_index]
+                long_touch_ready = False
+                short_touch_ready = False
+                if np.isfinite(previous_mid) and previous_mid > 0.0:
+                    long_touch_ready = bool(
+                        np.isfinite(low_values[previous_index])
+                        and low_values[previous_index] <= previous_mid * (1.0 + touch_tolerance)
+                    )
+                    short_touch_ready = bool(
+                        np.isfinite(high_values[previous_index])
+                        and high_values[previous_index] >= previous_mid * (1.0 - touch_tolerance)
+                    )
+                touch_ready = long_touch_ready if is_long else short_touch_ready
+                if not touch_ready:
+                    reason = "pullback_reentry_not_ready"
+                elif resolved_pullback_reentry_reconfirm_required:
+                    if is_long:
+                        reconfirm_ready = bool(
+                            bullish_values[index]
+                            and np.isfinite(close_values[index])
+                            and np.isfinite(ema_mid_values[index])
+                            and close_values[index] >= ema_mid_values[index]
+                        )
+                    else:
+                        reconfirm_ready = bool(
+                            bearish_values[index]
+                            and np.isfinite(close_values[index])
+                            and np.isfinite(ema_mid_values[index])
+                            and close_values[index] <= ema_mid_values[index]
+                        )
+                    if not reconfirm_ready:
+                        reason = "pullback_reentry_not_ready"
+            if reason:
+                blocked_values[index] = True
+                reason_values[index] = reason
+
+        late_entry_guard_blocked = pd.Series(blocked_values, index=working_df.index, dtype="bool")
+        late_entry_guard_block_reason = pd.Series(reason_values, index=working_df.index, dtype="object")
+        long_entry = long_entry & ~late_entry_guard_blocked
+        short_entry = short_entry & ~late_entry_guard_blocked
+
     cooldown_blocked_signals = 0
     if resolved_signal_cooldown_bars > 0:
         long_values = long_entry.to_numpy(dtype=bool, copy=False)
@@ -245,7 +554,6 @@ def build_ema_band_rejection_signal_frame(
         long_entry = pd.Series(filtered_long, index=working_df.index, dtype="bool")
         short_entry = pd.Series(filtered_short, index=working_df.index, dtype="bool")
 
-    atr_series = _calculate_atr(high_series, low_series, close_series, resolved_atr_length)
     atr_buffer = (
         atr_series.shift(1) * resolved_atr_mult
         if use_atr
@@ -300,11 +608,54 @@ def build_ema_band_rejection_signal_frame(
     working_df.loc[:, "ema_band_signal_direction"] = signal_direction
     working_df.loc[:, "ema_band_signal_cooldown_bars"] = float(resolved_signal_cooldown_bars)
     working_df.loc[:, "ema_band_cooldown_blocked_signals"] = float(cooldown_blocked_signals)
+    working_df.loc[:, "ema_band_move_last_1_bar_pct"] = move_last_1_bar_pct
+    working_df.loc[:, "ema_band_move_last_2_bars_pct"] = move_last_2_bars_pct
+    working_df.loc[:, "ema_band_move_last_3_bars_pct"] = move_last_3_bars_pct
+    working_df.loc[:, "ema_band_distance_fast_ref_pct"] = distance_fast_ref_pct
+    working_df.loc[:, "ema_band_distance_mid_ref_pct"] = distance_mid_ref_pct
+    working_df.loc[:, "ema_band_distance_to_reference_pct"] = distance_to_reference_pct
+    working_df.loc[:, "ema_band_atr_extension_mult"] = atr_extension_mult
+    working_df.loc[:, "ema_band_late_entry_guard_enabled"] = float(resolved_use_late_entry_guard)
+    working_df.loc[:, "ema_band_late_entry_guard_blocked"] = late_entry_guard_blocked.fillna(False)
+    working_df.loc[:, "ema_band_late_entry_guard_block_reason"] = late_entry_guard_block_reason
+    working_df.loc[:, "ema_band_late_entry_guard_blocked_signals"] = float(
+        late_entry_guard_blocked.fillna(False).sum()
+    )
+    working_df.loc[:, "ema_band_pullback_reentry_enabled"] = float(resolved_use_pullback_reentry)
     return working_df
 
 
 def run_python_ema_band_rejection(candles_dataframe: Any) -> int:
-    working_df = build_ema_band_rejection_signal_frame(candles_dataframe)
+    working_df = build_ema_band_rejection_signal_frame(
+        candles_dataframe,
+        use_late_entry_guard=bool(getattr(settings.strategy, "use_late_entry_guard", False)),
+        late_entry_max_move_1_bar_pct=float(
+            getattr(settings.strategy, "late_entry_max_move_1_bar_pct", 0.0)
+        ),
+        late_entry_max_move_2_bars_pct=float(
+            getattr(settings.strategy, "late_entry_max_move_2_bars_pct", 0.0)
+        ),
+        late_entry_max_move_3_bars_pct=float(
+            getattr(settings.strategy, "late_entry_max_move_3_bars_pct", 0.0)
+        ),
+        late_entry_max_distance_ref_pct=float(
+            getattr(settings.strategy, "late_entry_max_distance_ref_pct", 0.0)
+        ),
+        late_entry_max_distance_fast_ref_pct=float(
+            getattr(settings.strategy, "late_entry_max_distance_fast_ref_pct", 0.0)
+        ),
+        late_entry_max_distance_mid_ref_pct=float(
+            getattr(settings.strategy, "late_entry_max_distance_mid_ref_pct", 0.0)
+        ),
+        late_entry_max_atr_mult=float(getattr(settings.strategy, "late_entry_max_atr_mult", 0.0)),
+        use_pullback_reentry=bool(getattr(settings.strategy, "use_pullback_reentry", False)),
+        pullback_reentry_min_touch=float(
+            getattr(settings.strategy, "pullback_reentry_min_touch", 0.0)
+        ),
+        pullback_reentry_reconfirm_required=bool(
+            getattr(settings.strategy, "pullback_reentry_reconfirm_required", False)
+        ),
+    )
     if len(working_df) < 3:
         return 0
     latest = working_df.iloc[-1]

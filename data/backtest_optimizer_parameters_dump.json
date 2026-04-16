@@ -1,0 +1,827 @@
+{
+  "generated_at": "2026-04-06T21:14:46.873741",
+  "source": "main_engine optimizer grid constants",
+  "max_strategy_family_grid_profiles": 64000,
+  "max_optimization_grid_profiles": 600000,
+  "research_1m_grid_profile_tag": "1m_research_v1",
+  "standard_grids": {
+    "frama_cross": {
+      "frama_fast_period": [
+        8,
+        13,
+        21
+      ],
+      "frama_slow_period": [
+        40,
+        60,
+        100,
+        200,
+        400
+      ],
+      "volume_multiplier": [
+        1.0,
+        1.5,
+        2.0,
+        2.5
+      ],
+      "stop_loss_pct": [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0
+      ],
+      "take_profit_pct": [
+        1.5,
+        3.0,
+        5.0,
+        7.5,
+        10.0,
+        15.0
+      ],
+      "trailing_activation_pct": [
+        3.0,
+        5.0,
+        7.5,
+        10.0
+      ],
+      "trailing_distance_pct": [
+        0.1,
+        0.3,
+        0.5
+      ],
+      "breakeven_activation_pct": [
+        2.0,
+        3.5,
+        5.0
+      ],
+      "breakeven_buffer_pct": [
+        0.2
+      ]
+    },
+    "dual_thrust": {
+      "dual_thrust_k1": [
+        0.2,
+        0.3,
+        0.5,
+        0.8
+      ],
+      "dual_thrust_k2": [
+        0.1,
+        0.2,
+        0.3,
+        0.5
+      ],
+      "dual_thrust_period": [
+        20,
+        55,
+        100,
+        200,
+        400,
+        610
+      ],
+      "stop_loss_pct": [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0
+      ],
+      "take_profit_pct": [
+        1.5,
+        3.0,
+        5.0,
+        7.5,
+        10.0,
+        15.0
+      ],
+      "trailing_activation_pct": [
+        3.0,
+        5.0,
+        7.5,
+        10.0
+      ],
+      "trailing_distance_pct": [
+        0.1,
+        0.3,
+        0.5
+      ],
+      "breakeven_activation_pct": [
+        2.0,
+        3.5,
+        5.0
+      ],
+      "breakeven_buffer_pct": [
+        0.2
+      ],
+      "tight_trailing_activation_pct": [
+        8.0
+      ],
+      "tight_trailing_distance_pct": [
+        0.3
+      ]
+    },
+    "ema_cross_volume": {
+      "ema_fast_period": [
+        9,
+        13,
+        21,
+        55
+      ],
+      "ema_slow_period": [
+        100,
+        200,
+        300,
+        600
+      ],
+      "volume_multiplier": [
+        2.25,
+        3.0,
+        4.0
+      ],
+      "stop_loss_pct": [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0
+      ],
+      "take_profit_pct": [
+        1.5,
+        3.0,
+        5.0,
+        7.5,
+        10.0,
+        15.0
+      ],
+      "trailing_activation_pct": [
+        3.0,
+        5.0,
+        7.5,
+        10.0
+      ],
+      "trailing_distance_pct": [
+        0.1,
+        0.3,
+        0.5
+      ],
+      "breakeven_activation_pct": [
+        2.0,
+        3.5,
+        5.0
+      ],
+      "breakeven_buffer_pct": [
+        0.2
+      ],
+      "tight_trailing_activation_pct": [
+        8.0
+      ],
+      "tight_trailing_distance_pct": [
+        0.3
+      ]
+    },
+    "ema_band_rejection": {
+      "ema_fast": [
+        5
+      ],
+      "ema_mid": [
+        10
+      ],
+      "ema_slow": [
+        20
+      ],
+      "slope_lookback": [
+        3,
+        5
+      ],
+      "min_ema_spread_pct": [
+        0.05,
+        0.08
+      ],
+      "min_slow_slope_pct": [
+        0.0,
+        0.02
+      ],
+      "pullback_requires_outer_band_touch": [
+        0,
+        1
+      ],
+      "use_rejection_quality_filter": [
+        0,
+        1
+      ],
+      "rejection_wick_min_ratio": [
+        0.35
+      ],
+      "rejection_body_min_ratio": [
+        0.2
+      ],
+      "use_rsi_filter": [
+        0,
+        1
+      ],
+      "rsi_length": [
+        14
+      ],
+      "rsi_midline": [
+        50.0
+      ],
+      "use_rsi_cross_filter": [
+        0,
+        1
+      ],
+      "rsi_midline_margin": [
+        0.0,
+        1.0
+      ],
+      "use_volume_filter": [
+        0,
+        1
+      ],
+      "volume_ma_length": [
+        20
+      ],
+      "volume_multiplier": [
+        1.0,
+        1.25
+      ],
+      "use_atr_stop_buffer": [
+        0,
+        1
+      ],
+      "atr_length": [
+        14
+      ],
+      "atr_stop_buffer_mult": [
+        0.5
+      ],
+      "signal_cooldown_bars": [
+        0,
+        3
+      ],
+      "stop_loss_pct": [
+        1.0,
+        1.5,
+        2.0
+      ],
+      "take_profit_pct": [
+        2.0,
+        3.0,
+        5.0
+      ],
+      "trailing_activation_pct": [
+        2.0,
+        3.0,
+        5.0
+      ],
+      "trailing_distance_pct": [
+        0.1,
+        0.3
+      ],
+      "breakeven_activation_pct": [
+        1.5,
+        2.0,
+        2.5
+      ],
+      "breakeven_buffer_pct": [
+        0.2
+      ]
+    }
+  },
+  "research_1m_grids": {
+    "frama_cross": {
+      "frama_fast_period": [
+        3,
+        5,
+        7,
+        9,
+        11
+      ],
+      "frama_slow_period": [
+        18,
+        24,
+        36,
+        48,
+        72,
+        96,
+        144
+      ],
+      "volume_multiplier": [
+        1.0,
+        1.15,
+        1.35,
+        1.6,
+        2.0
+      ],
+      "min_frama_gap_pct": [
+        0.0,
+        0.01,
+        0.02,
+        0.03
+      ],
+      "min_frama_slope_pct": [
+        0.0,
+        0.01,
+        0.02
+      ],
+      "post_cross_confirmation_bars": [
+        0,
+        1,
+        2
+      ],
+      "stop_loss_pct": [
+        0.4,
+        0.6,
+        0.8,
+        1.0,
+        1.2
+      ],
+      "take_profit_pct": [
+        0.8,
+        1.2,
+        1.8,
+        2.4,
+        3.2
+      ],
+      "trailing_activation_pct": [
+        0.6,
+        0.9,
+        1.2,
+        1.8
+      ],
+      "trailing_distance_pct": [
+        0.05,
+        0.08,
+        0.12,
+        0.2
+      ],
+      "breakeven_activation_pct": [
+        0.4,
+        0.6,
+        0.9,
+        1.2
+      ],
+      "breakeven_buffer_pct": [
+        0.1,
+        0.15,
+        0.2
+      ]
+    },
+    "ema_cross_volume": {
+      "ema_fast_period": [
+        3,
+        5,
+        8,
+        9,
+        13,
+        21
+      ],
+      "ema_slow_period": [
+        18,
+        34,
+        55,
+        89,
+        144,
+        233,
+        377
+      ],
+      "volume_multiplier": [
+        1.0,
+        1.15,
+        1.35,
+        1.6,
+        2.0,
+        2.5,
+        3.0
+      ],
+      "min_ema_gap_pct": [
+        0.0,
+        0.01,
+        0.02,
+        0.03
+      ],
+      "cross_confirmation_bars": [
+        0,
+        1,
+        2
+      ],
+      "max_price_extension_pct": [
+        0.1,
+        0.2,
+        0.35,
+        0.5
+      ],
+      "stop_loss_pct": [
+        0.4,
+        0.6,
+        0.8,
+        1.0
+      ],
+      "take_profit_pct": [
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "trailing_activation_pct": [
+        0.8,
+        1.2,
+        1.8,
+        2.5
+      ],
+      "trailing_distance_pct": [
+        0.08,
+        0.12,
+        0.2,
+        0.3
+      ],
+      "tight_trailing_activation_pct": [
+        2.0,
+        3.0,
+        4.0
+      ],
+      "tight_trailing_distance_pct": [
+        0.1,
+        0.2,
+        0.3
+      ],
+      "breakeven_activation_pct": [
+        0.4,
+        0.6,
+        0.9,
+        1.2
+      ],
+      "breakeven_buffer_pct": [
+        0.1,
+        0.15,
+        0.2
+      ]
+    },
+    "dual_thrust": {
+      "dual_thrust_period": [
+        8,
+        12,
+        16,
+        24,
+        36,
+        48,
+        72,
+        120
+      ],
+      "dual_thrust_k1": [
+        0.15,
+        0.25,
+        0.35,
+        0.5,
+        0.7,
+        0.9
+      ],
+      "dual_thrust_k2": [
+        0.15,
+        0.25,
+        0.35,
+        0.5,
+        0.7,
+        0.9
+      ],
+      "breakout_buffer_pct": [
+        0.0,
+        0.03,
+        0.05,
+        0.08
+      ],
+      "min_range_pct": [
+        0.05,
+        0.1,
+        0.15,
+        0.2
+      ],
+      "cooldown_bars_after_exit": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "stop_loss_pct": [
+        0.4,
+        0.6,
+        0.8,
+        1.0
+      ],
+      "take_profit_pct": [
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "trailing_activation_pct": [
+        0.8,
+        1.2,
+        1.8,
+        2.5
+      ],
+      "trailing_distance_pct": [
+        0.08,
+        0.12,
+        0.2,
+        0.3
+      ],
+      "tight_trailing_activation_pct": [
+        2.0,
+        3.0,
+        4.0
+      ],
+      "tight_trailing_distance_pct": [
+        0.1,
+        0.2,
+        0.3
+      ],
+      "breakeven_activation_pct": [
+        0.4,
+        0.6,
+        0.9,
+        1.2
+      ],
+      "breakeven_buffer_pct": [
+        0.1,
+        0.15,
+        0.2
+      ]
+    },
+    "ema_band_rejection": {
+      "ema_fast": [
+        5
+      ],
+      "ema_mid": [
+        10
+      ],
+      "ema_slow": [
+        20
+      ],
+      "slope_lookback": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        8
+      ],
+      "min_ema_spread_pct": [
+        0.02,
+        0.03,
+        0.05,
+        0.08,
+        0.12
+      ],
+      "min_slow_slope_pct": [
+        0.0,
+        0.01,
+        0.02,
+        0.03
+      ],
+      "pullback_requires_outer_band_touch": [
+        0,
+        1
+      ],
+      "use_rejection_quality_filter": [
+        0,
+        1
+      ],
+      "rejection_wick_min_ratio": [
+        0.25,
+        0.35,
+        0.45,
+        0.55
+      ],
+      "rejection_body_min_ratio": [
+        0.15,
+        0.2,
+        0.3
+      ],
+      "use_rsi_filter": [
+        0,
+        1
+      ],
+      "rsi_length": [
+        14
+      ],
+      "rsi_midline": [
+        50.0
+      ],
+      "use_rsi_cross_filter": [
+        0,
+        1
+      ],
+      "rsi_midline_margin": [
+        0.0,
+        0.5,
+        1.0,
+        2.0
+      ],
+      "use_volume_filter": [
+        0,
+        1
+      ],
+      "volume_ma_length": [
+        20
+      ],
+      "volume_multiplier": [
+        1.0,
+        1.15,
+        1.25,
+        1.5,
+        1.75
+      ],
+      "use_atr_stop_buffer": [
+        0,
+        1
+      ],
+      "atr_length": [
+        14
+      ],
+      "atr_stop_buffer_mult": [
+        0.5
+      ],
+      "signal_cooldown_bars": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "trend_persistence_bars": [
+        1,
+        2,
+        3
+      ],
+      "max_pullback_bars": [
+        2,
+        3,
+        4,
+        6
+      ],
+      "entry_offset_pct": [
+        0.0,
+        0.02,
+        0.05
+      ],
+      "stop_loss_pct": [
+        0.4,
+        0.6,
+        0.8,
+        1.0,
+        1.2,
+        1.5
+      ],
+      "take_profit_pct": [
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "trailing_activation_pct": [
+        0.8,
+        1.2,
+        1.8,
+        2.5
+      ],
+      "trailing_distance_pct": [
+        0.05,
+        0.08,
+        0.12,
+        0.2
+      ],
+      "breakeven_activation_pct": [
+        0.4,
+        0.6,
+        0.9,
+        1.2
+      ],
+      "breakeven_buffer_pct": [
+        0.1,
+        0.15,
+        0.2
+      ]
+    }
+  },
+  "trim_order_standard": {
+    "frama_cross": [
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct",
+      "volume_multiplier"
+    ],
+    "dual_thrust": [
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct"
+    ],
+    "ema_cross_volume": [
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct",
+      "volume_multiplier"
+    ],
+    "ema_band_rejection": [
+      "signal_cooldown_bars",
+      "min_slow_slope_pct",
+      "pullback_requires_outer_band_touch",
+      "use_rejection_quality_filter",
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct",
+      "min_ema_spread_pct",
+      "slope_lookback"
+    ]
+  },
+  "trim_order_research_1m": {
+    "frama_cross": [
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct",
+      "breakeven_activation_pct",
+      "breakeven_buffer_pct",
+      "volume_multiplier",
+      "post_cross_confirmation_bars",
+      "min_frama_slope_pct",
+      "min_frama_gap_pct"
+    ],
+    "ema_cross_volume": [
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct",
+      "breakeven_activation_pct",
+      "breakeven_buffer_pct",
+      "tight_trailing_distance_pct",
+      "tight_trailing_activation_pct",
+      "volume_multiplier",
+      "cross_confirmation_bars",
+      "min_ema_gap_pct",
+      "max_price_extension_pct"
+    ],
+    "dual_thrust": [
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct",
+      "breakeven_activation_pct",
+      "breakeven_buffer_pct",
+      "tight_trailing_distance_pct",
+      "tight_trailing_activation_pct",
+      "cooldown_bars_after_exit",
+      "min_range_pct",
+      "breakout_buffer_pct"
+    ],
+    "ema_band_rejection": [
+      "trailing_distance_pct",
+      "trailing_activation_pct",
+      "take_profit_pct",
+      "stop_loss_pct",
+      "breakeven_activation_pct",
+      "breakeven_buffer_pct",
+      "use_rsi_cross_filter",
+      "use_rsi_filter",
+      "use_volume_filter",
+      "use_atr_stop_buffer",
+      "use_rejection_quality_filter",
+      "pullback_requires_outer_band_touch",
+      "signal_cooldown_bars",
+      "rsi_midline_margin",
+      "rejection_body_min_ratio",
+      "rejection_wick_min_ratio",
+      "volume_multiplier",
+      "slope_lookback",
+      "min_slow_slope_pct",
+      "min_ema_spread_pct",
+      "entry_offset_pct",
+      "max_pullback_bars",
+      "trend_persistence_bars"
+    ]
+  },
+  "risk_guard_rules": {
+    "common": [
+      "stop_loss_pct > 0",
+      "take_profit_pct > stop_loss_pct",
+      "take_profit_pct / stop_loss_pct >= 1.5",
+      "trailing_distance_pct <= trailing_activation_pct * 0.5"
+    ],
+    "research_1m_additional": [
+      "breakeven_activation_pct < take_profit_pct",
+      "trailing_activation_pct >= breakeven_activation_pct",
+      "trailing_distance_pct < trailing_activation_pct",
+      "if present: tight_trailing_activation_pct > trailing_activation_pct"
+    ],
+    "ema_band_rejection_exit_additional": [
+      "breakeven_activation_pct < take_profit_pct",
+      "trailing_activation_pct < take_profit_pct"
+    ]
+  }
+}
