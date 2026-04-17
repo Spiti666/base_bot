@@ -1,0 +1,52 @@
+{
+  "date": "2026-04-16",
+  "generated_at": "2026-04-16T20:50:26.214143",
+  "highlights": [
+    "Worst row pnl: ADAUSDT dual_thrust 1h -> -3.6290",
+    "Best row pnl: AAVEUSDT ema_band_rejection 1h -> 10.7720"
+  ],
+  "overview": {
+    "closed_trades": 2,
+    "daily_meta_pnl": 7.142994,
+    "degraded_count": 0,
+    "healthy_count": 20,
+    "paper_only_count": 0,
+    "paused_count": 0,
+    "watchlist_count": 0
+  },
+  "report_type": "daily_meta_report",
+  "rows": [
+    {
+      "avoidable_loss_rate": 1.0,
+      "error_type_distribution": {
+        "strategy_regime_mismatch": 1
+      },
+      "health_state": "healthy",
+      "interval": "1h",
+      "late_entry_rate": 1.0,
+      "pnl_sum": -3.62905,
+      "regime_mismatch_rate": 1.0,
+      "risk_multiplier": 1.0,
+      "strategy_name": "dual_thrust",
+      "symbol": "ADAUSDT",
+      "trade_count": 1,
+      "winrate": 0.0
+    },
+    {
+      "avoidable_loss_rate": 0.0,
+      "error_type_distribution": {
+        "strategy_regime_mismatch": 1
+      },
+      "health_state": "healthy",
+      "interval": "1h",
+      "late_entry_rate": 1.0,
+      "pnl_sum": 10.772043,
+      "regime_mismatch_rate": 1.0,
+      "risk_multiplier": 1.0,
+      "strategy_name": "ema_band_rejection",
+      "symbol": "AAVEUSDT",
+      "trade_count": 1,
+      "winrate": 100.0
+    }
+  ]
+}

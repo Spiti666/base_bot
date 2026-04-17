@@ -61,8 +61,13 @@ from core.engine.backtest_engine import (
 from core.engine.live_engine import BotEngineThread
 from core.paper_trading.engine import PaperTradingEngine
 from main_engine import (
+    OPTIMIZER_ALL_COINS_PASS1_RANKING_MAX_DRAWDOWN_PCT,
+    OPTIMIZER_ALL_COINS_PASS1_RANKING_MIN_PROFIT_FACTOR,
+    OPTIMIZER_MIN_TOTAL_TRADES,
+    OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1,
     generate_optimization_grid,
     get_strategy_badge,
+    resolve_optimizer_profile_mode_name,
     resolve_optimizer_strategy_for_symbol,
     resolve_interval_for_symbol,
     resolve_strategy_for_symbol,
@@ -271,6 +276,33 @@ def _resolve_edge_hits(
             edge_params.append(field_key)
     edge_params_sorted = sorted(edge_params)
     return edge_hits, len(edge_params_sorted), edge_params_sorted
+
+
+def _resolve_pass1_verification_ready(
+    *,
+    optimization_mode: bool,
+    optimizer_profile_mode: str,
+    total_trades: int,
+    profit_factor: float,
+    max_drawdown_pct: float,
+    low_sample: bool,
+    edge_hit_count: int,
+) -> bool:
+    if not optimization_mode:
+        return False
+    if str(optimizer_profile_mode).strip().lower() != OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1:
+        return False
+    if int(total_trades) < int(OPTIMIZER_MIN_TOTAL_TRADES):
+        return False
+    if float(profit_factor) < float(OPTIMIZER_ALL_COINS_PASS1_RANKING_MIN_PROFIT_FACTOR):
+        return False
+    if float(max_drawdown_pct) > float(OPTIMIZER_ALL_COINS_PASS1_RANKING_MAX_DRAWDOWN_PCT):
+        return False
+    if bool(low_sample):
+        return False
+    if int(edge_hit_count) > 0:
+        return False
+    return True
 
 
 def _resolve_estimated_round_trip_cost_pct(result: dict[str, object]) -> float:
@@ -4483,6 +4515,30 @@ class TradingTerminalWindow(QMainWindow):
                 )
             if result.get("validated_profiles") is not None:
                 sample_note += f" validated={int(result.get('validated_profiles', 0) or 0)}"
+            low_sample_flag, _sample_quality = self._classify_sample_quality(total_trades)
+            _edge_hits, edge_hit_count, _edge_hit_params = _resolve_edge_hits(
+                best_profile=(
+                    best_profile
+                    if isinstance(best_profile, dict)
+                    else {}
+                ),
+                result=result,
+            )
+            edge_of_grid = int(edge_hit_count) > 0
+            optimizer_profile_mode = str(
+                result.get("optimizer_profile_mode")
+                or resolve_optimizer_profile_mode_name()
+                or ""
+            ).strip().lower()
+            pass1_ready_for_verification = _resolve_pass1_verification_ready(
+                optimization_mode=True,
+                optimizer_profile_mode=optimizer_profile_mode,
+                total_trades=total_trades,
+                profit_factor=float(profit_factor),
+                max_drawdown_pct=float(result.get("max_drawdown_pct", 0.0) or 0.0),
+                low_sample=bool(low_sample_flag),
+                edge_hit_count=int(edge_hit_count),
+            )
             optimizer_quality_status = str(
                 compact_summary.get("optimizer_quality_status")
                 or result.get("optimizer_quality_status")
@@ -4490,6 +4546,13 @@ class TradingTerminalWindow(QMainWindow):
             ).strip().upper()
             if optimizer_quality_status:
                 sample_note += f" quality={optimizer_quality_status}"
+            sample_note += (
+                f" mode={optimizer_profile_mode or 'n/a'}"
+                f" low_sample={'yes' if bool(low_sample_flag) else 'no'}"
+                f" edge_of_grid={'yes' if edge_of_grid else 'no'}"
+                f" pass1_verify_ready={'yes' if pass1_ready_for_verification else 'no'}"
+                f" candidate_only={'yes' if optimizer_profile_mode == OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1 else 'no'}"
+            )
             best_profile_preview = (
                 self._compact_profile_preview(best_profile)
                 if self._active_backtest_log_mode == self._BACKTEST_LOG_MODE_QUIET
@@ -5438,6 +5501,37 @@ class TradingTerminalWindow(QMainWindow):
                         f"Runs {int(top_row.get('runs', 0) or 0)})"
                     )
             best_profile = result.get("best_profile", {})
+            optimizer_profile_mode = str(
+                result.get("optimizer_profile_mode")
+                or resolve_optimizer_profile_mode_name()
+                or ""
+            ).strip().lower()
+            _edge_hits, edge_hit_count, _edge_hit_params = _resolve_edge_hits(
+                best_profile=best_profile if isinstance(best_profile, dict) else {},
+                result=result,
+            )
+            edge_of_grid = int(edge_hit_count) > 0
+            pass1_ready_for_verification = _resolve_pass1_verification_ready(
+                optimization_mode=True,
+                optimizer_profile_mode=optimizer_profile_mode,
+                total_trades=total_trades,
+                profit_factor=float(profit_factor),
+                max_drawdown_pct=float(result.get("max_drawdown_pct", 0.0) or 0.0),
+                low_sample=bool(low_sample),
+                edge_hit_count=int(edge_hit_count),
+            )
+            lines.append(
+                "Optimizer Profile Mode\t"
+                + (optimizer_profile_mode or "n/a")
+            )
+            lines.append(
+                "Edge Of Grid\t"
+                + ("yes" if edge_of_grid else "no")
+            )
+            lines.append(
+                "Pass-1 Verify Ready\t"
+                + ("yes" if pass1_ready_for_verification else "no")
+            )
             lines.append(
                 "Best Profile\t"
                 + json.dumps(best_profile, ensure_ascii=True, sort_keys=True)
@@ -5467,6 +5561,11 @@ class TradingTerminalWindow(QMainWindow):
         )
         low_sample, sample_quality = self._classify_sample_quality(total_trades)
         optimization_mode = bool(result.get("optimization_mode"))
+        optimizer_profile_mode = str(
+            result.get("optimizer_profile_mode")
+            or resolve_optimizer_profile_mode_name()
+            or ""
+        ).strip().lower()
         default_history_start = (
             settings.trading.optimizer_history_start_utc
             if optimization_mode
@@ -5511,6 +5610,22 @@ class TradingTerminalWindow(QMainWindow):
             best_profile=best_profile,
             result=result,
         )
+        edge_of_grid = int(edge_hit_count) > 0
+        pass1_ready_for_verification = _resolve_pass1_verification_ready(
+            optimization_mode=optimization_mode,
+            optimizer_profile_mode=optimizer_profile_mode,
+            total_trades=total_trades,
+            profit_factor=float(
+                compact_summary.get("robust_profit_factor", result.get("profit_factor", 0.0))
+                or 0.0
+            ),
+            max_drawdown_pct=float(
+                compact_summary.get("max_drawdown_pct", result.get("max_drawdown_pct", 0.0))
+                or 0.0
+            ),
+            low_sample=low_sample,
+            edge_hit_count=int(edge_hit_count),
+        )
         reject_breakdown = _resolve_reject_breakdown(result)
         (
             avg_profit_per_trade_net_pct,
@@ -5552,6 +5667,7 @@ class TradingTerminalWindow(QMainWindow):
             ),
             "interval": str(result.get("interval") or self._current_backtest_interval()),
             "optimization_mode": optimization_mode,
+            "optimizer_profile_mode": optimizer_profile_mode,
             "total_pnl_usd": float(compact_summary.get("net_pnl_usd", result.get("total_pnl_usd", 0.0)) or 0.0),
             "profit_factor": float(compact_summary.get("robust_profit_factor", result.get("profit_factor", 0.0)) or 0.0),
             "robust_profit_factor_display": str(compact_summary.get("robust_profit_factor_display", "0.00") or "0.00"),
@@ -5624,6 +5740,12 @@ class TradingTerminalWindow(QMainWindow):
             "edge_hits": dict(edge_hits),
             "edge_hit_count": int(edge_hit_count),
             "edge_hit_params": list(edge_hit_params),
+            "edge_of_grid": bool(edge_of_grid),
+            "pass1_ready_for_verification": bool(pass1_ready_for_verification),
+            "pass1_candidate_only": bool(
+                optimization_mode
+                and optimizer_profile_mode == OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1
+            ),
             "compact_summary": dict(compact_summary),
             "sampled_profiles": int(sampled_profiles),
             "evaluated_profiles": int(result.get("evaluated_profiles", 0) or 0),
@@ -5634,7 +5756,7 @@ class TradingTerminalWindow(QMainWindow):
             "sampling_mode": str(result.get("sampling_mode", "") or "n/a"),
             "optimizer_grid_profile_tag": str(
                 result.get("optimizer_grid_profile_tag", "")
-                or ("1m_research_v1" if str(result.get("interval", "")).strip().lower() == "1m" else "standard_grid_v1")
+                or "standard_grid_v1"
             ),
             "grid_total_before_guards": int(max(0, grid_total_before_guards)),
             "grid_total_after_guards": int(max(0, grid_total_after_guards)),
@@ -6067,7 +6189,7 @@ class TradingTerminalWindow(QMainWindow):
             f"Full-History Optimization: {full_history_optimization_display}",
             "",
             "Run Details",
-            "symbol | strategy | interval | leverage | real_leverage_avg | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | avg_profit_per_trade_net_pct | median_profit_per_trade_net_pct | estimated_round_trip_cost_pct | profit_per_100_trades_net_pct | chandelier_period | chandelier_multiplier | low_sample | sample_quality | optimization | grid_profile_tag | grid_total_before_guards | grid_total_after_guards | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | effective_search_share_pct | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | rejected_min_trades | rejected_breakeven_activation | rejected_avg_profit_per_trade_net | rejected_risk_guard | rejected_other | edge_hit_count | edge_hit_params | session_top",
+            "symbol | strategy | interval | leverage | real_leverage_avg | period_utc | candles | total_signals | approved | blocked | gate_pass_rate_pct | stop_loss_pct | take_profit_pct | trailing_activation_pct | trailing_distance_pct | fee_pct_side | warmup_candles | min_confidence_pct | cluster_count | min_cluster_size | band_points | band_pct | rsi_period | rsi_sma_period | valid_cluster_events | rejected_out_of_band_values | reset_count | pnl_usd | robust_pf | win_rate_pct | trades | max_dd_pct | avg_win_fee_ratio | avg_win_usd | real_rrr | avg_profit_per_trade_net_pct | median_profit_per_trade_net_pct | estimated_round_trip_cost_pct | profit_per_100_trades_net_pct | chandelier_period | chandelier_multiplier | low_sample | sample_quality | optimization | optimizer_profile_mode | edge_of_grid | pass1_ready_for_verification | grid_profile_tag | grid_total_before_guards | grid_total_after_guards | evaluated_profiles | validated_profiles | sampled_profiles | theoretical_profiles | effective_search_share_pct | sampling_mode | sampling_coverage_pct | search_window_candles | optimizer_workers | full_history_optimization | force_full_scan | rejected_min_trades | rejected_breakeven_activation | rejected_avg_profit_per_trade_net | rejected_risk_guard | rejected_other | edge_hit_count | edge_hit_params | session_top",
         ]
         for entry in entries:
             strategy_name = str(entry.get("strategy_name", ""))
@@ -6138,6 +6260,9 @@ class TradingTerminalWindow(QMainWindow):
                         str(bool(entry.get("low_sample"))).lower(),
                         str(entry.get("sample_quality", "-")),
                         "yes" if bool(entry.get("optimization_mode")) else "no",
+                        str(entry.get("optimizer_profile_mode", "n/a") or "n/a"),
+                        "yes" if bool(entry.get("edge_of_grid")) else "no",
+                        "yes" if bool(entry.get("pass1_ready_for_verification")) else "no",
                         str(entry.get("optimizer_grid_profile_tag", "n/a") or "n/a"),
                         str(int(entry.get("grid_total_before_guards", 0) or 0)),
                         str(int(entry.get("grid_total_after_guards", 0) or 0)),
@@ -7294,6 +7419,7 @@ class TradingTerminalWindow(QMainWindow):
             "max_open_positions:",
             "max_pause_events_per_day:",
             "cooldown_active_until:",
+            "reconcile_required:",
             "positions_desync",
             "duplicate_entries:",
             "missing_exit_control:",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,19 +33,40 @@ def load_paper_trades(path: str | Path = PAPER_TRADES_PATH) -> list[PaperTrade]:
     try:
         with file_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.getLogger("paper_engine.persistence").exception(
+            "Failed to load paper trades from %s: %s",
+            file_path,
+            exc,
+        )
         return []
 
     if not isinstance(payload, list):
+        logging.getLogger("paper_engine.persistence").warning(
+            "Invalid paper_trades payload type in %s (expected list, got %s).",
+            file_path,
+            type(payload).__name__,
+        )
         return []
 
     trades: list[PaperTrade] = []
-    for item in payload:
+    for index, item in enumerate(payload):
         if not isinstance(item, dict):
+            logging.getLogger("paper_engine.persistence").warning(
+                "Skipping invalid paper trade entry at index %d in %s (expected dict).",
+                index,
+                file_path,
+            )
             continue
         try:
             trades.append(_deserialize_trade(item))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
+            logging.getLogger("paper_engine.persistence").warning(
+                "Skipping malformed paper trade entry at index %d in %s: %s",
+                index,
+                file_path,
+                exc,
+            )
             continue
     return trades
 

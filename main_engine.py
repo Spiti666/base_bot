@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import traceback
 from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -105,8 +106,6 @@ OPTIMIZER_MEMORY_RESERVE_GB = 2.0
 OPTIMIZER_MEMORY_PER_WORKER_GB = 0.75
 FORCE_MAX_OPTIMIZATION_WORKERS = False
 OPTIMIZER_GUI_DEFAULT_MAX_WORKERS = 12
-OPTIMIZER_1M_RESEARCH_MAX_WORKERS = 8
-OPTIMIZER_1M_RESEARCH_PYTHON_MAX_WORKERS = 6
 OPTIMIZER_SIGNAL_CACHE_MAX_PARENT_BYTES = 512 * 1024 * 1024
 OPTIMIZER_SIGNAL_CACHE_MAX_REPLICATED_BYTES = 2 * 1024 * 1024 * 1024
 OPTIMIZER_SAMPLE_RANDOM_SEED = 20260321
@@ -138,6 +137,28 @@ OPTIMIZER_SORT_PROFIT_FACTOR_CAP = 100.0
 RANKING_MIN_PROFIT_FACTOR = 1.25
 OPTIMIZER_STRONG_SAMPLE_MIN_TRADES = 100
 RANKING_MAX_DRAWDOWN_PCT = 12.0
+OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1 = "all_coins_pass1"
+OPTIMIZER_PROFILE_MODE_STRICT_VERIFICATION = "strict_verification"
+OPTIMIZER_PROFILE_MODE_DEFAULT = OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1
+OPTIMIZER_ALL_COINS_PASS1_MIN_BREAKEVEN_ACTIVATION_PCT = 2.0
+OPTIMIZER_ALL_COINS_PASS1_MIN_AVERAGE_WIN_TO_COST_RATIO = 2.25
+OPTIMIZER_ALL_COINS_PASS1_MIN_AVG_PROFIT_PER_TRADE_NET_PCT = 0.05
+OPTIMIZER_ALL_COINS_PASS1_RANKING_MIN_PROFIT_FACTOR = 1.15
+OPTIMIZER_ALL_COINS_PASS1_RANKING_MAX_DRAWDOWN_PCT = 15.0
+OPTIMIZER_ALL_COINS_PASS1_STRONG_SAMPLE_MIN_TRADES = 80
+OPTIMIZER_ALL_COINS_PASS1_SEARCH_WINDOW_CANDLES = 35_000
+OPTIMIZER_ALL_COINS_PASS1_VALIDATION_TOP_N = 5
+OPTIMIZER_ALL_COINS_PASS1_MAX_SAMPLE_PROFILES = 5_000
+OPTIMIZER_ALL_COINS_PASS1_RANDOM_SEARCH_SAMPLES = 5_000
+OPTIMIZER_ALL_COINS_PASS1_TWO_STAGE_ENABLED = True
+OPTIMIZER_ALL_COINS_PASS1_TWO_STAGE_STRATEGIES: frozenset[str] = frozenset(
+    {"ema_cross_volume", "ema_band_rejection", "frama_cross", "dual_thrust"}
+)
+OPTIMIZER_ALL_COINS_PASS1_STAGE1_TARGET_PROFILES = 1_500
+OPTIMIZER_ALL_COINS_PASS1_STAGE2_TOP_N = 50
+OPTIMIZER_ALL_COINS_PASS1_STAGE1_SEARCH_WINDOW_CANDLES = 25_000
+OPTIMIZER_ALL_COINS_PASS1_STAGE2_SEARCH_WINDOW_CANDLES = 60_000
+OPTIMIZER_ALL_COINS_PASS1_FORCE_FULL_VERIFICATION_FOR_WINNER = True
 BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE = float(
     PaperTradingEngine.BACKTEST_SLIPPAGE_PENALTY_PCT_PER_SIDE
 )
@@ -229,14 +250,14 @@ META_STATE_ORDER: tuple[str, ...] = (
 FRAMA_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
     "frama_fast_period": (8, 13, 21),
     "frama_slow_period": (60, 100, 150, 200),
-    "volume_multiplier": (1.0, 1.5, 2.5),
+    "volume_multiplier": (1.0, 1.25, 1.5, 2.0),
     "chandelier_period": (14, 30),
     "chandelier_multiplier": (2.5, 3.5),
     "stop_loss_pct": (0.5, 1.5, 3.0),
-    "take_profit_pct": (3.5, 5.0, 7.5, 10.0),
+    "take_profit_pct": (3.5, 5.0, 7.5),
     "trailing_activation_pct": (3.0, 5.0, 7.5),
     "trailing_distance_pct": (0.1, 0.2),
-    "breakeven_activation_pct": (3.5, 5.0),
+    "breakeven_activation_pct": (2.0, 3.0, 4.0),
     "breakeven_buffer_pct": (0.2,),
 }
 FRAMA_GRID_TRIM_ORDER: tuple[str, ...] = (
@@ -250,9 +271,9 @@ FRAMA_GRID_TRIM_ORDER: tuple[str, ...] = (
 )
 
 EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "ema_fast_period": (9, 13, 21, 55),
+    "ema_fast_period": (9, 13, 21),
     "ema_slow_period": (100, 200, 300),
-    "volume_multiplier": (2.25, 3.0, 4.0),
+    "volume_multiplier": (1.25, 1.5, 2.0, 2.5),
     "stop_loss_pct": (0.5, 1.0, 1.5, 3.0),
     "take_profit_pct": (3.0, 5.0, 7.5, 10.0),
     "trailing_activation_pct": (3.0, 5.0, 8.0),
@@ -276,8 +297,8 @@ EMA_BAND_REJECTION_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
     "ema_mid": (10,),
     "ema_slow": (20,),
     "slope_lookback": (3, 5),
-    "min_ema_spread_pct": (0.05, 0.08),
-    "min_slow_slope_pct": (0.0, 0.02),
+    "min_ema_spread_pct": (0.03, 0.05, 0.08),
+    "min_slow_slope_pct": (0.0, 0.01, 0.02),
     "pullback_requires_outer_band_touch": (0, 1),
     "use_rejection_quality_filter": (0, 1),
     "rejection_wick_min_ratio": (0.35,),
@@ -293,7 +314,7 @@ EMA_BAND_REJECTION_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
     "use_atr_stop_buffer": (0, 1),
     "atr_length": (14,),
     "atr_stop_buffer_mult": (0.5,),
-    "signal_cooldown_bars": (0, 3),
+    "signal_cooldown_bars": (0, 1, 2),
     "stop_loss_pct": (1.0, 1.5, 2.0),
     "take_profit_pct": (3.0, 5.0),
     "trailing_activation_pct": (2.0, 3.0),
@@ -318,9 +339,9 @@ EMA_BAND_REJECTION_GRID_TRIM_ORDER: tuple[str, ...] = (
 )
 
 DUAL_THRUST_FIXED_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "dual_thrust_k1": (0.2, 0.5, 1.2),
+    "dual_thrust_k1": (0.2, 0.35, 0.5, 0.8),
     "dual_thrust_k2": (0.2, 0.3, 0.5),
-    "dual_thrust_period": (34, 55, 89, 144),
+    "dual_thrust_period": (34, 55, 89),
     "chandelier_period": (14, 30),
     "chandelier_multiplier": (1.5, 2.5),
     "stop_loss_pct": (0.5, 1.5, 3.0),
@@ -341,187 +362,6 @@ DUAL_THRUST_GRID_TRIM_ORDER: tuple[str, ...] = (
     "stop_loss_pct",
     "dual_thrust_period",
 )
-
-FRAMA_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "frama_fast_period": (3, 5, 7, 9, 11),
-    "frama_slow_period": (18, 24, 36, 48, 72, 96, 144),
-    "volume_multiplier": (1.0, 1.15, 1.35, 1.6, 2.0),
-    "min_frama_gap_pct": (0.0, 0.01, 0.02, 0.03),
-    "min_frama_slope_pct": (0.0, 0.01, 0.02),
-    "post_cross_confirmation_bars": (0, 1, 2),
-    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0, 1.2),
-    "take_profit_pct": (0.8, 1.2, 1.8, 2.4, 3.2),
-    "trailing_activation_pct": (0.6, 0.9, 1.2, 1.8),
-    "trailing_distance_pct": (0.05, 0.08, 0.12, 0.20),
-    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
-    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
-}
-FRAMA_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
-    "trailing_distance_pct",
-    "trailing_activation_pct",
-    "take_profit_pct",
-    "stop_loss_pct",
-    "breakeven_activation_pct",
-    "breakeven_buffer_pct",
-    "volume_multiplier",
-    "post_cross_confirmation_bars",
-    "min_frama_slope_pct",
-    "min_frama_gap_pct",
-)
-
-EMA_CROSS_VOLUME_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "ema_fast_period": (3, 5, 8, 9, 13, 21),
-    "ema_slow_period": (18, 34, 55, 89, 144, 233, 377),
-    "volume_multiplier": (1.0, 1.15, 1.35, 1.6, 2.0, 2.5, 3.0),
-    "min_ema_gap_pct": (0.0, 0.01, 0.02, 0.03),
-    "cross_confirmation_bars": (0, 1, 2),
-    "max_price_extension_pct": (0.10, 0.20, 0.35, 0.50),
-    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0),
-    "take_profit_pct": (1.0, 1.5, 2.0, 3.0, 4.0),
-    "trailing_activation_pct": (0.8, 1.2, 1.8, 2.5),
-    "trailing_distance_pct": (0.08, 0.12, 0.20, 0.30),
-    "tight_trailing_activation_pct": (2.0, 3.0, 4.0),
-    "tight_trailing_distance_pct": (0.10, 0.20, 0.30),
-    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
-    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
-}
-EMA_CROSS_VOLUME_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
-    "trailing_distance_pct",
-    "trailing_activation_pct",
-    "take_profit_pct",
-    "stop_loss_pct",
-    "breakeven_activation_pct",
-    "breakeven_buffer_pct",
-    "tight_trailing_distance_pct",
-    "tight_trailing_activation_pct",
-    "volume_multiplier",
-    "cross_confirmation_bars",
-    "min_ema_gap_pct",
-    "max_price_extension_pct",
-)
-
-DUAL_THRUST_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "dual_thrust_period": (8, 12, 16, 24, 36, 48, 72, 120),
-    "dual_thrust_k1": (0.15, 0.25, 0.35, 0.50, 0.70, 0.90),
-    "dual_thrust_k2": (0.15, 0.25, 0.35, 0.50, 0.70, 0.90),
-    "breakout_buffer_pct": (0.00, 0.03, 0.05, 0.08),
-    "min_range_pct": (0.05, 0.10, 0.15, 0.20),
-    "cooldown_bars_after_exit": (0, 1, 2, 3),
-    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0),
-    "take_profit_pct": (1.0, 1.5, 2.0, 3.0, 4.0),
-    "trailing_activation_pct": (0.8, 1.2, 1.8, 2.5),
-    "trailing_distance_pct": (0.08, 0.12, 0.20, 0.30),
-    "tight_trailing_activation_pct": (2.0, 3.0, 4.0),
-    "tight_trailing_distance_pct": (0.10, 0.20, 0.30),
-    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
-    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
-}
-DUAL_THRUST_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
-    "trailing_distance_pct",
-    "trailing_activation_pct",
-    "take_profit_pct",
-    "stop_loss_pct",
-    "breakeven_activation_pct",
-    "breakeven_buffer_pct",
-    "tight_trailing_distance_pct",
-    "tight_trailing_activation_pct",
-    "cooldown_bars_after_exit",
-    "min_range_pct",
-    "breakout_buffer_pct",
-)
-
-EMA_BAND_REJECTION_1M_RESEARCH_GRID_OPTIONS: dict[str, tuple[float | int, ...]] = {
-    "ema_fast": (5,),
-    "ema_mid": (10,),
-    "ema_slow": (20,),
-    "slope_lookback": (2, 3, 4, 5, 6, 8),
-    "min_ema_spread_pct": (0.02, 0.03, 0.05, 0.08, 0.12),
-    "min_slow_slope_pct": (0.00, 0.01, 0.02, 0.03),
-    "pullback_requires_outer_band_touch": (0, 1),
-    "use_rejection_quality_filter": (0, 1),
-    "rejection_wick_min_ratio": (0.25, 0.35, 0.45, 0.55),
-    "rejection_body_min_ratio": (0.15, 0.20, 0.30),
-    "use_rsi_filter": (0, 1),
-    "rsi_length": (14,),
-    "rsi_midline": (50.0,),
-    "use_rsi_cross_filter": (0, 1),
-    "rsi_midline_margin": (0.0, 0.5, 1.0, 2.0),
-    "use_volume_filter": (0, 1),
-    "volume_ma_length": (20,),
-    "volume_multiplier": (1.0, 1.15, 1.25, 1.5, 1.75),
-    "use_atr_stop_buffer": (0, 1),
-    "atr_length": (14,),
-    "atr_stop_buffer_mult": (0.5,),
-    "signal_cooldown_bars": (0, 1, 2, 3),
-    "trend_persistence_bars": (1, 2, 3),
-    "max_pullback_bars": (2, 3, 4, 6),
-    "entry_offset_pct": (0.00, 0.02, 0.05),
-    "stop_loss_pct": (0.4, 0.6, 0.8, 1.0, 1.2, 1.5),
-    "take_profit_pct": (1.0, 1.5, 2.0, 3.0, 4.0),
-    "trailing_activation_pct": (0.8, 1.2, 1.8, 2.5),
-    "trailing_distance_pct": (0.05, 0.08, 0.12, 0.20),
-    "breakeven_activation_pct": (0.4, 0.6, 0.9, 1.2),
-    "breakeven_buffer_pct": (0.10, 0.15, 0.20),
-}
-EMA_BAND_REJECTION_1M_RESEARCH_GRID_TRIM_ORDER: tuple[str, ...] = (
-    "trailing_distance_pct",
-    "trailing_activation_pct",
-    "take_profit_pct",
-    "stop_loss_pct",
-    "breakeven_activation_pct",
-    "breakeven_buffer_pct",
-    "use_rsi_cross_filter",
-    "use_rsi_filter",
-    "use_volume_filter",
-    "use_atr_stop_buffer",
-    "use_rejection_quality_filter",
-    "pullback_requires_outer_band_touch",
-    "signal_cooldown_bars",
-    "rsi_midline_margin",
-    "rejection_body_min_ratio",
-    "rejection_wick_min_ratio",
-    "volume_multiplier",
-    "slope_lookback",
-    "min_slow_slope_pct",
-    "min_ema_spread_pct",
-    "entry_offset_pct",
-    "max_pullback_bars",
-    "trend_persistence_bars",
-)
-
-RESEARCH_1M_GRID_PROFILE_TAG = "1m_research_v1"
-
-RESEARCH_1M_GRID_OPTIONS_BY_STRATEGY: dict[str, dict[str, tuple[float | int, ...]]] = {
-    "frama_cross": FRAMA_1M_RESEARCH_GRID_OPTIONS,
-    "ema_cross_volume": EMA_CROSS_VOLUME_1M_RESEARCH_GRID_OPTIONS,
-    "dual_thrust": DUAL_THRUST_1M_RESEARCH_GRID_OPTIONS,
-    "ema_band_rejection": EMA_BAND_REJECTION_1M_RESEARCH_GRID_OPTIONS,
-}
-RESEARCH_1M_GRID_TRIM_ORDER_BY_STRATEGY: dict[str, tuple[str, ...]] = {
-    "frama_cross": FRAMA_1M_RESEARCH_GRID_TRIM_ORDER,
-    "ema_cross_volume": EMA_CROSS_VOLUME_1M_RESEARCH_GRID_TRIM_ORDER,
-    "dual_thrust": DUAL_THRUST_1M_RESEARCH_GRID_TRIM_ORDER,
-    "ema_band_rejection": EMA_BAND_REJECTION_1M_RESEARCH_GRID_TRIM_ORDER,
-}
-
-
-def _is_1m_research_interval(interval: str | None) -> bool:
-    return str(interval or "").strip().lower() == "1m"
-
-
-def _grid_profile_tag_for_interval(interval: str | None) -> str | None:
-    if _is_1m_research_interval(interval):
-        return RESEARCH_1M_GRID_PROFILE_TAG
-    return None
-
-
-def _dedupe_grid_values(values: Sequence[float | int]) -> tuple[float | int, ...]:
-    deduped_values: list[float | int] = []
-    for value in values:
-        if value in deduped_values:
-            continue
-        deduped_values.append(value)
-    return tuple(deduped_values)
 
 
 def _summarize_profile_grid_bounds(
@@ -706,6 +546,63 @@ def _history_start_for_mode(*, optimize_profile: bool) -> datetime:
     return OPTIMIZER_HISTORY_START_UTC if optimize_profile else BACKTEST_HISTORY_START_UTC
 
 
+def resolve_optimizer_profile_mode_name() -> str:
+    raw_mode = str(
+        getattr(settings.trading, "optimizer_profile_mode", OPTIMIZER_PROFILE_MODE_DEFAULT)
+        or OPTIMIZER_PROFILE_MODE_DEFAULT
+    ).strip().lower()
+    if raw_mode in {
+        OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1,
+        OPTIMIZER_PROFILE_MODE_STRICT_VERIFICATION,
+    }:
+        return raw_mode
+    return OPTIMIZER_PROFILE_MODE_DEFAULT
+
+
+def _is_optimizer_all_coins_pass1_mode() -> bool:
+    return resolve_optimizer_profile_mode_name() == OPTIMIZER_PROFILE_MODE_ALL_COINS_PASS1
+
+
+def _resolve_optimizer_min_average_win_to_cost_ratio() -> float:
+    if _is_optimizer_all_coins_pass1_mode():
+        return float(OPTIMIZER_ALL_COINS_PASS1_MIN_AVERAGE_WIN_TO_COST_RATIO)
+    return float(OPTIMIZER_MIN_AVERAGE_WIN_TO_COST_RATIO)
+
+
+def _resolve_optimizer_min_avg_profit_per_trade_net_pct() -> float:
+    if _is_optimizer_all_coins_pass1_mode():
+        return float(OPTIMIZER_ALL_COINS_PASS1_MIN_AVG_PROFIT_PER_TRADE_NET_PCT)
+    return float(OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT)
+
+
+def _resolve_optimizer_ranking_min_profit_factor() -> float:
+    if _is_optimizer_all_coins_pass1_mode():
+        return float(OPTIMIZER_ALL_COINS_PASS1_RANKING_MIN_PROFIT_FACTOR)
+    return float(RANKING_MIN_PROFIT_FACTOR)
+
+
+def _resolve_optimizer_ranking_max_drawdown_pct() -> float:
+    if _is_optimizer_all_coins_pass1_mode():
+        return float(OPTIMIZER_ALL_COINS_PASS1_RANKING_MAX_DRAWDOWN_PCT)
+    return float(RANKING_MAX_DRAWDOWN_PCT)
+
+
+def _resolve_optimizer_strong_sample_min_trades() -> int:
+    if _is_optimizer_all_coins_pass1_mode():
+        return int(OPTIMIZER_ALL_COINS_PASS1_STRONG_SAMPLE_MIN_TRADES)
+    return int(OPTIMIZER_STRONG_SAMPLE_MIN_TRADES)
+
+
+def _resolve_optimizer_validation_top_n() -> int:
+    if _is_optimizer_all_coins_pass1_mode():
+        return int(OPTIMIZER_ALL_COINS_PASS1_VALIDATION_TOP_N)
+    with suppress(Exception):
+        configured = int(getattr(settings.trading, "optimization_validation_top_n", 0) or 0)
+        if configured > 0:
+            return configured
+    return int(OPTIMIZER_ALL_COINS_PASS1_VALIDATION_TOP_N)
+
+
 def _resolve_backtest_fee_pct() -> float:
     base_fee_pct = float(settings.trading.taker_fee_pct)
     return max(0.0, base_fee_pct * BACKTEST_FEE_STRESS_MULTIPLIER)
@@ -718,6 +615,8 @@ def _resolve_backtest_round_trip_cost_pct() -> float:
 def _resolve_optimizer_min_breakeven_activation_pct_for_strategy(
     strategy_name: str | None,
 ) -> float | None:
+    if _is_optimizer_all_coins_pass1_mode():
+        return float(OPTIMIZER_ALL_COINS_PASS1_MIN_BREAKEVEN_ACTIVATION_PCT)
     resolved_strategy_name = None
     if strategy_name is not None:
         with suppress(Exception):
@@ -789,11 +688,13 @@ def _resolve_avg_profit_per_trade_net_pct(summary: Mapping[str, object]) -> floa
 
 def _profile_meets_avg_profit_per_trade_hurdle(summary: Mapping[str, object]) -> bool:
     return _resolve_avg_profit_per_trade_net_pct(summary) >= float(
-        OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT
+        _resolve_optimizer_min_avg_profit_per_trade_net_pct()
     )
 
 
 def _resolve_optimizer_min_total_trades_for_interval(interval: str) -> int:
+    if _is_optimizer_all_coins_pass1_mode():
+        return int(OPTIMIZER_MIN_TOTAL_TRADES)
     interval_text = str(interval).strip()
     with suppress(Exception):
         interval_text = _validate_interval_name(interval_text)
@@ -870,7 +771,10 @@ def _resolve_optimization_history_sync_start(
 
 
 def _resolve_optimizer_search_window_candles(interval: str) -> int:
-    configured_window = max(1, int(settings.trading.optimization_search_window_candles))
+    if _is_optimizer_all_coins_pass1_mode():
+        configured_window = int(OPTIMIZER_ALL_COINS_PASS1_SEARCH_WINDOW_CANDLES)
+    else:
+        configured_window = max(1, int(settings.trading.optimization_search_window_candles))
     interval_key = str(interval).strip().lower()
     override_window = OPTIMIZER_SHORT_INTERVAL_WINDOW_OVERRIDES.get(interval_key)
     if override_window is None:
@@ -946,41 +850,8 @@ def _passes_common_risk_profile_guards(
         if not math.isfinite(float(avg_profit_per_trade_net_pct)):
             return False
         if float(avg_profit_per_trade_net_pct) < float(
-            OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT
+            _resolve_optimizer_min_avg_profit_per_trade_net_pct()
         ):
-            return False
-    return True
-
-
-def _passes_research_1m_risk_profile_guards(
-    *,
-    take_profit_pct: float,
-    stop_loss_pct: float,
-    trailing_activation_pct: float,
-    trailing_distance_pct: float,
-    breakeven_activation_pct: float,
-    tight_trailing_activation_pct: float | None = None,
-) -> bool:
-    if not _passes_common_risk_profile_guards(
-        take_profit_pct=take_profit_pct,
-        stop_loss_pct=stop_loss_pct,
-        trailing_activation_pct=trailing_activation_pct,
-        trailing_distance_pct=trailing_distance_pct,
-    ):
-        return False
-    if not (
-        math.isfinite(breakeven_activation_pct)
-        and breakeven_activation_pct < take_profit_pct
-    ):
-        return False
-    if trailing_activation_pct < breakeven_activation_pct:
-        return False
-    if trailing_distance_pct >= trailing_activation_pct:
-        return False
-    if tight_trailing_activation_pct is not None:
-        if not math.isfinite(float(tight_trailing_activation_pct)):
-            return False
-        if float(tight_trailing_activation_pct) <= trailing_activation_pct:
             return False
     return True
 
@@ -1046,23 +917,12 @@ def generate_ema_optimization_grid(
     *,
     interval: str | None = None,
 ) -> list[OptimizationProfile]:
-    selected_options = EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS
-    selected_trim_order = EMA_CROSS_VOLUME_GRID_TRIM_ORDER
-    use_1m_research_grid = _is_1m_research_interval(interval)
-    if use_1m_research_grid:
-        selected_options = {
-            field_name: _dedupe_grid_values(field_values)
-            for field_name, field_values in EMA_CROSS_VOLUME_1M_RESEARCH_GRID_OPTIONS.items()
-        }
-        selected_trim_order = EMA_CROSS_VOLUME_1M_RESEARCH_GRID_TRIM_ORDER
+    _ = interval
     return _build_capped_strategy_family_profiles(
         strategy_family_name="ema_cross_volume",
-        base_options=selected_options,
-        trim_order=selected_trim_order,
-        profile_builder=lambda options: _build_ema_cross_volume_profiles(
-            options,
-            use_research_1m_pruning=use_1m_research_grid,
-        ),
+        base_options=EMA_CROSS_VOLUME_FIXED_GRID_OPTIONS,
+        trim_order=EMA_CROSS_VOLUME_GRID_TRIM_ORDER,
+        profile_builder=lambda options: _build_ema_cross_volume_profiles(options),
     )
 
 
@@ -1070,23 +930,12 @@ def generate_ema_band_rejection_optimization_grid(
     *,
     interval: str | None = None,
 ) -> list[OptimizationProfile]:
-    selected_options = EMA_BAND_REJECTION_FIXED_GRID_OPTIONS
-    selected_trim_order = EMA_BAND_REJECTION_GRID_TRIM_ORDER
-    use_1m_research_grid = _is_1m_research_interval(interval)
-    if use_1m_research_grid:
-        selected_options = {
-            field_name: _dedupe_grid_values(field_values)
-            for field_name, field_values in EMA_BAND_REJECTION_1M_RESEARCH_GRID_OPTIONS.items()
-        }
-        selected_trim_order = EMA_BAND_REJECTION_1M_RESEARCH_GRID_TRIM_ORDER
+    _ = interval
     return _build_capped_strategy_family_profiles(
         strategy_family_name="ema_band_rejection",
-        base_options=selected_options,
-        trim_order=selected_trim_order,
-        profile_builder=lambda options: _build_ema_band_rejection_profiles(
-            options,
-            use_research_1m_pruning=use_1m_research_grid,
-        ),
+        base_options=EMA_BAND_REJECTION_FIXED_GRID_OPTIONS,
+        trim_order=EMA_BAND_REJECTION_GRID_TRIM_ORDER,
+        profile_builder=lambda options: _build_ema_band_rejection_profiles(options),
     )
 
 
@@ -1094,23 +943,12 @@ def generate_frama_optimization_grid(
     *,
     interval: str | None = None,
 ) -> list[OptimizationProfile]:
-    selected_options = FRAMA_FIXED_GRID_OPTIONS
-    selected_trim_order = FRAMA_GRID_TRIM_ORDER
-    use_1m_research_grid = _is_1m_research_interval(interval)
-    if use_1m_research_grid:
-        selected_options = {
-            field_name: _dedupe_grid_values(field_values)
-            for field_name, field_values in FRAMA_1M_RESEARCH_GRID_OPTIONS.items()
-        }
-        selected_trim_order = FRAMA_1M_RESEARCH_GRID_TRIM_ORDER
+    _ = interval
     return _build_capped_strategy_family_profiles(
         strategy_family_name="frama_cross",
-        base_options=selected_options,
-        trim_order=selected_trim_order,
-        profile_builder=lambda options: _build_frama_profiles(
-            options,
-            use_research_1m_pruning=use_1m_research_grid,
-        ),
+        base_options=FRAMA_FIXED_GRID_OPTIONS,
+        trim_order=FRAMA_GRID_TRIM_ORDER,
+        profile_builder=lambda options: _build_frama_profiles(options),
     )
 
 
@@ -1120,23 +958,12 @@ def generate_dual_thrust_optimization_grid(
     interval: str | None = None,
 ) -> list[OptimizationProfile]:
     _ = symbol
-    selected_options = DUAL_THRUST_FIXED_GRID_OPTIONS
-    selected_trim_order = DUAL_THRUST_GRID_TRIM_ORDER
-    use_1m_research_grid = _is_1m_research_interval(interval)
-    if use_1m_research_grid:
-        selected_options = {
-            field_name: _dedupe_grid_values(field_values)
-            for field_name, field_values in DUAL_THRUST_1M_RESEARCH_GRID_OPTIONS.items()
-        }
-        selected_trim_order = DUAL_THRUST_1M_RESEARCH_GRID_TRIM_ORDER
+    _ = interval
     return _build_capped_strategy_family_profiles(
         strategy_family_name="dual_thrust",
-        base_options=selected_options,
-        trim_order=selected_trim_order,
-        profile_builder=lambda options: _build_dual_thrust_profiles(
-            options,
-            use_research_1m_pruning=use_1m_research_grid,
-        ),
+        base_options=DUAL_THRUST_FIXED_GRID_OPTIONS,
+        trim_order=DUAL_THRUST_GRID_TRIM_ORDER,
+        profile_builder=lambda options: _build_dual_thrust_profiles(options),
     )
 
 
@@ -1210,8 +1037,6 @@ def _build_capped_strategy_family_profiles(
 
 def _build_frama_profiles(
     options: dict[str, tuple[float | int, ...]],
-    *,
-    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
     optimize_chandelier = (
@@ -1273,16 +1098,7 @@ def _build_frama_profiles(
         resolved_trailing_activation_pct = float(trailing_activation_pct)
         resolved_trailing_distance_pct = float(trailing_distance_pct)
         resolved_breakeven_activation_pct = float(breakeven_activation_pct)
-        if use_research_1m_pruning:
-            if not _passes_research_1m_risk_profile_guards(
-                take_profit_pct=resolved_take_profit_pct,
-                stop_loss_pct=resolved_stop_loss_pct,
-                trailing_activation_pct=resolved_trailing_activation_pct,
-                trailing_distance_pct=resolved_trailing_distance_pct,
-                breakeven_activation_pct=resolved_breakeven_activation_pct,
-            ):
-                continue
-        elif not _passes_common_risk_profile_guards(
+        if not _passes_common_risk_profile_guards(
             take_profit_pct=resolved_take_profit_pct,
             stop_loss_pct=resolved_stop_loss_pct,
             trailing_activation_pct=resolved_trailing_activation_pct,
@@ -1316,8 +1132,6 @@ def _build_frama_profiles(
 
 def _build_ema_cross_volume_profiles(
     options: dict[str, tuple[float | int, ...]],
-    *,
-    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
     min_ema_gap_pct_values = options.get("min_ema_gap_pct", (0.0,))
@@ -1362,17 +1176,7 @@ def _build_ema_cross_volume_profiles(
         resolved_trailing_distance_pct = float(trailing_distance_pct)
         resolved_breakeven_activation_pct = float(breakeven_activation_pct)
         resolved_tight_trailing_activation_pct = float(tight_trailing_activation_pct)
-        if use_research_1m_pruning:
-            if not _passes_research_1m_risk_profile_guards(
-                take_profit_pct=resolved_take_profit_pct,
-                stop_loss_pct=resolved_stop_loss_pct,
-                trailing_activation_pct=resolved_trailing_activation_pct,
-                trailing_distance_pct=resolved_trailing_distance_pct,
-                breakeven_activation_pct=resolved_breakeven_activation_pct,
-                tight_trailing_activation_pct=resolved_tight_trailing_activation_pct,
-            ):
-                continue
-        elif not _passes_common_risk_profile_guards(
+        if not _passes_common_risk_profile_guards(
             take_profit_pct=resolved_take_profit_pct,
             stop_loss_pct=resolved_stop_loss_pct,
             trailing_activation_pct=resolved_trailing_activation_pct,
@@ -1405,8 +1209,6 @@ def _build_ema_cross_volume_profiles(
 
 def _build_ema_band_rejection_profiles(
     options: dict[str, tuple[float | int, ...]],
-    *,
-    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
     default_rsi_length = int(options["rsi_length"][0])
@@ -1445,16 +1247,7 @@ def _build_ema_band_rejection_profiles(
         resolved_trailing_distance_pct = float(trailing_distance_pct)
         resolved_breakeven_activation_pct = float(breakeven_activation_pct)
         resolved_breakeven_buffer_pct = float(breakeven_buffer_pct)
-        if use_research_1m_pruning:
-            if not _passes_research_1m_risk_profile_guards(
-                take_profit_pct=resolved_take_profit_pct,
-                stop_loss_pct=resolved_stop_loss_pct,
-                trailing_activation_pct=resolved_trailing_activation_pct,
-                trailing_distance_pct=resolved_trailing_distance_pct,
-                breakeven_activation_pct=resolved_breakeven_activation_pct,
-            ):
-                continue
-        elif not _passes_common_risk_profile_guards(
+        if not _passes_common_risk_profile_guards(
             take_profit_pct=resolved_take_profit_pct,
             stop_loss_pct=resolved_stop_loss_pct,
             trailing_activation_pct=resolved_trailing_activation_pct,
@@ -1666,8 +1459,6 @@ def _build_ema_band_rejection_profiles(
 
 def _build_dual_thrust_profiles(
     options: dict[str, tuple[float | int, ...]],
-    *,
-    use_research_1m_pruning: bool = False,
 ) -> list[OptimizationProfile]:
     profiles: list[OptimizationProfile] = []
     optimize_chandelier = (
@@ -1732,17 +1523,7 @@ def _build_dual_thrust_profiles(
         resolved_trailing_distance_pct = float(trailing_distance_pct)
         resolved_breakeven_activation_pct = float(breakeven_activation_pct)
         resolved_tight_trailing_activation_pct = float(tight_trailing_activation_pct)
-        if use_research_1m_pruning:
-            if not _passes_research_1m_risk_profile_guards(
-                take_profit_pct=resolved_take_profit_pct,
-                stop_loss_pct=resolved_stop_loss_pct,
-                trailing_activation_pct=resolved_trailing_activation_pct,
-                trailing_distance_pct=resolved_trailing_distance_pct,
-                breakeven_activation_pct=resolved_breakeven_activation_pct,
-                tight_trailing_activation_pct=resolved_tight_trailing_activation_pct,
-            ):
-                continue
-        elif not _passes_common_risk_profile_guards(
+        if not _passes_common_risk_profile_guards(
             take_profit_pct=resolved_take_profit_pct,
             stop_loss_pct=resolved_stop_loss_pct,
             trailing_activation_pct=resolved_trailing_activation_pct,
@@ -3745,6 +3526,8 @@ def _resolve_average_win_to_cost_ratio(summary: dict[str, float]) -> float:
 
 
 def _calculate_stability_score(summary: dict[str, float]) -> float:
+    min_avg_win_to_cost_ratio = _resolve_optimizer_min_average_win_to_cost_ratio()
+    ranking_max_drawdown_pct = _resolve_optimizer_ranking_max_drawdown_pct()
     capped_profit_factor = _cap_profit_factor_for_sorting(float(summary.get("profit_factor", 0.0) or 0.0))
     max_dd = float(summary.get("max_drawdown_pct", 0.0) or 0.0)
     if not math.isfinite(max_dd):
@@ -3756,11 +3539,11 @@ def _calculate_stability_score(summary: dict[str, float]) -> float:
         cost_component = 1.0
     else:
         cost_component = min(
-            max(0.0, avg_win_to_cost_ratio) / OPTIMIZER_MIN_AVERAGE_WIN_TO_COST_RATIO,
+            max(0.0, avg_win_to_cost_ratio) / max(min_avg_win_to_cost_ratio, 0.0001),
             1.0,
         )
     pf_component = min(capped_profit_factor / OPTIMIZER_SORT_PROFIT_FACTOR_CAP, 1.0)
-    drawdown_component = max(0.0, 1.0 - (max_dd / max(RANKING_MAX_DRAWDOWN_PCT, 0.0001)))
+    drawdown_component = max(0.0, 1.0 - (max_dd / max(ranking_max_drawdown_pct, 0.0001)))
     trade_count_component = min(total_trades / 100.0, 1.0)
     score = (
         (0.45 * cost_component)
@@ -3777,6 +3560,10 @@ def _optimization_sort_key(
     strategy_name: str | None = None,
 ) -> tuple[float, ...]:
     _ = strategy_name
+    min_avg_win_to_cost_ratio = _resolve_optimizer_min_average_win_to_cost_ratio()
+    strong_sample_min_trades = _resolve_optimizer_strong_sample_min_trades()
+    ranking_min_profit_factor = _resolve_optimizer_ranking_min_profit_factor()
+    ranking_max_drawdown_pct = _resolve_optimizer_ranking_max_drawdown_pct()
     profit_factor = float(summary.get("profit_factor", 0.0) or 0.0)
     capped_profit_factor = _cap_profit_factor_for_sorting(profit_factor)
     max_dd = float(summary.get("max_drawdown_pct", 0.0) or 0.0)
@@ -3788,16 +3575,16 @@ def _optimization_sort_key(
     average_win_to_cost_ratio = _resolve_average_win_to_cost_ratio(summary)
     avg_win_ratio_pass = (
         1.0
-        if average_win_to_cost_ratio >= OPTIMIZER_MIN_AVERAGE_WIN_TO_COST_RATIO
+        if average_win_to_cost_ratio >= float(min_avg_win_to_cost_ratio)
         else 0.0
     )
     strong_sample_pass = (
         1.0
-        if total_trades >= float(OPTIMIZER_STRONG_SAMPLE_MIN_TRADES)
+        if total_trades >= float(strong_sample_min_trades)
         else 0.0
     )
-    pf_pass = 1.0 if capped_profit_factor >= RANKING_MIN_PROFIT_FACTOR else 0.0
-    dd_pass = 1.0 if max_dd < RANKING_MAX_DRAWDOWN_PCT else 0.0
+    pf_pass = 1.0 if capped_profit_factor >= float(ranking_min_profit_factor) else 0.0
+    dd_pass = 1.0 if max_dd < float(ranking_max_drawdown_pct) else 0.0
     stability_score = float(summary.get("stability_score", _calculate_stability_score(summary)))
     if not math.isfinite(stability_score):
         stability_score = 0.0
@@ -3962,6 +3749,13 @@ def _collect_strategy_variant_profiles(
 
 
 def _resolve_random_search_sample_cap() -> int | None:
+    if _is_optimizer_all_coins_pass1_mode():
+        return int(
+            min(
+                int(OPTIMIZER_ALL_COINS_PASS1_MAX_SAMPLE_PROFILES),
+                int(OPTIMIZER_ALL_COINS_PASS1_RANDOM_SEARCH_SAMPLES),
+            )
+        )
     raw_value = getattr(settings.trading, "random_search_samples", None)
     if raw_value is None:
         return None
@@ -3974,6 +3768,8 @@ def _resolve_random_search_sample_cap() -> int | None:
 
 
 def _resolve_optimizer_two_stage_strategy_names() -> set[str]:
+    if _is_optimizer_all_coins_pass1_mode():
+        return set(OPTIMIZER_ALL_COINS_PASS1_TWO_STAGE_STRATEGIES)
     configured = getattr(settings.trading, "optimizer_two_stage_strategies", None)
     if isinstance(configured, Sequence) and not isinstance(configured, (str, bytes)):
         resolved: set[str] = set()
@@ -4051,6 +3847,14 @@ def _resolve_two_stage_search_window_candles(
     interval: str,
     stage_index: int,
 ) -> int:
+    if _is_optimizer_all_coins_pass1_mode():
+        base_window = max(1, int(_resolve_optimizer_search_window_candles(interval)))
+        if stage_index <= 1:
+            return max(
+                1,
+                min(base_window, int(OPTIMIZER_ALL_COINS_PASS1_STAGE1_SEARCH_WINDOW_CANDLES)),
+            )
+        return max(1, int(OPTIMIZER_ALL_COINS_PASS1_STAGE2_SEARCH_WINDOW_CANDLES))
     base_window = max(1, int(_resolve_optimizer_search_window_candles(interval)))
     if stage_index <= 1:
         resolved_window = _resolve_strategy_specific_positive_int(
@@ -4076,6 +3880,55 @@ def _resolve_optimizer_two_stage_policy(
     theoretical_profiles: int,
 ) -> dict[str, object]:
     normalized_strategy_name = _validate_strategy_name(strategy_name)
+    if _is_optimizer_all_coins_pass1_mode():
+        sample_cap = int(
+            min(
+                int(OPTIMIZER_ALL_COINS_PASS1_MAX_SAMPLE_PROFILES),
+                int(OPTIMIZER_ALL_COINS_PASS1_RANDOM_SEARCH_SAMPLES),
+            )
+        )
+        stage1_target_profiles = max(
+            1,
+            min(
+                int(theoretical_profiles),
+                int(OPTIMIZER_ALL_COINS_PASS1_STAGE1_TARGET_PROFILES),
+                int(sample_cap),
+            ),
+        )
+        stage2_top_n = max(
+            1,
+            min(
+                int(OPTIMIZER_ALL_COINS_PASS1_STAGE2_TOP_N),
+                int(stage1_target_profiles),
+                int(theoretical_profiles),
+            ),
+        )
+        stage1_window_candles = _resolve_two_stage_search_window_candles(
+            strategy_name=normalized_strategy_name,
+            interval=interval,
+            stage_index=1,
+        )
+        stage2_window_candles = _resolve_two_stage_search_window_candles(
+            strategy_name=normalized_strategy_name,
+            interval=interval,
+            stage_index=2,
+        )
+        return {
+            "two_stage_enabled": bool(
+                OPTIMIZER_ALL_COINS_PASS1_TWO_STAGE_ENABLED
+                and normalized_strategy_name in OPTIMIZER_ALL_COINS_PASS1_TWO_STAGE_STRATEGIES
+                and int(theoretical_profiles) > 1
+            ),
+            "sample_cap": int(sample_cap),
+            "stage1_target_profiles": int(stage1_target_profiles),
+            "stage2_top_n": int(stage2_top_n),
+            "stage1_search_window_candles": int(stage1_window_candles),
+            "stage2_search_window_candles": int(stage2_window_candles),
+            "worker_cap": _resolve_optimizer_worker_cap_for_strategy(normalized_strategy_name),
+            "force_full_verification_for_winner": bool(
+                OPTIMIZER_ALL_COINS_PASS1_FORCE_FULL_VERIFICATION_FOR_WINNER
+            ),
+        }
     global_two_stage_enabled = bool(
         getattr(
             settings.trading,
@@ -6270,10 +6123,16 @@ class BotEngineThread(QThread):
         self._meta_fail_safe_activated_at: datetime | None = None
         self._meta_operational_errors: deque[tuple[datetime, str, str, str, str]] = deque(maxlen=600)
         self._meta_operational_error_last_seen: dict[str, datetime] = {}
+        self._meta_operational_error_source_counts: Counter[str] = Counter()
+        self._meta_operational_error_signature_counts: Counter[str] = Counter()
+        self._meta_operational_error_last_overview_at: datetime | None = None
         self._meta_last_daily_report_date: datetime.date | None = None
         self._meta_last_weekly_report_iso: tuple[int, int] | None = None
         self._meta_service_active = True
         self._meta_global_risk_multiplier = 1.0
+        self._symbol_reconcile_required: dict[str, dict[str, object]] = {}
+        self._meta_service_degraded: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        self._runtime_warning_once_keys: set[str] = set()
         for symbol_name in self._symbols:
             candidate_policy = resolve_live_candidate_policy(symbol_name)
             if candidate_policy is None:
@@ -6296,6 +6155,26 @@ class BotEngineThread(QThread):
         try:
             self._loop.run_until_complete(self._run_async())
         except Exception as exc:
+            stacktrace_text = self._emit_exception_context_log(
+                component="runtime_thread",
+                action="run",
+                symbol=(self._symbols[0] if self._symbols else None),
+                strategy_name=self._strategy_name,
+                interval=(self._intervals[0] if self._intervals else None),
+                exc=exc,
+                severity="CRITICAL",
+            )
+            if self._symbols:
+                first_symbol = self._symbols[0]
+                with suppress(Exception):
+                    self._register_operational_error(
+                        symbol=first_symbol,
+                        interval=self._target_interval_for_symbol(first_symbol),
+                        reason="bot_thread_run_exception",
+                        exception_text=str(exc),
+                        exception_stacktrace=stacktrace_text,
+                        source="runtime_exception",
+                    )
             self.log_message.emit(f"BotEngineThread stopped with error: {exc}")
         finally:
             pending = asyncio.all_tasks(self._loop)
@@ -6328,6 +6207,8 @@ class BotEngineThread(QThread):
             breakeven_activation_pct=float(LIVE_BREAKEVEN_ACTIVATION_PCT),
             breakeven_buffer_pct=float(LIVE_BREAKEVEN_BUFFER_PCT),
             fee_pct_override=effective_live_fee_pct,
+            on_warning=self._on_paper_engine_warning,
+            on_critical_state=self._on_paper_engine_critical_state,
         )
         self._initialize_meta_services()
         self._include_recovered_position_symbols()
@@ -6471,11 +6352,45 @@ class BotEngineThread(QThread):
         if self._db is None or self._paper_engine is None:
             return
 
-        closed_trade_id = self._paper_engine.close_position_at_price(
-            symbol,
-            exit_price,
-            status="MANUAL_CLOSE",
-        )
+        try:
+            closed_trade_id = self._paper_engine.close_position_at_price(
+                symbol,
+                exit_price,
+                status="MANUAL_CLOSE",
+            )
+        except Exception as exc:
+            interval = self._target_interval_for_symbol(symbol)
+            strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
+            stacktrace_text = self._emit_exception_context_log(
+                component="paper_engine",
+                action="close_position_manually",
+                symbol=symbol,
+                strategy_name=strategy_name,
+                interval=interval,
+                exc=exc,
+                severity="CRITICAL",
+            )
+            self._set_symbol_reconcile_required(
+                symbol=symbol,
+                reason="exit_persist_failed",
+                strategy_name=strategy_name,
+                interval=interval,
+                payload={
+                    "state": "position_state_unknown",
+                    "action": "close_position_manually",
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+            )
+            self._register_operational_error(
+                symbol=symbol,
+                interval=interval,
+                reason="exit_persist_failed",
+                exception_text=str(exc),
+                exception_stacktrace=stacktrace_text,
+                source="runtime_exception",
+            )
+            return
         if closed_trade_id is None:
             self.log_message.emit(f"Manual close skipped: no open position for {symbol}.")
             return
@@ -6526,11 +6441,43 @@ class BotEngineThread(QThread):
                     f"Recovered candle: {symbol} {candle.interval} @ {candle.open_time.isoformat()} close={candle.close:.4f}"
                 )
 
-            closed_trade_ids = self._paper_engine.update_positions(
-                candle.close,
-                symbol=symbol,
-                intrabar=False,
-            )
+            try:
+                closed_trade_ids = self._paper_engine.update_positions(
+                    candle.close,
+                    symbol=symbol,
+                    intrabar=False,
+                )
+            except Exception as exc:
+                stacktrace_text = self._emit_exception_context_log(
+                    component="paper_engine",
+                    action="update_positions",
+                    symbol=symbol,
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    exc=exc,
+                    severity="CRITICAL",
+                )
+                self._set_symbol_reconcile_required(
+                    symbol=symbol,
+                    reason="exit_persist_failed",
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    payload={
+                        "state": "position_state_unknown",
+                        "action": "update_positions",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                )
+                self._register_operational_error(
+                    symbol=symbol,
+                    interval=candle.interval,
+                    reason="exit_persist_failed",
+                    exception_text=str(exc),
+                    exception_stacktrace=stacktrace_text,
+                    source="runtime_exception",
+                )
+                return
             for trade_id in closed_trade_ids:
                 self._review_and_recompute_after_close(trade_id)
                 closed_trade = self._db.fetch_trade_by_id(trade_id)
@@ -6602,11 +6549,43 @@ class BotEngineThread(QThread):
                     candles_dataframe,
                     side=open_trade.side,
                 ):
-                    closed_trade_id = self._paper_engine.close_position_at_price(
-                        symbol,
-                        candle.close,
-                        status="STRATEGY_EXIT",
-                    )
+                    try:
+                        closed_trade_id = self._paper_engine.close_position_at_price(
+                            symbol,
+                            candle.close,
+                            status="STRATEGY_EXIT",
+                        )
+                    except Exception as exc:
+                        stacktrace_text = self._emit_exception_context_log(
+                            component="paper_engine",
+                            action="close_position_at_price",
+                            symbol=symbol,
+                            strategy_name=resolved_strategy_name,
+                            interval=candle.interval,
+                            exc=exc,
+                            severity="CRITICAL",
+                        )
+                        self._set_symbol_reconcile_required(
+                            symbol=symbol,
+                            reason="exit_persist_failed",
+                            strategy_name=resolved_strategy_name,
+                            interval=candle.interval,
+                            payload={
+                                "state": "position_state_unknown",
+                                "action": "close_position_at_price",
+                                "exception_type": type(exc).__name__,
+                                "exception_message": str(exc),
+                            },
+                        )
+                        self._register_operational_error(
+                            symbol=symbol,
+                            interval=candle.interval,
+                            reason="exit_persist_failed",
+                            exception_text=str(exc),
+                            exception_stacktrace=stacktrace_text,
+                            source="runtime_exception",
+                        )
+                        return
                     if closed_trade_id is not None:
                         self._review_and_recompute_after_close(closed_trade_id)
                         closed_trade = self._db.fetch_trade_by_id(closed_trade_id)
@@ -6645,7 +6624,9 @@ class BotEngineThread(QThread):
                 dynamic_take_profit_pct,
                 signal_diagnostics,
             ) = self._evaluate_live_signal_direction(
+                symbol=symbol,
                 strategy_name=resolved_strategy_name,
+                interval=candle.interval,
                 candles_dataframe=candles_dataframe,
                 strategy_profile=strategy_profile,
                 required_candle_count=required_candle_count,
@@ -6781,36 +6762,79 @@ class BotEngineThread(QThread):
             entry_snapshot["meta_flags"] = list(meta_policy.get("meta_flags", []))
             entry_snapshot["meta_policy"] = dict(meta_policy.get("effective_policy_json", {}))
             entry_snapshot["risk_multiplier_effective"] = float(combined_risk_multiplier)
-            trade_id = self._paper_engine.process_signal(
-                symbol=symbol,
-                current_price=execution_price,
-                signal_direction=signal_direction,
-                strategy_name=resolved_strategy_name,
-                leverage_scale=leverage_scale,
-                risk_multiplier=combined_risk_multiplier,
-                dynamic_stop_loss_pct=dynamic_stop_loss_pct,
-                dynamic_take_profit_pct=dynamic_take_profit_pct,
-                timeframe=candle.interval,
-                regime_label_at_entry=str(entry_snapshot.get("regime_label_at_entry", "")),
-                regime_confidence=float(entry_snapshot.get("regime_confidence", 0.0) or 0.0),
-                session_label=str(entry_snapshot.get("session_label", "")),
-                signal_strength=float(entry_snapshot.get("signal_strength", 0.0) or 0.0),
-                confidence_score=float(entry_snapshot.get("confidence_score", 0.0) or 0.0),
-                atr_pct_at_entry=float(entry_snapshot.get("atr_pct_at_entry", 0.0) or 0.0),
-                volume_ratio_at_entry=float(entry_snapshot.get("volume_ratio_at_entry", 0.0) or 0.0),
-                spread_estimate=float(entry_snapshot.get("spread_estimate", 0.0) or 0.0),
-                move_already_extended_pct=float(entry_snapshot.get("move_already_extended_pct", 0.0) or 0.0),
-                entry_snapshot_json=entry_snapshot,
-                lifecycle_snapshot_json=None,
-                profile_version=profile_version,
-                review_status="PENDING",
-            )
+            try:
+                trade_id = self._paper_engine.process_signal(
+                    symbol=symbol,
+                    current_price=execution_price,
+                    signal_direction=signal_direction,
+                    strategy_name=resolved_strategy_name,
+                    leverage_scale=leverage_scale,
+                    risk_multiplier=combined_risk_multiplier,
+                    dynamic_stop_loss_pct=dynamic_stop_loss_pct,
+                    dynamic_take_profit_pct=dynamic_take_profit_pct,
+                    timeframe=candle.interval,
+                    regime_label_at_entry=str(entry_snapshot.get("regime_label_at_entry", "")),
+                    regime_confidence=float(entry_snapshot.get("regime_confidence", 0.0) or 0.0),
+                    session_label=str(entry_snapshot.get("session_label", "")),
+                    signal_strength=float(entry_snapshot.get("signal_strength", 0.0) or 0.0),
+                    confidence_score=float(entry_snapshot.get("confidence_score", 0.0) or 0.0),
+                    atr_pct_at_entry=float(entry_snapshot.get("atr_pct_at_entry", 0.0) or 0.0),
+                    volume_ratio_at_entry=float(entry_snapshot.get("volume_ratio_at_entry", 0.0) or 0.0),
+                    spread_estimate=float(entry_snapshot.get("spread_estimate", 0.0) or 0.0),
+                    move_already_extended_pct=float(entry_snapshot.get("move_already_extended_pct", 0.0) or 0.0),
+                    entry_snapshot_json=entry_snapshot,
+                    lifecycle_snapshot_json=None,
+                    profile_version=profile_version,
+                    review_status="PENDING",
+                )
+            except Exception as exc:
+                stacktrace_text = self._emit_exception_context_log(
+                    component="paper_engine",
+                    action="process_signal",
+                    symbol=symbol,
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    exc=exc,
+                    severity="CRITICAL",
+                )
+                self._set_symbol_reconcile_required(
+                    symbol=symbol,
+                    reason="order_submit_failed",
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    payload={
+                        "state": "position_state_unknown",
+                        "action": "process_signal",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                )
+                self._register_operational_error(
+                    symbol=symbol,
+                    interval=candle.interval,
+                    reason="order_submit_failed",
+                    exception_text=str(exc),
+                    exception_stacktrace=stacktrace_text,
+                    source="runtime_exception",
+                )
+                return
             if trade_id is None:
                 return
 
             trade = self._db.fetch_trade_by_id(trade_id)
             if trade is None:
                 self.log_message.emit(f"Trade opened but could not be reloaded: id={trade_id}")
+                self._set_symbol_reconcile_required(
+                    symbol=symbol,
+                    reason="position_state_unknown",
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    payload={
+                        "state": "position_state_unknown",
+                        "action": "fetch_trade_after_open",
+                        "trade_id": int(trade_id),
+                    },
+                )
                 return
 
             self.trade_opened.emit(self._trade_to_payload(trade))
@@ -6837,11 +6861,21 @@ class BotEngineThread(QThread):
                     metrics=candidate_metrics_post_entry,
                 )
         except Exception as exc:
+            stacktrace_text = self._emit_exception_context_log(
+                component="runtime",
+                action="on_candle_closed",
+                symbol=symbol,
+                strategy_name=resolved_strategy_name if "resolved_strategy_name" in locals() else self._strategy_name,
+                interval=candle.interval,
+                exc=exc,
+                severity="ERROR",
+            )
             self._register_operational_error(
                 symbol=symbol,
                 interval=candle.interval,
                 reason="candle_closed_runtime_error",
                 exception_text=str(exc),
+                exception_stacktrace=stacktrace_text,
                 source="runtime_exception",
             )
             self.log_message.emit(
@@ -6859,11 +6893,44 @@ class BotEngineThread(QThread):
         self._latest_market_prices[symbol] = float(candle.close)
         self.price_update.emit(symbol, candle.close)
         try:
-            closed_trade_ids = self._paper_engine.update_positions(
-                candle.close,
-                symbol=symbol,
-                intrabar=True,
-            )
+            try:
+                closed_trade_ids = self._paper_engine.update_positions(
+                    candle.close,
+                    symbol=symbol,
+                    intrabar=True,
+                )
+            except Exception as exc:
+                resolved_strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
+                stacktrace_text = self._emit_exception_context_log(
+                    component="paper_engine",
+                    action="update_positions_intrabar",
+                    symbol=symbol,
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    exc=exc,
+                    severity="CRITICAL",
+                )
+                self._set_symbol_reconcile_required(
+                    symbol=symbol,
+                    reason="exit_persist_failed",
+                    strategy_name=resolved_strategy_name,
+                    interval=candle.interval,
+                    payload={
+                        "state": "position_state_unknown",
+                        "action": "update_positions_intrabar",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                )
+                self._register_operational_error(
+                    symbol=symbol,
+                    interval=candle.interval,
+                    reason="exit_persist_failed",
+                    exception_text=str(exc),
+                    exception_stacktrace=stacktrace_text,
+                    source="runtime_exception",
+                )
+                return
             for trade_id in closed_trade_ids:
                 self._review_and_recompute_after_close(trade_id)
                 closed_trade = self._db.fetch_trade_by_id(trade_id)
@@ -6890,11 +6957,21 @@ class BotEngineThread(QThread):
                         metrics=candidate_metrics_after_close,
                     )
         except Exception as exc:
+            stacktrace_text = self._emit_exception_context_log(
+                component="runtime",
+                action="on_candle_update",
+                symbol=symbol,
+                strategy_name=resolve_strategy_for_symbol(symbol, self._strategy_name),
+                interval=candle.interval,
+                exc=exc,
+                severity="ERROR",
+            )
             self._register_operational_error(
                 symbol=symbol,
                 interval=candle.interval,
                 reason="candle_update_runtime_error",
                 exception_text=str(exc),
+                exception_stacktrace=stacktrace_text,
                 source="runtime_exception",
             )
             self.log_message.emit(
@@ -6914,8 +6991,22 @@ class BotEngineThread(QThread):
     async def _perform_heartbeat_check(self) -> None:
         if self._db is None:
             return
-        with suppress(Exception):
+        try:
             self._maybe_generate_periodic_meta_reports()
+            self._clear_meta_service_degraded(
+                service_name="meta_report_heartbeat",
+                symbol="GLOBAL",
+                strategy_name="meta_bootstrap",
+                interval="global",
+            )
+        except Exception as exc:
+            self._mark_meta_service_degraded(
+                service_name="meta_report_heartbeat",
+                symbol="GLOBAL",
+                strategy_name="meta_bootstrap",
+                interval="global",
+                exc=exc,
+            )
 
         now = datetime.now(tz=UTC).replace(tzinfo=None)
         status_payload: dict[str, dict[str, object]] = {}
@@ -7111,6 +7202,67 @@ class BotEngineThread(QThread):
         payload = [self._trade_to_payload(trade) for trade in self._db.fetch_open_trades()]
         self.positions_updated.emit(payload)
 
+    def _on_paper_engine_warning(self, warning_code: str, payload: Mapping[str, object]) -> None:
+        warning_payload = dict(payload or {})
+        symbol = str(warning_payload.get("symbol", "") or "").strip().upper()
+        interval = str(
+            warning_payload.get("interval", "")
+            or (self._target_interval_for_symbol(symbol) if symbol else "")
+        ).strip()
+        message = str(warning_payload.get("message", "") or "")
+        self.log_message.emit(
+            "[WARN] paper_engine warning: "
+            f"code={str(warning_code).strip()} "
+            f"symbol={symbol or '-'} interval={interval or '-'} "
+            f"message={message or '-'}"
+        )
+        stacktrace_text = str(warning_payload.get("exception_stacktrace", "") or "").strip()
+        if stacktrace_text:
+            self.log_message.emit(
+                f"[WARN] paper_engine warning traceback:\n{stacktrace_text}"
+            )
+        if symbol and interval:
+            self._register_operational_error(
+                symbol=symbol,
+                interval=interval,
+                reason=f"paper_engine_warning:{str(warning_code).strip()}",
+                exception_text=message or str(warning_code),
+                exception_stacktrace=(stacktrace_text if stacktrace_text else None),
+                source="paper_engine_warning",
+            )
+
+    def _on_paper_engine_critical_state(self, state_code: str, payload: Mapping[str, object]) -> None:
+        state_payload = dict(payload or {})
+        symbol = str(state_payload.get("symbol", "") or "").strip().upper()
+        if not symbol:
+            return
+        strategy_name = resolve_strategy_for_symbol(symbol, self._strategy_name)
+        interval = str(
+            state_payload.get("interval", "")
+            or self._target_interval_for_symbol(symbol)
+        ).strip()
+        reason = str(state_payload.get("reason", "") or str(state_code).strip() or "critical_state")
+        self._set_symbol_reconcile_required(
+            symbol=symbol,
+            reason=reason,
+            strategy_name=strategy_name,
+            interval=interval,
+            payload={
+                "state_code": str(state_code),
+                **state_payload,
+            },
+        )
+        message = str(state_payload.get("message", "") or reason)
+        stacktrace_text = str(state_payload.get("exception_stacktrace", "") or "").strip()
+        self._register_operational_error(
+            symbol=symbol,
+            interval=interval,
+            reason=reason,
+            exception_text=message,
+            exception_stacktrace=(stacktrace_text if stacktrace_text else None),
+            source="paper_engine",
+        )
+
     def _handle_stop_future(self, future) -> None:
         try:
             future.result()
@@ -7283,9 +7435,30 @@ class BotEngineThread(QThread):
     ) -> list[PaperTrade]:
         if self._db is None:
             return []
-        with suppress(Exception):
-            return self._db.fetch_recent_closed_trades(symbol, limit=limit)
-        return []
+        normalized_symbol = str(symbol).strip().upper()
+        resolved_strategy_name = resolve_strategy_for_symbol(
+            normalized_symbol,
+            self._strategy_name,
+        )
+        resolved_interval = self._target_interval_for_symbol(normalized_symbol)
+        try:
+            rows = self._db.fetch_recent_closed_trades(normalized_symbol, limit=limit)
+        except Exception as exc:
+            self._mark_meta_service_degraded(
+                service_name="closed_trade_fetch",
+                symbol=normalized_symbol,
+                strategy_name=resolved_strategy_name,
+                interval=resolved_interval,
+                exc=exc,
+            )
+            return []
+        self._clear_meta_service_degraded(
+            service_name="closed_trade_fetch",
+            symbol=normalized_symbol,
+            strategy_name=resolved_strategy_name,
+            interval=resolved_interval,
+        )
+        return rows
 
     def _compute_live_candidate_metrics(
         self,
@@ -7529,11 +7702,23 @@ class BotEngineThread(QThread):
     def _evaluate_live_signal_direction(
         self,
         *,
+        symbol: str | None = None,
         strategy_name: str,
+        interval: str | None = None,
         candles_dataframe: pd.DataFrame,
         strategy_profile: OptimizationProfile | None,
         required_candle_count: int,
     ) -> tuple[int, float | None, float | None, dict[str, object]]:
+        normalized_symbol = (
+            str(symbol).strip().upper()
+            if symbol is not None and str(symbol).strip()
+            else None
+        )
+        normalized_interval = (
+            str(interval).strip()
+            if interval is not None and str(interval).strip()
+            else None
+        )
         payload = _build_vectorized_strategy_cache_payload(
             candles_dataframe,
             strategy_name=strategy_name,
@@ -7551,8 +7736,20 @@ class BotEngineThread(QThread):
             )
             signals_payload = payload.get("signals")
             if isinstance(signals_payload, Sequence) and len(signals_payload) > 0:
-                with suppress(Exception):
+                try:
                     signal_direction = int(signals_payload[-1])
+                except Exception as exc:
+                    self._emit_exception_context_log(
+                        component="signal_payload",
+                        action="parse_signal_direction",
+                        symbol=normalized_symbol,
+                        strategy_name=strategy_name,
+                        interval=normalized_interval,
+                        exc=exc,
+                        severity="WARN",
+                    )
+                    strategy_diagnostics["signal_payload_parse_failed"] = True
+                else:
                     dynamic_stop_loss_pct: float | None = None
                     dynamic_take_profit_pct: float | None = None
                     if signal_direction != 0:
@@ -7561,10 +7758,22 @@ class BotEngineThread(QThread):
                             isinstance(dynamic_stop_loss_series, Sequence)
                             and len(dynamic_stop_loss_series) > 0
                         ):
-                            with suppress(Exception):
+                            try:
                                 candidate_dynamic_stop_loss_pct = float(
                                     dynamic_stop_loss_series[-1]
                                 )
+                            except Exception as exc:
+                                self._emit_exception_context_log(
+                                    component="signal_payload",
+                                    action="parse_dynamic_stop_loss_pct",
+                                    symbol=normalized_symbol,
+                                    strategy_name=strategy_name,
+                                    interval=normalized_interval,
+                                    exc=exc,
+                                    severity="WARN",
+                                )
+                                strategy_diagnostics["dynamic_stop_loss_parse_failed"] = True
+                            else:
                                 if (
                                     math.isfinite(candidate_dynamic_stop_loss_pct)
                                     and candidate_dynamic_stop_loss_pct > 0.0
@@ -7577,10 +7786,22 @@ class BotEngineThread(QThread):
                             isinstance(dynamic_take_profit_series, Sequence)
                             and len(dynamic_take_profit_series) > 0
                         ):
-                            with suppress(Exception):
+                            try:
                                 candidate_dynamic_take_profit_pct = float(
                                     dynamic_take_profit_series[-1]
                                 )
+                            except Exception as exc:
+                                self._emit_exception_context_log(
+                                    component="signal_payload",
+                                    action="parse_dynamic_take_profit_pct",
+                                    symbol=normalized_symbol,
+                                    strategy_name=strategy_name,
+                                    interval=normalized_interval,
+                                    exc=exc,
+                                    severity="WARN",
+                                )
+                                strategy_diagnostics["dynamic_take_profit_parse_failed"] = True
+                            else:
                                 if (
                                     math.isfinite(candidate_dynamic_take_profit_pct)
                                     and candidate_dynamic_take_profit_pct > 0.0
@@ -7610,7 +7831,6 @@ class BotEngineThread(QThread):
     def _review_and_recompute_after_close(self, trade_id: int) -> None:
         if self._db is None:
             return
-        self.review_closed_trade(trade_id)
         closed_trade = self._db.fetch_trade_by_id(trade_id)
         if closed_trade is None:
             return
@@ -7624,21 +7844,79 @@ class BotEngineThread(QThread):
             if closed_trade.timeframe is not None and str(closed_trade.timeframe).strip()
             else self._target_interval_for_symbol(closed_trade.symbol)
         )
-        with suppress(Exception):
+        try:
+            self.review_closed_trade(trade_id)
+            self._clear_meta_service_degraded(
+                service_name="trade_review",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+            )
+        except Exception as exc:
+            self._mark_meta_service_degraded(
+                service_name="trade_review",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+                exc=exc,
+            )
+        try:
             self.recompute_strategy_health(
                 symbol=closed_trade.symbol,
                 strategy_name=strategy_name,
                 timeframe=timeframe,
             )
-        with suppress(Exception):
+            self._clear_meta_service_degraded(
+                service_name="strategy_health",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+            )
+        except Exception as exc:
+            self._mark_meta_service_degraded(
+                service_name="strategy_health",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+                exc=exc,
+            )
+        try:
             self.evaluate_meta_policy(
                 closed_trade.symbol,
                 strategy_name,
                 timeframe,
                 current_context={},
             )
-        with suppress(Exception):
+            self._clear_meta_service_degraded(
+                service_name="meta_policy",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+            )
+        except Exception as exc:
+            self._mark_meta_service_degraded(
+                service_name="meta_policy",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+                exc=exc,
+            )
+        try:
             self._maybe_generate_periodic_meta_reports()
+            self._clear_meta_service_degraded(
+                service_name="meta_reports",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+            )
+        except Exception as exc:
+            self._mark_meta_service_degraded(
+                service_name="meta_reports",
+                symbol=closed_trade.symbol,
+                strategy_name=strategy_name,
+                interval=timeframe,
+                exc=exc,
+            )
 
     def _resolve_profile_version(
         self,
@@ -7703,6 +7981,309 @@ class BotEngineThread(QThread):
             str(interval).strip(),
         )
 
+    @staticmethod
+    def _exception_stacktrace_text(exc: BaseException) -> str:
+        return "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ).strip()
+
+    def _emit_exception_context_log(
+        self,
+        *,
+        component: str,
+        action: str,
+        symbol: str | None,
+        strategy_name: str | None,
+        interval: str | None,
+        exc: BaseException,
+        severity: str = "ERROR",
+    ) -> str:
+        stacktrace_text = self._exception_stacktrace_text(exc)
+        self.log_message.emit(
+            f"[{severity}] component={component} action={action} "
+            f"symbol={str(symbol or '-').strip().upper() or '-'} "
+            f"strategy={str(strategy_name or '-').strip() or '-'} "
+            f"interval={str(interval or '-').strip() or '-'} "
+            f"exception={type(exc).__name__}: {exc}"
+        )
+        if stacktrace_text:
+            self.log_message.emit(
+                f"[{severity}] traceback {component}.{action}:\n{stacktrace_text}"
+            )
+        return stacktrace_text
+
+    def _emit_warning_once(self, *, key: str, message: str) -> None:
+        normalized_key = str(key).strip().lower()
+        if not normalized_key:
+            self.log_message.emit(f"[WARN] {message}")
+            return
+        if normalized_key in self._runtime_warning_once_keys:
+            return
+        self._runtime_warning_once_keys.add(normalized_key)
+        self.log_message.emit(f"[WARN] {message}")
+
+    @staticmethod
+    def _meta_service_key(
+        service_name: str,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+    ) -> tuple[str, str, str, str]:
+        return (
+            str(service_name).strip().lower(),
+            str(symbol).strip().upper(),
+            _sanitize_backtest_strategy_name(strategy_name),
+            str(interval).strip(),
+        )
+
+    def _mark_meta_service_degraded(
+        self,
+        *,
+        service_name: str,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+        exc: BaseException,
+    ) -> None:
+        key = self._meta_service_key(service_name, symbol, strategy_name, interval)
+        stacktrace_text = self._emit_exception_context_log(
+            component="meta_service",
+            action=f"{service_name}_failed",
+            symbol=symbol,
+            strategy_name=strategy_name,
+            interval=interval,
+            exc=exc,
+            severity="WARN",
+        )
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        previous_payload = self._meta_service_degraded.get(key)
+        self._meta_service_degraded[key] = {
+            "service_name": key[0],
+            "symbol": key[1],
+            "strategy_name": key[2],
+            "interval": key[3],
+            "state": "degraded",
+            "updated_at": now.isoformat(),
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "stacktrace": stacktrace_text,
+        }
+        if previous_payload is None:
+            self._insert_adaptation_event(
+                event_type="meta_service_degraded",
+                symbol=key[1],
+                strategy_name=key[2],
+                interval=key[3],
+                payload=dict(self._meta_service_degraded[key]),
+                source="meta_bot",
+            )
+
+    def _clear_meta_service_degraded(
+        self,
+        *,
+        service_name: str,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+    ) -> None:
+        key = self._meta_service_key(service_name, symbol, strategy_name, interval)
+        payload = self._meta_service_degraded.pop(key, None)
+        if payload is None:
+            return
+        self._insert_adaptation_event(
+            event_type="meta_service_recovered",
+            symbol=key[1],
+            strategy_name=key[2],
+            interval=key[3],
+            payload={
+                "service_name": key[0],
+                "state": "healthy",
+                "recovered_at": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
+                "previous_updated_at": payload.get("updated_at"),
+            },
+            source="meta_bot",
+        )
+        self.log_message.emit(
+            "[META] service recovered: "
+            f"service={key[0]} symbol={key[1]} strategy={key[2]} interval={key[3]}"
+        )
+
+    def _collect_meta_service_degraded(
+        self,
+        *,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+    ) -> list[str]:
+        normalized_symbol, normalized_strategy, normalized_interval = self._meta_key(
+            symbol,
+            strategy_name,
+            interval,
+        )
+        degraded_services: list[str] = []
+        for (
+            service_name,
+            service_symbol,
+            service_strategy,
+            service_interval,
+        ), payload in self._meta_service_degraded.items():
+            if service_symbol != normalized_symbol:
+                continue
+            if service_strategy != normalized_strategy:
+                continue
+            if service_interval != normalized_interval:
+                continue
+            if str(payload.get("state", "")).strip().lower() != "degraded":
+                continue
+            degraded_services.append(service_name)
+        return sorted(set(degraded_services))
+
+    def _set_symbol_reconcile_required(
+        self,
+        *,
+        symbol: str,
+        reason: str,
+        strategy_name: str | None,
+        interval: str | None,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        normalized_symbol = str(symbol).strip().upper()
+        if not normalized_symbol:
+            return
+        normalized_reason = str(reason).strip() or "reconcile_required"
+        now = datetime.now(tz=UTC).replace(tzinfo=None)
+        previous_payload = self._symbol_reconcile_required.get(normalized_symbol)
+        next_payload = {
+            "symbol": normalized_symbol,
+            "state": "position_state_unknown",
+            "reason": normalized_reason,
+            "updated_at": now.isoformat(),
+            "payload": dict(payload or {}),
+        }
+        self._symbol_reconcile_required[normalized_symbol] = next_payload
+        if previous_payload is not None and previous_payload.get("reason") == normalized_reason:
+            return
+        self.log_message.emit(
+            "[CRITICAL] reconcile_required: "
+            f"symbol={normalized_symbol} reason={normalized_reason}"
+        )
+        self._insert_adaptation_event(
+            event_type="reconcile_required",
+            symbol=normalized_symbol,
+            strategy_name=strategy_name,
+            interval=interval,
+            payload=next_payload,
+            source="risk_guard",
+        )
+        self._emit_meta_warning(
+            warning_code="reconcile_required",
+            message=f"Symbol {normalized_symbol} requires reconciliation ({normalized_reason}).",
+            payload=next_payload,
+        )
+
+    def _clear_symbol_reconcile_required(
+        self,
+        *,
+        symbol: str,
+        strategy_name: str | None,
+        interval: str | None,
+        resolution: str,
+    ) -> None:
+        normalized_symbol = str(symbol).strip().upper()
+        if not normalized_symbol:
+            return
+        previous_payload = self._symbol_reconcile_required.pop(normalized_symbol, None)
+        if previous_payload is None:
+            return
+        self.log_message.emit(
+            "[RECOVERY] reconciliation cleared: "
+            f"symbol={normalized_symbol} resolution={resolution}"
+        )
+        self._insert_adaptation_event(
+            event_type="reconcile_resolved",
+            symbol=normalized_symbol,
+            strategy_name=strategy_name,
+            interval=interval,
+            payload={
+                "resolution": str(resolution),
+                "resolved_at": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
+                "previous_state": dict(previous_payload),
+            },
+            source="risk_guard",
+        )
+
+    def _attempt_symbol_reconciliation(
+        self,
+        *,
+        symbol: str,
+        strategy_name: str,
+        interval: str,
+    ) -> tuple[bool, str]:
+        if self._db is None:
+            return False, "db_unavailable"
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_interval = str(interval).strip()
+        open_trades_symbol = self._db.fetch_open_trades(symbol=normalized_symbol)
+        for open_trade in open_trades_symbol:
+            high_water_mark = float(open_trade.high_water_mark or 0.0)
+            if not math.isfinite(high_water_mark) or high_water_mark <= 0.0:
+                return False, "missing_exit_control"
+            mark_price = float(self._latest_market_prices.get(normalized_symbol, 0.0) or 0.0)
+            if mark_price > 0.0 and math.isfinite(mark_price):
+                continue
+            trade_interval = (
+                str(open_trade.timeframe).strip()
+                if open_trade.timeframe is not None and str(open_trade.timeframe).strip()
+                else normalized_interval
+            )
+            candles = self._db.fetch_recent_candles(
+                normalized_symbol,
+                trade_interval,
+                limit=1,
+            )
+            if not candles:
+                return False, "mark_price_unavailable"
+            last_close = float(candles[-1].close)
+            if not math.isfinite(last_close) or last_close <= 0.0:
+                return False, "mark_price_invalid"
+
+        if self._paper_engine is not None:
+            runtime_trade_ids: set[int] = set()
+            for runtime_trade in self._paper_engine.active_trades:
+                runtime_symbol = str(getattr(runtime_trade, "symbol", "") or "").strip().upper()
+                if runtime_symbol != normalized_symbol:
+                    continue
+                candidate_id = getattr(runtime_trade, "id", runtime_trade)
+                with suppress(TypeError, ValueError):
+                    runtime_trade_ids.add(int(candidate_id))
+            db_trade_ids = {int(trade.id) for trade in open_trades_symbol}
+            if runtime_trade_ids != db_trade_ids:
+                return False, "runtime_db_symbol_mismatch"
+
+        return True, "ok"
+
+    def _emit_operational_error_overview(self, *, now: datetime, force: bool = False) -> None:
+        if not force:
+            last_overview_at = self._meta_operational_error_last_overview_at
+            if (
+                isinstance(last_overview_at, datetime)
+                and now < (last_overview_at + timedelta(minutes=5))
+            ):
+                return
+        self._meta_operational_error_last_overview_at = now
+        source_summary = ", ".join(
+            f"{source}={count}"
+            for source, count in self._meta_operational_error_source_counts.most_common(5)
+        ) or "-"
+        signature_summary = ", ".join(
+            f"{signature} x{count}"
+            for signature, count in self._meta_operational_error_signature_counts.most_common(3)
+        ) or "-"
+        self.log_message.emit(
+            "[META] operational error overview: "
+            f"sources[{source_summary}] top[{signature_summary}]"
+        )
+
     def _insert_adaptation_event(
         self,
         *,
@@ -7715,7 +8296,7 @@ class BotEngineThread(QThread):
     ) -> None:
         if self._db is None:
             return
-        with suppress(Exception):
+        try:
             self._db.insert_adaptation_log(
                 AdaptationLogCreate(
                     created_at=datetime.now(tz=UTC).replace(tzinfo=None),
@@ -7735,6 +8316,19 @@ class BotEngineThread(QThread):
                     source=str(source).strip(),
                 )
             )
+        except Exception as exc:
+            stacktrace_text = self._exception_stacktrace_text(exc)
+            self.log_message.emit(
+                "[WARN] adaptation_log_write_failed: "
+                f"event_type={event_type} symbol={str(symbol).strip().upper()} "
+                f"strategy={str(strategy_name or '-').strip() or '-'} "
+                f"interval={str(interval or '-').strip() or '-'} "
+                f"source={str(source).strip()} exception={type(exc).__name__}: {exc}"
+            )
+            if stacktrace_text:
+                self.log_message.emit(
+                    f"[WARN] adaptation_log_write_failed traceback:\n{stacktrace_text}"
+                )
 
     def _emit_meta_warning(
         self,
@@ -7834,6 +8428,7 @@ class BotEngineThread(QThread):
         interval: str,
         reason: str,
         exception_text: str,
+        exception_stacktrace: str | None = None,
         source: str = "runtime_exception",
     ) -> None:
         now = datetime.now(tz=UTC).replace(tzinfo=None)
@@ -7846,6 +8441,10 @@ class BotEngineThread(QThread):
             f"{normalized_source}|{normalized_symbol}|{normalized_interval}|"
             f"{normalized_reason}|{exception_head}"
         )
+        self._meta_operational_error_source_counts[normalized_source] += 1
+        self._meta_operational_error_signature_counts[
+            f"{normalized_source}:{normalized_reason}"
+        ] += 1
         dedup_since = self._meta_operational_error_last_seen.get(signature)
         if (
             isinstance(dedup_since, datetime)
@@ -7888,6 +8487,11 @@ class BotEngineThread(QThread):
             payload={
                 "reason": normalized_reason,
                 "exception_text": exception_head,
+                "exception_stacktrace": (
+                    str(exception_stacktrace)[:8000]
+                    if exception_stacktrace is not None and str(exception_stacktrace).strip()
+                    else None
+                ),
                 "source": normalized_source,
                 "window_minutes": META_OPERATIONAL_ERROR_WINDOW_MINUTES,
                 "window_error_count": current_count,
@@ -7948,6 +8552,7 @@ class BotEngineThread(QThread):
             f"hard_count={hard_count} distinct_symbols={len(distinct_symbols)} "
             f"distinct_signatures={len(distinct_signatures)} threshold={META_OPERATIONAL_ERROR_FAILSAFE_THRESHOLD}"
         )
+        self._emit_operational_error_overview(now=now)
 
     def _initialize_meta_services(self) -> None:
         META_REPORTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -7974,27 +8579,84 @@ class BotEngineThread(QThread):
                 self._meta_key(symbol, strategy_name, interval)
             )
         if self._db is not None:
-            with suppress(Exception):
+            try:
                 for row in self._db.fetch_strategy_health_rows(limit=5000):
                     recompute_targets.add(
                         self._meta_key(row.symbol, row.strategy_name, row.timeframe)
                     )
+            except Exception as exc:
+                self._mark_meta_service_degraded(
+                    service_name="meta_init_health_fetch",
+                    symbol="GLOBAL",
+                    strategy_name="meta_bootstrap",
+                    interval="global",
+                    exc=exc,
+                )
+            else:
+                self._clear_meta_service_degraded(
+                    service_name="meta_init_health_fetch",
+                    symbol="GLOBAL",
+                    strategy_name="meta_bootstrap",
+                    interval="global",
+                )
         for normalized_symbol, normalized_strategy, normalized_interval in sorted(recompute_targets):
-            with suppress(Exception):
+            try:
                 self.recompute_strategy_health(
                     symbol=normalized_symbol,
                     strategy_name=normalized_strategy,
                     timeframe=normalized_interval,
                 )
-            with suppress(Exception):
+                self._clear_meta_service_degraded(
+                    service_name="meta_init_strategy_health",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                )
+            except Exception as exc:
+                self._mark_meta_service_degraded(
+                    service_name="meta_init_strategy_health",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    exc=exc,
+                )
+            try:
                 self.evaluate_meta_policy(
                     symbol=normalized_symbol,
                     strategy_name=normalized_strategy,
                     interval=normalized_interval,
                     current_context={},
                 )
-        with suppress(Exception):
+                self._clear_meta_service_degraded(
+                    service_name="meta_init_policy_eval",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                )
+            except Exception as exc:
+                self._mark_meta_service_degraded(
+                    service_name="meta_init_policy_eval",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    exc=exc,
+                )
+        try:
             self._maybe_generate_periodic_meta_reports()
+            self._clear_meta_service_degraded(
+                service_name="meta_init_reports",
+                symbol="GLOBAL",
+                strategy_name="meta_bootstrap",
+                interval="global",
+            )
+        except Exception as exc:
+            self._mark_meta_service_degraded(
+                service_name="meta_init_reports",
+                symbol="GLOBAL",
+                strategy_name="meta_bootstrap",
+                interval="global",
+                exc=exc,
+            )
 
     def resolve_market_regime(
         self,
@@ -8006,6 +8668,10 @@ class BotEngineThread(QThread):
     ) -> dict[str, object]:
         normalized_symbol = str(symbol).strip().upper()
         normalized_timeframe = str(timeframe).strip()
+        normalized_strategy_name = resolve_strategy_for_symbol(
+            normalized_symbol,
+            self._strategy_name,
+        )
         if candles_dataframe.empty:
             observed_at = observed_time or datetime.now(tz=UTC).replace(tzinfo=None)
             return {
@@ -8111,7 +8777,7 @@ class BotEngineThread(QThread):
                     ),
                 )
                 self._runtime_hmm_detectors[normalized_timeframe] = detector
-            with suppress(Exception):
+            try:
                 detection = detector.detect(working_df)
                 hmm_converged = bool(getattr(detection, "converged", True))
                 hmm_non_converged_windows = int(getattr(detection, "non_converged_windows", 0) or 0)
@@ -8154,6 +8820,26 @@ class BotEngineThread(QThread):
                             f"{normalized_symbol} {normalized_timeframe} "
                             f"{warning_detail}."
                         )
+                self._clear_meta_service_degraded(
+                    service_name="regime_detection",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy_name,
+                    interval=normalized_timeframe,
+                )
+            except Exception as exc:
+                self._mark_meta_service_degraded(
+                    service_name="regime_detection",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy_name,
+                    interval=normalized_timeframe,
+                    exc=exc,
+                )
+                hmm_converged = False
+                hmm_non_converged_windows = max(1, int(hmm_non_converged_windows or 0))
+                hmm_window_count = max(1, int(hmm_window_count or 0))
+                hmm_non_convergence_detail = (
+                    f"hmm_detection_exception={type(exc).__name__}:{str(exc).strip()}"
+                )
 
         if (not bool(hmm_converged)) and stable_payload is not None:
             now = datetime.now(tz=UTC).replace(tzinfo=None)
@@ -8311,7 +8997,7 @@ class BotEngineThread(QThread):
         }
 
         if self._db is not None:
-            with suppress(Exception):
+            try:
                 self._db.insert_regime_observation(
                     RegimeObservationCreate(
                         observed_at=observed_at,
@@ -8327,6 +9013,20 @@ class BotEngineThread(QThread):
                         regime_features_json=regime_features,
                         source=REGIME_ENGINE_VERSION,
                     )
+                )
+                self._clear_meta_service_degraded(
+                    service_name="regime_observation_persist",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy_name,
+                    interval=normalized_timeframe,
+                )
+            except Exception as exc:
+                self._mark_meta_service_degraded(
+                    service_name="regime_observation_persist",
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy_name,
+                    interval=normalized_timeframe,
+                    exc=exc,
                 )
 
         self._runtime_regime_cache[cache_key] = {
@@ -8482,32 +9182,110 @@ class BotEngineThread(QThread):
         normalized_symbol = str(symbol).strip().upper()
         production_profile = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol)
         if isinstance(production_profile, Mapping):
-            with suppress(Exception):
-                resolved_tp = float(production_profile.get("take_profit_pct", 0.0) or 0.0)
+            raw_tp = production_profile.get("take_profit_pct", 0.0)
+            try:
+                resolved_tp = float(raw_tp or 0.0)
+            except Exception as exc:
+                self._emit_exception_context_log(
+                    component="config_profile",
+                    action="parse_take_profit_pct_production",
+                    symbol=normalized_symbol,
+                    strategy_name=resolve_strategy_for_symbol(normalized_symbol, self._strategy_name),
+                    interval=self._target_interval_for_symbol(normalized_symbol),
+                    exc=exc,
+                    severity="WARN",
+                )
+            else:
                 if math.isfinite(resolved_tp) and resolved_tp > 0.0:
                     return resolved_tp
+                if raw_tp not in (None, "", 0, 0.0, "0", "0.0"):
+                    self._emit_warning_once(
+                        key=f"invalid_take_profit_pct:production:{normalized_symbol}:{raw_tp}",
+                        message=(
+                            "Invalid non-positive production take_profit_pct detected; "
+                            f"symbol={normalized_symbol} value={raw_tp!r}. Falling back to coin/default settings."
+                        ),
+                    )
         coin_profile = settings.trading.coin_profiles.get(normalized_symbol)
         if coin_profile is not None and coin_profile.take_profit_pct is not None:
-            with suppress(Exception):
-                resolved_tp = float(coin_profile.take_profit_pct)
+            raw_tp = coin_profile.take_profit_pct
+            try:
+                resolved_tp = float(raw_tp)
+            except Exception as exc:
+                self._emit_exception_context_log(
+                    component="config_profile",
+                    action="parse_take_profit_pct_coin_profile",
+                    symbol=normalized_symbol,
+                    strategy_name=resolve_strategy_for_symbol(normalized_symbol, self._strategy_name),
+                    interval=self._target_interval_for_symbol(normalized_symbol),
+                    exc=exc,
+                    severity="WARN",
+                )
+            else:
                 if math.isfinite(resolved_tp) and resolved_tp > 0.0:
                     return resolved_tp
+                self._emit_warning_once(
+                    key=f"invalid_take_profit_pct:coin_profile:{normalized_symbol}:{raw_tp}",
+                    message=(
+                        "Invalid non-positive coin_profile take_profit_pct detected; "
+                        f"symbol={normalized_symbol} value={raw_tp!r}. Falling back to global default."
+                    ),
+                )
         return float(settings.trading.take_profit_pct)
 
     def _resolve_configured_stop_loss_pct(self, symbol: str) -> float:
         normalized_symbol = str(symbol).strip().upper()
         production_profile = PRODUCTION_PROFILE_REGISTRY.get(normalized_symbol)
         if isinstance(production_profile, Mapping):
-            with suppress(Exception):
-                resolved_sl = float(production_profile.get("stop_loss_pct", 0.0) or 0.0)
+            raw_sl = production_profile.get("stop_loss_pct", 0.0)
+            try:
+                resolved_sl = float(raw_sl or 0.0)
+            except Exception as exc:
+                self._emit_exception_context_log(
+                    component="config_profile",
+                    action="parse_stop_loss_pct_production",
+                    symbol=normalized_symbol,
+                    strategy_name=resolve_strategy_for_symbol(normalized_symbol, self._strategy_name),
+                    interval=self._target_interval_for_symbol(normalized_symbol),
+                    exc=exc,
+                    severity="WARN",
+                )
+            else:
                 if math.isfinite(resolved_sl) and resolved_sl > 0.0:
                     return resolved_sl
+                if raw_sl not in (None, "", 0, 0.0, "0", "0.0"):
+                    self._emit_warning_once(
+                        key=f"invalid_stop_loss_pct:production:{normalized_symbol}:{raw_sl}",
+                        message=(
+                            "Invalid non-positive production stop_loss_pct detected; "
+                            f"symbol={normalized_symbol} value={raw_sl!r}. Falling back to coin/default settings."
+                        ),
+                    )
         coin_profile = settings.trading.coin_profiles.get(normalized_symbol)
         if coin_profile is not None and coin_profile.stop_loss_pct is not None:
-            with suppress(Exception):
-                resolved_sl = float(coin_profile.stop_loss_pct)
+            raw_sl = coin_profile.stop_loss_pct
+            try:
+                resolved_sl = float(raw_sl)
+            except Exception as exc:
+                self._emit_exception_context_log(
+                    component="config_profile",
+                    action="parse_stop_loss_pct_coin_profile",
+                    symbol=normalized_symbol,
+                    strategy_name=resolve_strategy_for_symbol(normalized_symbol, self._strategy_name),
+                    interval=self._target_interval_for_symbol(normalized_symbol),
+                    exc=exc,
+                    severity="WARN",
+                )
+            else:
                 if math.isfinite(resolved_sl) and resolved_sl > 0.0:
                     return resolved_sl
+                self._emit_warning_once(
+                    key=f"invalid_stop_loss_pct:coin_profile:{normalized_symbol}:{raw_sl}",
+                    message=(
+                        "Invalid non-positive coin_profile stop_loss_pct detected; "
+                        f"symbol={normalized_symbol} value={raw_sl!r}. Falling back to global default."
+                    ),
+                )
         return float(settings.trading.stop_loss_pct)
 
     def _build_trade_lifecycle_snapshot(self, trade: PaperTrade) -> dict[str, object]:
@@ -8619,11 +9397,35 @@ class BotEngineThread(QThread):
         if required_fields.issubset(existing_payload.keys()):
             return existing_payload
         lifecycle_snapshot = self._build_trade_lifecycle_snapshot(trade)
+        resolved_strategy_name = (
+            str(trade.strategy_name).strip()
+            if trade.strategy_name is not None and str(trade.strategy_name).strip()
+            else resolve_strategy_for_symbol(trade.symbol, self._strategy_name)
+        )
+        resolved_interval = (
+            str(trade.timeframe).strip()
+            if trade.timeframe is not None and str(trade.timeframe).strip()
+            else self._target_interval_for_symbol(trade.symbol)
+        )
         if self._db is not None:
-            with suppress(Exception):
+            try:
                 self._db.update_trade(
                     trade.id,
                     PaperTradeUpdate(lifecycle_snapshot_json=lifecycle_snapshot),
+                )
+                self._clear_meta_service_degraded(
+                    service_name="lifecycle_snapshot_persist",
+                    symbol=trade.symbol,
+                    strategy_name=resolved_strategy_name,
+                    interval=resolved_interval,
+                )
+            except Exception as exc:
+                self._mark_meta_service_degraded(
+                    service_name="lifecycle_snapshot_persist",
+                    symbol=trade.symbol,
+                    strategy_name=resolved_strategy_name,
+                    interval=resolved_interval,
+                    exc=exc,
                 )
         return lifecycle_snapshot
 
@@ -9194,6 +9996,35 @@ class BotEngineThread(QThread):
         normalized_interval = str(interval).strip()
         meta_key = self._meta_key(normalized_symbol, normalized_strategy, normalized_interval)
 
+        reconcile_payload = self._symbol_reconcile_required.get(normalized_symbol)
+        reconcile_reason = (
+            str(reconcile_payload.get("reason", "") or "reconcile_required")
+            if isinstance(reconcile_payload, Mapping)
+            else ""
+        )
+        if reconcile_reason:
+            reconciled, reconcile_resolution = self._attempt_symbol_reconciliation(
+                symbol=normalized_symbol,
+                strategy_name=normalized_strategy,
+                interval=normalized_interval,
+            )
+            if reconciled:
+                self._clear_symbol_reconcile_required(
+                    symbol=normalized_symbol,
+                    strategy_name=normalized_strategy,
+                    interval=normalized_interval,
+                    resolution=f"auto_reconciled:{reconcile_resolution}",
+                )
+                reconcile_reason = ""
+            else:
+                return {
+                    "allow_trade": False,
+                    "risk_cap": 0.0,
+                    "block_reason": f"reconcile_required:{reconcile_reason}:{reconcile_resolution}",
+                    "warning_reason": "",
+                    "flags": ["reconcile_required", "position_state_unknown"],
+                }
+
         self._maybe_recover_fail_safe_mode(now=now)
         if self._meta_fail_safe_active:
             return {
@@ -9241,8 +10072,12 @@ class BotEngineThread(QThread):
             block_reason = f"max_strategy_drawdown:{strategy_drawdown_pct:.2f}%"
 
         open_trades = self._db.fetch_open_trades()
+        runtime_trade_ids: set[int] = set()
         if self._paper_engine is not None:
-            runtime_trade_ids = {int(trade_id) for trade_id in self._paper_engine.active_trades}
+            for runtime_trade in self._paper_engine.active_trades:
+                candidate_id = getattr(runtime_trade, "id", runtime_trade)
+                with suppress(TypeError, ValueError):
+                    runtime_trade_ids.add(int(candidate_id))
             db_trade_ids = {int(trade.id) for trade in open_trades}
             if runtime_trade_ids != db_trade_ids:
                 self._activate_fail_safe_mode(
@@ -9409,6 +10244,21 @@ class BotEngineThread(QThread):
 
         if low_sample_observe_only:
             meta_flags.append("low_sample_observe_only")
+
+        degraded_services = self._collect_meta_service_degraded(
+            symbol=normalized_symbol,
+            strategy_name=normalized_strategy,
+            interval=normalized_interval,
+        )
+        if degraded_services:
+            meta_flags.append("meta_services_degraded")
+            for service_name in degraded_services:
+                meta_flags.append(f"meta_service_degraded:{service_name}")
+            if state == "healthy":
+                state = "degraded"
+            risk_multiplier = min(risk_multiplier, 0.95)
+            if not warning_reason:
+                warning_reason = "meta_services_degraded:" + ",".join(degraded_services)
 
         if health_snapshot is not None:
             late_rate = float(health_snapshot.late_entry_rate)
@@ -10554,11 +11404,6 @@ class BacktestThread(QThread):
                                 symbol=symbol,
                                 interval=interval,
                             )
-                            if _is_1m_research_interval(interval):
-                                self.log_message.emit(
-                                    f"Research optimizer grid active: {symbol} {strategy_name} @ 1m "
-                                    f"(tag={RESEARCH_1M_GRID_PROFILE_TAG})."
-                                )
                             # _optimization_grid entries are capped by generator, but ensure global cap
                             if len(self._optimization_grid) > MAX_OPTIMIZATION_GRID_PROFILES:
                                 self._optimization_grid = _cap_profiles(
@@ -10734,12 +11579,6 @@ class BacktestThread(QThread):
                     symbol=self._symbol,
                     interval=self._interval,
                 )
-                if self._optimize_profile and _is_1m_research_interval(self._interval):
-                    self.log_message.emit(
-                        "Research optimizer grid active: "
-                        f"{self._symbol} {resolved_strategy_name} @ 1m "
-                        f"(tag={RESEARCH_1M_GRID_PROFILE_TAG})."
-                    )
                 self.log_message.emit(
                     f"Backtest strategy selected: {self._symbol} -> {resolved_strategy_name}"
                 )
@@ -12164,6 +13003,11 @@ class BacktestThread(QThread):
             raise RuntimeError(
                 "Optimization grid is empty after strategy/interval constraints."
             )
+        optimizer_profile_mode = resolve_optimizer_profile_mode_name()
+        if not self._is_quiet_mode():
+            self.log_message.emit(
+                f"{strategy_label} optimizer profile mode: {optimizer_profile_mode}"
+            )
 
         min_required_trades = _resolve_optimizer_min_total_trades_for_interval(self._interval)
         breakeven_constraint_text = _describe_optimizer_breakeven_constraint(strategy_name)
@@ -12189,14 +13033,7 @@ class BacktestThread(QThread):
             else None
         )
         if worker_cap_value is None:
-            if _is_1m_research_interval(self._interval):
-                worker_cap_value = (
-                    int(OPTIMIZER_1M_RESEARCH_PYTHON_MAX_WORKERS)
-                    if strategy_name == "ema_band_rejection"
-                    else int(OPTIMIZER_1M_RESEARCH_MAX_WORKERS)
-                )
-            else:
-                worker_cap_value = int(OPTIMIZER_GUI_DEFAULT_MAX_WORKERS)
+            worker_cap_value = int(OPTIMIZER_GUI_DEFAULT_MAX_WORKERS)
         configured_search_window = int(_resolve_optimizer_search_window_candles(self._interval))
         stage1_evaluated_profiles = 0
         stage2_evaluated_profiles = 0
@@ -12460,10 +13297,11 @@ class BacktestThread(QThread):
                         )
                     else:
                         self._clear_signal_caches_and_gc()
+                        min_avg_profit_per_trade_net_pct = _resolve_optimizer_min_avg_profit_per_trade_net_pct()
                         constraint_parts = [
                             f">= {min_required_trades} trades",
                             breakeven_constraint_text,
-                            f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                            f"avg_profit_per_trade_net_pct >= {min_avg_profit_per_trade_net_pct:.2f}%",
                         ]
                         raise RuntimeError(
                             "FAIL: Stage 2 verification produced no executable low-edge candidate: "
@@ -12472,10 +13310,11 @@ class BacktestThread(QThread):
                         )
                 else:
                     self._clear_signal_caches_and_gc()
+                    min_avg_profit_per_trade_net_pct = _resolve_optimizer_min_avg_profit_per_trade_net_pct()
                     constraint_parts = [
                         f">= {min_required_trades} trades",
                         breakeven_constraint_text,
-                        f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                        f"avg_profit_per_trade_net_pct >= {min_avg_profit_per_trade_net_pct:.2f}%",
                     ]
                     raise RuntimeError(
                         "Stage 2 verification produced no eligible profile: "
@@ -12611,10 +13450,11 @@ class BacktestThread(QThread):
                         ranked_optimization_summaries = low_edge_candidates
                     else:
                         self._clear_signal_caches_and_gc()
+                        min_avg_profit_per_trade_net_pct = _resolve_optimizer_min_avg_profit_per_trade_net_pct()
                         constraint_parts = [
                             f">= {min_required_trades} trades",
                             breakeven_constraint_text,
-                            f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                            f"avg_profit_per_trade_net_pct >= {min_avg_profit_per_trade_net_pct:.2f}%",
                         ]
                         raise RuntimeError(
                             "FAIL: No optimization profile passed stability constraints and no low-edge candidate had executable trades: "
@@ -12623,10 +13463,11 @@ class BacktestThread(QThread):
                         )
                 else:
                     self._clear_signal_caches_and_gc()
+                    min_avg_profit_per_trade_net_pct = _resolve_optimizer_min_avg_profit_per_trade_net_pct()
                     constraint_parts = [
                         f">= {min_required_trades} trades",
                         breakeven_constraint_text,
-                        f"avg_profit_per_trade_net_pct >= {OPTIMIZER_MIN_AVG_PROFIT_PER_TRADE_NET_PCT:.2f}%",
+                        f"avg_profit_per_trade_net_pct >= {min_avg_profit_per_trade_net_pct:.2f}%",
                     ]
                     raise RuntimeError(
                         "No optimization profile passed stability constraints: "
@@ -12946,7 +13787,7 @@ class BacktestThread(QThread):
 
         keep_top_count = min(
             len(ranked_optimization_summaries),
-            max(1, int(settings.trading.optimization_validation_top_n)),
+            max(1, int(_resolve_optimizer_validation_top_n())),
         )
         optimizer_effective_grid_bounds = _summarize_profile_grid_bounds(
             effective_grid_profiles_for_edge
@@ -12979,6 +13820,7 @@ class BacktestThread(QThread):
             {
                 "optimization_mode": True,
                 "optimizer_mode": str(optimizer_mode_label),
+                "optimizer_profile_mode": str(optimizer_profile_mode),
                 "optimizer_two_stage_enabled": bool(two_stage_enabled),
                 "optimizer_force_full_verification_for_winner": bool(force_full_verification_for_winner),
                 "best_profile": best_profile,
@@ -13015,9 +13857,7 @@ class BacktestThread(QThread):
                 "optimizer_low_edge": bool(optimizer_quality_status == "LOW_EDGE"),
                 "optimizer_low_edge_fallback_used": bool(optimizer_low_edge_fallback_used),
                 "optimizer_low_edge_reason": str(optimizer_low_edge_reason),
-                "optimizer_grid_profile_tag": str(
-                    _grid_profile_tag_for_interval(self._interval) or "standard_grid_v1"
-                ),
+                "optimizer_grid_profile_tag": "standard_grid_v1",
                 "optimizer_grid_total_before_guards": int(raw_grid_profile_count),
                 "optimizer_grid_total_after_guards": int(constrained_grid_profile_count),
                 "optimizer_effective_grid_profile_count": int(
@@ -13087,36 +13927,8 @@ class BacktestThread(QThread):
         blocked_signals = 0
         use_jit_strategy = _jit_strategy_code(strategy_name) != 0
         force_python_path = False
-        if _is_1m_research_interval(self._interval):
-            if strategy_name == "ema_band_rejection":
-                use_jit_strategy = False
-                force_python_path = True
-                self.log_message.emit(
-                    f"1m research grid active ({RESEARCH_1M_GRID_PROFILE_TAG}): "
-                    f"{self._symbol} {strategy_name} keeps python strategy-evaluation path "
-                    "(consistency lock)."
-                )
-            elif use_jit_strategy:
-                self.log_message.emit(
-                    f"1m research grid active ({RESEARCH_1M_GRID_PROFILE_TAG}): "
-                    f"{self._symbol} {strategy_name} uses JIT-accelerated optimizer path."
-                )
-            else:
-                force_python_path = True
-                self.log_message.emit(
-                    f"1m research grid active ({RESEARCH_1M_GRID_PROFILE_TAG}): "
-                    f"{self._symbol} {strategy_name} has no JIT kernel; using python strategy-evaluation path."
-                )
-
         runtime_worker_cap = worker_cap_override
-        if _is_1m_research_interval(self._interval):
-            suggested_cap = (
-                int(OPTIMIZER_1M_RESEARCH_PYTHON_MAX_WORKERS)
-                if force_python_path
-                else int(OPTIMIZER_1M_RESEARCH_MAX_WORKERS)
-            )
-        else:
-            suggested_cap = int(OPTIMIZER_GUI_DEFAULT_MAX_WORKERS)
+        suggested_cap = int(OPTIMIZER_GUI_DEFAULT_MAX_WORKERS)
         runtime_worker_cap = (
             suggested_cap
             if runtime_worker_cap is None
@@ -13359,10 +14171,7 @@ class BacktestThread(QThread):
         candles_payload = _candles_dataframe_to_worker_payload(candles_df)
         first_summary_logged = strategy_signal_cache is None
         completed_profiles = 0
-        if _is_1m_research_interval(self._interval):
-            chunk_min, chunk_max = 4, 6
-        else:
-            chunk_min, chunk_max = 8, 12
+        chunk_min, chunk_max = 8, 12
         target_chunk_size = int(
             math.ceil(
                 total_profiles

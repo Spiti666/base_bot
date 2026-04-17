@@ -1033,6 +1033,7 @@ class TradingSettings:
     optimization_validation_top_n: int = int(
         OPTIMIZATION_DEFAULTS["optimization_validation_top_n"]
     )
+    optimizer_profile_mode: str = "all_coins_pass1"
     # Universal risk grid used for large automated scans
     # This is applied across strategies when running the universal scan
     universal_stop_loss_pct_options: tuple[float, ...] = tuple(
@@ -1233,6 +1234,10 @@ class TradingSettings:
             raise ValueError("optimization_search_window_candles must be positive.")
         if self.optimization_validation_top_n <= 0:
             raise ValueError("optimization_validation_top_n must be positive.")
+        if self.optimizer_profile_mode not in {"all_coins_pass1", "strict_verification"}:
+            raise ValueError(
+                "optimizer_profile_mode must be one of {'all_coins_pass1', 'strict_verification'}."
+            )
         if not self.universal_chandelier_period_options:
             raise ValueError("universal_chandelier_period_options must not be empty.")
         if any(value <= 1 for value in self.universal_chandelier_period_options):

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from contextlib import suppress
 from dataclasses import dataclass
 import math
+import logging
 from pathlib import Path
+import traceback
 from typing import Any, Callable
 from datetime import UTC, datetime, timedelta
 
@@ -61,6 +63,8 @@ class PaperTradingEngine:
         fee_pct_override: float | None = None,
         enable_persistence: bool = True,
         persistence_path: str | Path = "paper_trades.json",
+        on_warning: Callable[[str, dict[str, Any]], None] | None = None,
+        on_critical_state: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._db = db
         self._trading_settings = settings.trading
@@ -81,6 +85,9 @@ class PaperTradingEngine:
         self.active_trades: list[PaperTrade] = []
         self._restored_trade_count = 0
         self._dynamic_risk_overrides: dict[int, tuple[float | None, float | None]] = {}
+        self._on_warning = on_warning
+        self._on_critical_state = on_critical_state
+        self._callback_failure_counts: Counter[str] = Counter()
 
         if self._fee_pct_override is not None and self._fee_pct_override < 0.0:
             raise ValueError("fee_pct_override must be greater than or equal to 0.")
@@ -108,6 +115,74 @@ class PaperTradingEngine:
         if self._fee_pct_override is not None:
             return float(self._fee_pct_override)
         return float(self._trading_settings.taker_fee_pct)
+
+    def _emit_warning(self, warning_code: str, payload: dict[str, Any]) -> None:
+        warning_payload = dict(payload)
+        warning_payload["warning_code"] = str(warning_code).strip()
+        logging.getLogger("paper_engine").warning(
+            "paper_engine warning code=%s payload=%s",
+            warning_payload["warning_code"],
+            warning_payload,
+        )
+        callback = self._on_warning
+        if callback is None:
+            return
+        try:
+            callback(warning_payload["warning_code"], warning_payload)
+        except Exception as exc:
+            self._callback_failure_counts["warning_callback"] += 1
+            logging.getLogger("paper_engine").exception(
+                "paper_engine warning callback failed for code=%s",
+                warning_payload["warning_code"],
+            )
+            stacktrace_text = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ).strip()
+            try:
+                self._emit_critical_state(
+                    "warning_callback_failed",
+                    {
+                        "reason": "warning_callback_failed",
+                        "warning_code": warning_payload["warning_code"],
+                        "warning_payload": warning_payload,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "exception_stacktrace": stacktrace_text,
+                        "callback_failure_count": int(
+                            self._callback_failure_counts["warning_callback"]
+                        ),
+                    },
+                )
+            except Exception:
+                logging.getLogger("paper_engine").exception(
+                    "paper_engine escalation failed after warning callback failure for code=%s",
+                    warning_payload["warning_code"],
+                )
+
+    def _emit_critical_state(self, state_code: str, payload: dict[str, Any]) -> None:
+        critical_payload = dict(payload)
+        critical_payload["state_code"] = str(state_code).strip()
+        logging.getLogger("paper_engine").error(
+            "paper_engine critical state=%s payload=%s",
+            critical_payload["state_code"],
+            critical_payload,
+        )
+        callback = self._on_critical_state
+        if callback is None:
+            return
+        try:
+            callback(critical_payload["state_code"], critical_payload)
+        except Exception as exc:
+            self._callback_failure_counts["critical_callback"] += 1
+            logging.getLogger("paper_engine").exception(
+                "paper_engine critical callback failed for state=%s",
+                critical_payload["state_code"],
+            )
+            raise RuntimeError(
+                "critical_state_callback_failed:"
+                f"{critical_payload['state_code']}:"
+                f"{int(self._callback_failure_counts['critical_callback'])}"
+            ) from exc
 
     def set_leverage(self, leverage: int | None) -> None:
         if leverage is None:
@@ -223,7 +298,26 @@ class PaperTradingEngine:
             profile_version=profile_version,
             review_status=review_status,
         )
-        trade_id = self._db.insert_trade(trade)
+        try:
+            trade_id = self._db.insert_trade(trade)
+        except Exception as exc:
+            stacktrace_text = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ).strip()
+            self._emit_critical_state(
+                "order_submit_failed",
+                {
+                    "symbol": str(symbol).strip().upper(),
+                    "interval": str(trade.timeframe or trade_settings.interval),
+                    "reason": "order_submit_failed",
+                    "message": str(exc),
+                    "exception_type": type(exc).__name__,
+                    "exception_stacktrace": stacktrace_text,
+                    "state": "position_state_unknown",
+                    "requires_reconcile": True,
+                },
+            )
+            raise
         resolved_dynamic_stop_loss_pct = self._resolve_dynamic_live_pct(dynamic_stop_loss_pct)
         resolved_dynamic_take_profit_pct = self._resolve_dynamic_live_pct(dynamic_take_profit_pct)
         if (
@@ -234,7 +328,30 @@ class PaperTradingEngine:
                 resolved_dynamic_stop_loss_pct,
                 resolved_dynamic_take_profit_pct,
             )
-        self._refresh_active_trade_storage()
+        try:
+            self._refresh_active_trade_storage()
+        except Exception as exc:
+            stacktrace_text = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ).strip()
+            self._emit_critical_state(
+                "reconcile_required",
+                {
+                    "symbol": str(symbol).strip().upper(),
+                    "interval": str(trade.timeframe or trade_settings.interval),
+                    "reason": "reconcile_required",
+                    "message": (
+                        "Trade persisted but runtime/persistence refresh failed after submit. "
+                        "Manual reconciliation required."
+                    ),
+                    "trade_id": int(trade_id),
+                    "exception_type": type(exc).__name__,
+                    "exception_stacktrace": stacktrace_text,
+                    "state": "position_state_unknown",
+                    "requires_reconcile": True,
+                },
+            )
+            raise
         return trade_id
 
     def update_positions(
@@ -256,10 +373,28 @@ class PaperTradingEngine:
                 dynamic_stop_loss_pct, dynamic_take_profit_pct = self._dynamic_risk_overrides[trade.id]
             new_high_water_mark = self._calculate_high_water_mark(trade, current_price)
             if new_high_water_mark != trade.high_water_mark:
-                self._db.update_trade(
+                high_water_mark_updated = self._db.update_trade(
                     trade.id,
                     PaperTradeUpdate(high_water_mark=new_high_water_mark),
                 )
+                if not high_water_mark_updated:
+                    message = (
+                        "Failed to persist high_water_mark while trade is open; "
+                        "position state may be inconsistent."
+                    )
+                    self._emit_critical_state(
+                        "position_state_unknown",
+                        {
+                            "symbol": str(trade.symbol).strip().upper(),
+                            "interval": str(self._resolve_trade_settings(trade.symbol).interval),
+                            "reason": "position_state_unknown",
+                            "message": message,
+                            "trade_id": int(trade.id),
+                            "state": "position_state_unknown",
+                            "requires_reconcile": True,
+                        },
+                    )
+                    raise RuntimeError(message)
                 trade = self._replace_high_water_mark(trade, new_high_water_mark)
                 persistence_dirty = True
 
@@ -292,6 +427,25 @@ class PaperTradingEngine:
                 closed_trade_ids.append(trade.id)
                 self._dynamic_risk_overrides.pop(trade.id, None)
                 persistence_dirty = True
+            else:
+                message = (
+                    f"Failed to persist exit for trade_id={int(trade.id)} "
+                    f"symbol={trade.symbol} status={close_status}."
+                )
+                self._emit_critical_state(
+                    "exit_persist_failed",
+                    {
+                        "symbol": str(trade.symbol).strip().upper(),
+                        "interval": str(self._resolve_trade_settings(trade.symbol).interval),
+                        "reason": "exit_persist_failed",
+                        "message": message,
+                        "trade_id": int(trade.id),
+                        "exit_status": str(close_status),
+                        "state": "position_state_unknown",
+                        "requires_reconcile": True,
+                    },
+                )
+                raise RuntimeError(message)
         if persistence_dirty:
             self._refresh_active_trade_storage()
         return closed_trade_ids
@@ -328,7 +482,24 @@ class PaperTradingEngine:
             self._dynamic_risk_overrides.pop(trade.id, None)
             self._refresh_active_trade_storage()
             return trade.id
-        return None
+        message = (
+            f"Failed to persist manual/strategy exit for trade_id={int(trade.id)} "
+            f"symbol={trade.symbol} status={status}."
+        )
+        self._emit_critical_state(
+            "exit_persist_failed",
+            {
+                "symbol": str(trade.symbol).strip().upper(),
+                "interval": str(self._resolve_trade_settings(trade.symbol).interval),
+                "reason": "exit_persist_failed",
+                "message": message,
+                "trade_id": int(trade.id),
+                "exit_status": str(status),
+                "state": "position_state_unknown",
+                "requires_reconcile": True,
+            },
+        )
+        raise RuntimeError(message)
 
     def run_historical_backtest(
         self,
@@ -732,14 +903,36 @@ class PaperTradingEngine:
     ) -> float:
         if trade.symbol == current_symbol:
             return float(current_price)
+        resolved_interval = str(self._resolve_trade_settings(trade.symbol).interval)
         try:
-            interval = self._resolve_trade_settings(trade.symbol).interval
-            candles = self._db.fetch_recent_candles(trade.symbol, interval, limit=1)
+            candles = self._db.fetch_recent_candles(trade.symbol, resolved_interval, limit=1)
             if candles:
                 return float(candles[-1].close)
-        except Exception:
-            pass
-        return float(trade.entry_price)
+            raise RuntimeError("missing_recent_mark_price")
+        except Exception as exc:
+            stacktrace_text = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ).strip()
+            self._emit_critical_state(
+                "position_state_unknown",
+                {
+                    "symbol": str(trade.symbol).strip().upper(),
+                    "interval": resolved_interval,
+                    "reason": "position_state_unknown",
+                    "message": (
+                        "Unable to resolve mark price for open trade during equity/risk calculation."
+                    ),
+                    "trade_id": int(trade.id),
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                    "exception_stacktrace": stacktrace_text,
+                    "state": "position_state_unknown",
+                    "requires_reconcile": True,
+                },
+            )
+            raise RuntimeError(
+                f"position_state_unknown:mark_price_unavailable symbol={trade.symbol}"
+            ) from exc
 
     def _is_symbol_in_cooldown(self, symbol: str) -> bool:
         cooldown_interval = self._interval_to_timedelta(self._resolve_trade_settings(symbol).interval)

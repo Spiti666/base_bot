@@ -1,0 +1,19 @@
+{
+  "date": "2026-04-16",
+  "generated_at": "2026-04-16T18:24:45.698628",
+  "highlights": [
+    "No rows available.",
+    "No rows available."
+  ],
+  "overview": {
+    "closed_trades": 0,
+    "daily_meta_pnl": 0.0,
+    "degraded_count": 0,
+    "healthy_count": 20,
+    "paper_only_count": 0,
+    "paused_count": 0,
+    "watchlist_count": 0
+  },
+  "report_type": "daily_meta_report",
+  "rows": []
+}
