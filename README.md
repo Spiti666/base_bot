@@ -1,6 +1,6 @@
 # Base Bot
 
-Stand: 2026-04-16
+Stand: 2026-04-18
 
 Trading-Workspace mit zwei operativen Bereichen:
 
@@ -11,7 +11,7 @@ Zentraler Einstieg ist die GUI (`gui.py`).
 
 ## TL;DR
 
-- Produktive Konfigurationswahrheit ist `config.py`.
+- Oeffentliche Konfig-API bleibt `config.py`, intern ist die Konfiguration modularisiert (`config_loader.py`, `config_schema.py`, `config_defaults.py`, `production_registry.py`, `runtime_profiles.py`).
 - Live handelt Paper-Trades auf Live-Marktdaten (keine echten Exchange-Orders).
 - Meta-Bot laeuft in Modus B: beobachten/bewerten/warnen, nur weiche Eingriffe im Normalbetrieb.
 - Harte Blockaden nur bei echten Notfaellen und harten Global-Guards.
@@ -39,7 +39,13 @@ python gui.py
 
 ## Konfigurationswahrheit
 
-Nur `config.py` ist produktiv verbindlich fuer Routing, Strategien, Intervalle, Profile und Backtest-Universum.
+`config.py` bleibt der stabile Einstiegspunkt fuer bestehende Imports, baut das finale Settings-Objekt aber aus getrennten Verantwortlichkeiten zusammen:
+
+- `config_defaults.py` - statische Basiswerte (Coins, Batch, Runtime-Dateipfad)
+- `config_schema.py` - Dataclasses + Validierung
+- `production_registry.py` - produktive Live-Registry
+- `runtime_profiles.py` - Runtime-Persistenz (`data/runtime_profiles.json`)
+- `config_loader.py` - Zusammensetzen der finalen Runtime-Settings
 
 Wichtige Schluessel:
 
@@ -51,10 +57,12 @@ Wichtige Schluessel:
 
 Hinweis:
 
-- `config.py` kann aus `config_sections/*` initialisieren, ueberschreibt aber die finale produktive Wahrheit im laufenden Projekt.
+- Runtime-Deployments (z. B. `migrate_to_live(...)`) schreiben in `data/runtime_profiles.json` statt Python-Source zu aendern.
+- `config_sections/*` bleibt kompatibel und bezieht `production_registry` jetzt aus dem zentralen Modul.
+- `configsections.*` (ohne Unterstrich) ist als Legacy-Kompatibilitaetsalias verfuegbar.
 - Legacy-/Archivdateien sind keine Runtime-Wahrheit.
 
-## Aktueller Produktionsstand (aus `config.py`)
+## Aktueller Produktionsstand (aus `config.py` / `data/runtime_profiles.json`)
 
 Live-Coins: 20
 
@@ -454,7 +462,12 @@ Wenn Trades unerwartet blockiert erscheinen:
 
 - `gui.py` - GUI Entrypoint + komplette Desktop-Oberflaeche
 - `main_engine.py` - Live/Backtest Runtime, Regime, Review, Health, Meta Policy, Reporting
-- `config.py` - produktive Runtime-Konfiguration
+- `config.py` - stabile Public-Konfig-API (kompatibler Einstiegspunkt)
+- `config_loader.py` - baut das finale `Settings`-Objekt
+- `config_schema.py` - Dataclasses und Validierungen
+- `config_defaults.py` - statische Defaults
+- `production_registry.py` - produktive Live-Strategie-/Risk-Registry
+- `runtime_profiles.py` - Laden/Speichern von `data/runtime_profiles.json`
 - `core/data/db.py` - DuckDB + Migrationen + Dataclasses + Fetch/Upsert APIs
 - `core/data/history.py` - Historien-Sync
 - `core/paper_trading/engine.py` - Entry/Exit-Execution, Intrabar-Exit-Logik

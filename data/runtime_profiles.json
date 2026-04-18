@@ -1,0 +1,247 @@
+{
+  "active_coins": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "1000PEPEUSDT",
+    "1000SHIBUSDT",
+    "BNBUSDT",
+    "AVAXUSDT",
+    "NEARUSDT",
+    "DOTUSDT",
+    "ARBUSDT",
+    "SUIUSDT",
+    "LTCUSDT",
+    "BCHUSDT",
+    "LINKUSDT",
+    "TRXUSDT",
+    "FILUSDT",
+    "AAVEUSDT"
+  ],
+  "backtest_only_coins": [
+    "TONUSDT",
+    "WLDUSDT",
+    "APTUSDT",
+    "FETUSDT",
+    "TAOUSDT",
+    "ENAUSDT",
+    "QNTUSDT",
+    "ETCUSDT",
+    "OPUSDT",
+    "SEIUSDT",
+    "INJUSDT",
+    "ATOMUSDT",
+    "POLUSDT",
+    "TIAUSDT",
+    "HBARUSDT",
+    "UNIUSDT",
+    "XLMUSDT",
+    "ALGOUSDT",
+    "ICPUSDT",
+    "RENDERUSDT",
+    "SANDUSDT",
+    "GALAUSDT",
+    "JUPUSDT",
+    "PENDLEUSDT",
+    "RUNEUSDT",
+    "CRVUSDT",
+    "ONDOUSDT",
+    "KASUSDT",
+    "IMXUSDT",
+    "PYTHUSDT",
+    "1000BONKUSDT",
+    "JASMYUSDT",
+    "LDOUSDT",
+    "STXUSDT",
+    "DYDXUSDT",
+    "ARUSDT",
+    "SUSHIUSDT",
+    "EGLDUSDT",
+    "COMPUSDT",
+    "THETAUSDT"
+  ],
+  "default_coin_profile_values": {
+    "1000PEPEUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 6.0,
+      "take_profit_pct": 15.0,
+      "trailing_activation_pct": 6.0,
+      "trailing_distance_pct": 2.0
+    },
+    "1000SHIBUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 6.0,
+      "take_profit_pct": 15.0,
+      "trailing_activation_pct": 6.0,
+      "trailing_distance_pct": 2.0
+    },
+    "ADAUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 5.0,
+      "take_profit_pct": 9.0,
+      "trailing_activation_pct": 4.0,
+      "trailing_distance_pct": 0.15
+    },
+    "AVAXUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 5.5,
+      "take_profit_pct": 9.0,
+      "trailing_activation_pct": 4.0,
+      "trailing_distance_pct": 0.15
+    },
+    "BNBUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 4.5,
+      "take_profit_pct": 8.0,
+      "trailing_activation_pct": 4.0,
+      "trailing_distance_pct": 0.2
+    },
+    "BTCUSDT": {
+      "default_leverage": 25,
+      "dual_thrust_k1": 0.5,
+      "dual_thrust_k2": 0.7,
+      "dual_thrust_period": 144.0,
+      "interval": "15m",
+      "stop_loss_pct": 5.0,
+      "take_profit_pct": 10.0,
+      "trailing_activation_pct": 10.0,
+      "trailing_distance_pct": 2.0
+    },
+    "DOGEUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 5.0,
+      "take_profit_pct": 8.0,
+      "trailing_activation_pct": 5.0,
+      "trailing_distance_pct": 1.0
+    },
+    "DOTUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 5.0,
+      "take_profit_pct": 9.0,
+      "trailing_activation_pct": 4.0,
+      "trailing_distance_pct": 0.15
+    },
+    "ETHUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 4.5,
+      "take_profit_pct": 7.0,
+      "trailing_activation_pct": 3.5,
+      "trailing_distance_pct": 0.2
+    },
+    "NEARUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 10.0,
+      "take_profit_pct": 15.0,
+      "trailing_activation_pct": 8.0,
+      "trailing_distance_pct": 4.0
+    },
+    "SOLUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 5.5,
+      "take_profit_pct": 10.0,
+      "trailing_activation_pct": 4.5,
+      "trailing_distance_pct": 0.15
+    },
+    "XRPUSDT": {
+      "default_leverage": 25,
+      "interval": "15m",
+      "stop_loss_pct": 4.0,
+      "take_profit_pct": 6.0,
+      "trailing_activation_pct": 3.0,
+      "trailing_distance_pct": 0.25
+    }
+  },
+  "default_coin_strategies": {
+    "1000PEPEUSDT": "dual_thrust_breakout",
+    "1000SHIBUSDT": "dual_thrust",
+    "ADAUSDT": "frama_cross",
+    "AVAXUSDT": "dual_thrust_breakout",
+    "BNBUSDT": "dual_thrust_breakout",
+    "BTCUSDT": "dual_thrust_breakout",
+    "DOGEUSDT": "dual_thrust_breakout",
+    "DOTUSDT": "dual_thrust_breakout",
+    "ETHUSDT": "dual_thrust",
+    "NEARUSDT": "dual_thrust",
+    "SOLUSDT": "frama_cross",
+    "SUIUSDT": "dual_thrust_breakout",
+    "XRPUSDT": "dual_thrust_breakout"
+  },
+  "default_coin_strategy_params": {
+    "1000PEPEUSDT": {
+      "dual_thrust_k1": 0.6,
+      "dual_thrust_k2": 0.6,
+      "dual_thrust_period": 89.0
+    },
+    "1000SHIBUSDT": {
+      "dual_thrust_k1": 0.6,
+      "dual_thrust_k2": 0.4,
+      "dual_thrust_period": 89.0
+    },
+    "ADAUSDT": {
+      "frama_fast_period": 9.0,
+      "frama_slow_period": 40.0
+    },
+    "AVAXUSDT": {
+      "dual_thrust_k1": 0.4,
+      "dual_thrust_k2": 0.6,
+      "dual_thrust_period": 144.0
+    },
+    "BNBUSDT": {
+      "dual_thrust_k1": 0.6,
+      "dual_thrust_k2": 0.7,
+      "dual_thrust_period": 89.0
+    },
+    "BTCUSDT": {
+      "dual_thrust_k1": 0.5,
+      "dual_thrust_k2": 0.7,
+      "dual_thrust_period": 144.0
+    },
+    "DOGEUSDT": {
+      "dual_thrust_k1": 0.7,
+      "dual_thrust_k2": 0.5,
+      "dual_thrust_period": 144.0
+    },
+    "DOTUSDT": {
+      "dual_thrust_k1": 0.6,
+      "dual_thrust_k2": 0.6,
+      "dual_thrust_period": 55.0
+    },
+    "ETHUSDT": {
+      "dual_thrust_k1": 0.6,
+      "dual_thrust_k2": 0.6,
+      "dual_thrust_period": 34.0
+    },
+    "NEARUSDT": {
+      "dual_thrust_k1": 0.6,
+      "dual_thrust_k2": 0.6,
+      "dual_thrust_period": 89.0
+    },
+    "SOLUSDT": {
+      "frama_fast_period": 6.0,
+      "frama_slow_period": 40.0
+    },
+    "SUIUSDT": {
+      "dual_thrust_k1": 0.7,
+      "dual_thrust_k2": 0.4,
+      "dual_thrust_period": 89.0
+    },
+    "XRPUSDT": {
+      "dual_thrust_k1": 0.6,
+      "dual_thrust_k2": 0.4,
+      "dual_thrust_period": 144.0
+    }
+  }
+}
